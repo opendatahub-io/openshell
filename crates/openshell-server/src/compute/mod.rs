@@ -366,7 +366,7 @@ impl ComputeRuntime {
         supervisor_sessions: Arc<SupervisorSessionRegistry>,
     ) -> Result<Self, ComputeError> {
         let driver = Arc::new(
-            DockerComputeDriver::new(&config, &docker_config, supervisor_sessions.clone())
+            DockerComputeDriver::new(&config, &docker_config)
                 .await
                 .map_err(|err| ComputeError::Message(err.to_string()))?,
         );
@@ -1169,9 +1169,10 @@ impl ComputeRuntime {
             .map(decode_sandbox_record)
             .transpose()?;
 
-        match existing.as_ref() {
-            None => self.create_sandbox_record(incoming).await,
-            Some(_) => self.update_sandbox_record(incoming).await,
+        match (existing.as_ref(), incoming.status.as_ref()) {
+            (None, _) => self.create_sandbox_record(incoming).await,
+            (Some(_), None) => Ok(()), // session events are owned by set_supervisor_session_state
+            (Some(_), Some(_)) => self.update_sandbox_record(incoming).await,
         }
     }
 
@@ -1180,24 +1181,24 @@ impl ComputeRuntime {
         use crate::persistence::WriteCondition;
         let now_ms = openshell_core::time::now_ms();
 
+        // supervisor_sessions is process-local. In HA deployments this gateway may not
+        // own the active supervisor session. A replica that does not own the session will
+        // hold the public phase at Provisioning; the owning replica's
+        // supervisor_session_connected write to the shared store will propagate through
+        // the reconcile loop.
         let session_connected = self.supervisor_sessions.has_session(&incoming.id);
-        let mut phase = derive_phase(incoming.status.as_ref());
         let sandbox_name = incoming.name.clone();
 
-        let supervisor_promoted = session_connected
-            && matches!(phase, SandboxPhase::Provisioning | SandboxPhase::Unknown);
-        if supervisor_promoted {
-            phase = SandboxPhase::Ready;
-        }
-
-        let mut status = incoming
-            .status
-            .as_ref()
-            .map(|s| public_status_from_driver(s, phase, 0));
-        rewrite_user_facing_conditions(&mut status, None);
-        if supervisor_promoted {
-            ensure_supervisor_ready_status(&mut status, &sandbox_name);
-        }
+        let (phase, status) =
+            incoming
+                .status
+                .as_ref()
+                .map_or((SandboxPhase::Provisioning, None), |s| {
+                    let composed = ComposedPhase::new(s, session_connected);
+                    let mut status = Some(public_status_from_driver(s, composed.phase, 0));
+                    composed.apply_readiness_conditions(&mut status, &sandbox_name, None);
+                    (composed.phase, status)
+                });
 
         let workspace = incoming.workspace.clone();
         let mut sandbox = Sandbox {
@@ -1254,35 +1255,30 @@ impl ComputeRuntime {
 
     // Subsequent driver snapshot for an existing sandbox: apply a single-attempt CAS update.
     // On conflict the next watch event will naturally retry.
+    // Caller guarantees incoming.status is Some.
     async fn update_sandbox_record(&self, incoming: DriverSandbox) -> Result<(), String> {
         let session_connected = self.supervisor_sessions.has_session(&incoming.id);
         let sandbox_name = incoming.name.clone();
+        let incoming_status = incoming
+            .status
+            .as_ref()
+            .expect("caller guarantees status is Some");
 
         let sandbox = self
             .store
             .update_message_cas::<Sandbox, _>(&incoming.id, 0, |sandbox| {
                 let old_phase =
                     SandboxPhase::try_from(sandbox.phase()).unwrap_or(SandboxPhase::Unknown);
-                let mut phase = incoming
-                    .status
-                    .as_ref()
-                    .map_or(old_phase, |status| derive_phase(Some(status)));
-                let supervisor_promoted = session_connected
-                    && matches!(phase, SandboxPhase::Provisioning | SandboxPhase::Unknown);
-                if supervisor_promoted {
-                    phase = SandboxPhase::Ready;
-                }
+
+                let composed = ComposedPhase::new(incoming_status, session_connected);
 
                 let cpv = sandbox.current_policy_version();
-                let mut status = incoming
-                    .status
-                    .as_ref()
-                    .map(|s| public_status_from_driver(s, phase, cpv))
-                    .or_else(|| sandbox.status.clone());
-                rewrite_user_facing_conditions(&mut status, sandbox.spec.as_ref());
-                if supervisor_promoted {
-                    ensure_supervisor_ready_status(&mut status, &sandbox_name);
-                }
+                let mut status = Some(public_status_from_driver(incoming_status, composed.phase, cpv));
+                composed.apply_readiness_conditions(
+                    &mut status,
+                    &sandbox_name,
+                    sandbox.spec.as_ref(),
+                );
 
                 if let Some(s) = status.as_mut()
                     && s.sandbox_name.is_empty()
@@ -1290,17 +1286,17 @@ impl ComputeRuntime {
                     s.sandbox_name.clone_from(&sandbox_name);
                 }
 
-                if old_phase != phase {
+                if old_phase != composed.phase {
                     info!(
                         sandbox_id = %incoming.id,
                         sandbox_name = %sandbox_name,
                         old_phase = ?old_phase,
-                        new_phase = ?phase,
+                        new_phase = ?composed.phase,
                         "Sandbox phase changed"
                     );
                 }
 
-                if phase == SandboxPhase::Error
+                if composed.phase == SandboxPhase::Error
                     && let Some(ref status) = status
                 {
                     for condition in &status.conditions {
@@ -1323,7 +1319,7 @@ impl ComputeRuntime {
                     metadata.name.clone_from(&sandbox_name);
                 }
                 sandbox.status = status;
-                sandbox.set_phase(phase as i32);
+                sandbox.set_phase(composed.phase as i32);
                 sandbox.set_current_policy_version(cpv);
             })
             .await
@@ -1973,6 +1969,48 @@ fn ensure_supervisor_ready_status(status: &mut Option<SandboxStatus>, sandbox_na
             last_transition_time: String::new(),
         },
     );
+}
+
+/// Compose the public `SandboxPhase` from backend driver state and supervisor session presence.
+///
+/// The readiness decision is a gateway-owned safety invariant: `SandboxPhase::Ready` means
+/// "usable through this gateway." The driver contract is the extension point for custom backend
+/// readiness semantics. RFC-0010 lifecycle hooks observe this decision via `post_commit`; they
+/// do not modify it.
+struct ComposedPhase {
+    phase: SandboxPhase,
+    session_connected: bool,
+}
+
+impl ComposedPhase {
+    fn new(incoming_status: &DriverSandboxStatus, session_connected: bool) -> Self {
+        let backend_phase = derive_phase(Some(incoming_status));
+        // A live supervisor session is a stronger readiness signal than the backend phase.
+        // set_supervisor_session_state may have already promoted the store record to Ready
+        // before this driver snapshot arrived. Keep Ready rather than letting a lagging
+        // backend phase overwrite it.
+        let phase = match backend_phase {
+            SandboxPhase::Error | SandboxPhase::Deleting => backend_phase,
+            _ if session_connected => SandboxPhase::Ready,
+            _ => SandboxPhase::Provisioning,
+        };
+        Self {
+            phase,
+            session_connected,
+        }
+    }
+
+    fn apply_readiness_conditions(
+        &self,
+        status: &mut Option<SandboxStatus>,
+        sandbox_name: &str,
+        spec: Option<&SandboxSpec>,
+    ) {
+        rewrite_user_facing_conditions(status, spec);
+        if self.session_connected && self.phase == SandboxPhase::Ready {
+            ensure_supervisor_ready_status(status, sandbox_name);
+        }
+    }
 }
 
 fn ensure_supervisor_not_ready_status(status: &mut Option<SandboxStatus>, sandbox_name: &str) {
@@ -2913,6 +2951,10 @@ mod tests {
 
     #[tokio::test]
     async fn apply_sandbox_update_allows_delete_failures_to_recover() {
+        // A previously-Deleting sandbox that receives a Ready driver snapshot (delete failed,
+        // container is still running) without a supervisor session stays at Provisioning.
+        // The gateway composition rule treats backend-ready + no session as Provisioning, not Ready.
+        // Recovery to Ready requires the supervisor to reconnect.
         let runtime = test_runtime(Arc::new(TestDriver::default())).await;
         let sandbox = sandbox_record("sb-1", "sandbox-a", SandboxPhase::Deleting);
         runtime.store.put_message(&sandbox).await.unwrap();
@@ -2931,8 +2973,8 @@ mod tests {
                     conditions: vec![DriverCondition {
                         r#type: "Ready".to_string(),
                         status: "True".to_string(),
-                        reason: "DependenciesReady".to_string(),
-                        message: "Pod is Ready".to_string(),
+                        reason: "BackendReady".to_string(),
+                        message: "Container is running".to_string(),
                         last_transition_time: String::new(),
                     }],
                     deleting: false,
@@ -2950,8 +2992,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             SandboxPhase::try_from(stored.phase()).unwrap(),
-            SandboxPhase::Ready
+            SandboxPhase::Provisioning
         );
+        let ready_condition = stored
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.iter().find(|c| c.r#type == "Ready"))
+            .unwrap();
+        assert_eq!(ready_condition.reason, "BackendReady");
     }
 
     #[tokio::test]
@@ -3127,6 +3175,282 @@ mod tests {
         assert_eq!(ready.message, "Supervisor session disconnected");
     }
 
+    // --- Composition rule tests ---
+
+    fn make_ready_driver_status() -> DriverSandboxStatus {
+        DriverSandboxStatus {
+            sandbox_name: "test".to_string(),
+            instance_id: "test-pod".to_string(),
+            agent_fd: String::new(),
+            sandbox_fd: String::new(),
+            conditions: vec![DriverCondition {
+                r#type: "Ready".to_string(),
+                status: "True".to_string(),
+                reason: "BackendReady".to_string(),
+                message: "Container is running".to_string(),
+                last_transition_time: String::new(),
+            }],
+            deleting: false,
+        }
+    }
+
+    fn make_deleting_driver_status() -> DriverSandboxStatus {
+        DriverSandboxStatus {
+            sandbox_name: "test".to_string(),
+            instance_id: "test-pod".to_string(),
+            agent_fd: String::new(),
+            sandbox_fd: String::new(),
+            conditions: vec![DriverCondition {
+                r#type: "Ready".to_string(),
+                status: "False".to_string(),
+                reason: "Deleting".to_string(),
+                message: "Container is being removed".to_string(),
+                last_transition_time: String::new(),
+            }],
+            deleting: true,
+        }
+    }
+
+    fn ready_condition(sandbox: &Sandbox) -> Option<&SandboxCondition> {
+        sandbox
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.iter().find(|c| c.r#type == "Ready"))
+    }
+
+    #[tokio::test]
+    async fn backend_ready_without_supervisor_stays_provisioning() {
+        let runtime = test_runtime(Arc::new(TestDriver::default())).await;
+        let sandbox = sandbox_record("sb-1", "sandbox-a", SandboxPhase::Provisioning);
+        runtime.store.put_message(&sandbox).await.unwrap();
+
+        runtime
+            .apply_sandbox_update(DriverSandbox {
+                id: "sb-1".to_string(),
+                name: "sandbox-a".to_string(),
+                namespace: "default".to_string(),
+                workspace: String::new(),
+                spec: None,
+                status: Some(make_ready_driver_status()),
+            })
+            .await
+            .unwrap();
+
+        let stored = runtime
+            .store
+            .get_message::<Sandbox>("sb-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            SandboxPhase::try_from(stored.phase()).unwrap(),
+            SandboxPhase::Provisioning
+        );
+        let cond = ready_condition(&stored).unwrap();
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "BackendReady");
+    }
+
+    #[tokio::test]
+    async fn backend_ready_with_supervisor_becomes_ready() {
+        let runtime = test_runtime(Arc::new(TestDriver::default())).await;
+        let sandbox = sandbox_record("sb-1", "sandbox-a", SandboxPhase::Provisioning);
+        runtime.store.put_message(&sandbox).await.unwrap();
+        register_test_supervisor_session(&runtime, "sb-1");
+
+        runtime
+            .apply_sandbox_update(DriverSandbox {
+                id: "sb-1".to_string(),
+                name: "sandbox-a".to_string(),
+                namespace: "default".to_string(),
+                workspace: String::new(),
+                spec: None,
+                status: Some(make_ready_driver_status()),
+            })
+            .await
+            .unwrap();
+
+        let stored = runtime
+            .store
+            .get_message::<Sandbox>("sb-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            SandboxPhase::try_from(stored.phase()).unwrap(),
+            SandboxPhase::Ready
+        );
+        let cond = ready_condition(&stored).unwrap();
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "DependenciesReady");
+    }
+
+    #[tokio::test]
+    async fn backend_not_ready_with_supervisor_becomes_ready() {
+        // VM path: supervisor connects before backend reports Ready.
+        let runtime = test_runtime(Arc::new(TestDriver::default())).await;
+        let sandbox = sandbox_record("sb-1", "sandbox-a", SandboxPhase::Provisioning);
+        runtime.store.put_message(&sandbox).await.unwrap();
+        register_test_supervisor_session(&runtime, "sb-1");
+
+        runtime
+            .apply_sandbox_update(DriverSandbox {
+                id: "sb-1".to_string(),
+                name: "sandbox-a".to_string(),
+                namespace: "default".to_string(),
+                workspace: String::new(),
+                spec: None,
+                status: Some(make_driver_status(make_driver_condition(
+                    "Starting",
+                    "VM is starting",
+                ))),
+            })
+            .await
+            .unwrap();
+
+        let stored = runtime
+            .store
+            .get_message::<Sandbox>("sb-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            SandboxPhase::try_from(stored.phase()).unwrap(),
+            SandboxPhase::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_ignores_supervisor_session() {
+        let runtime = test_runtime(Arc::new(TestDriver::default())).await;
+        let sandbox = sandbox_record("sb-1", "sandbox-a", SandboxPhase::Provisioning);
+        runtime.store.put_message(&sandbox).await.unwrap();
+        register_test_supervisor_session(&runtime, "sb-1");
+
+        runtime
+            .apply_sandbox_update(DriverSandbox {
+                id: "sb-1".to_string(),
+                name: "sandbox-a".to_string(),
+                namespace: "default".to_string(),
+                workspace: "default".to_string(),
+                spec: None,
+                status: Some(make_driver_status(make_driver_condition(
+                    "ImagePullBackOff",
+                    "Failed to pull image",
+                ))),
+            })
+            .await
+            .unwrap();
+
+        let stored = runtime
+            .store
+            .get_message::<Sandbox>("sb-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            SandboxPhase::try_from(stored.phase()).unwrap(),
+            SandboxPhase::Error
+        );
+    }
+
+    #[tokio::test]
+    async fn later_driver_ready_without_session_does_not_repromote() {
+        // Re-promotion bug fix: backend-ready snapshot after session disconnect must not
+        // re-promote the sandbox to Ready.
+        let runtime = test_runtime(Arc::new(TestDriver::default())).await;
+        let sandbox = sandbox_record("sb-1", "sandbox-a", SandboxPhase::Provisioning);
+        runtime.store.put_message(&sandbox).await.unwrap();
+
+        // Promote to Ready via supervisor session connect.
+        register_test_supervisor_session(&runtime, "sb-1");
+        runtime.supervisor_session_connected("sb-1").await.unwrap();
+        let stored = runtime
+            .store
+            .get_message::<Sandbox>("sb-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            SandboxPhase::try_from(stored.phase()).unwrap(),
+            SandboxPhase::Ready
+        );
+
+        // Session drops.
+        runtime.supervisor_sessions.cleanup_sandbox("sb-1");
+        runtime
+            .supervisor_session_disconnected("sb-1")
+            .await
+            .unwrap();
+        let stored = runtime
+            .store
+            .get_message::<Sandbox>("sb-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            SandboxPhase::try_from(stored.phase()).unwrap(),
+            SandboxPhase::Provisioning
+        );
+
+        // Backend-ready snapshot arrives with no active session — must not re-promote.
+        runtime
+            .apply_sandbox_update(DriverSandbox {
+                id: "sb-1".to_string(),
+                name: "sandbox-a".to_string(),
+                namespace: "default".to_string(),
+                workspace: "default".to_string(),
+                spec: None,
+                status: Some(make_ready_driver_status()),
+            })
+            .await
+            .unwrap();
+
+        let stored = runtime
+            .store
+            .get_message::<Sandbox>("sb-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            SandboxPhase::try_from(stored.phase()).unwrap(),
+            SandboxPhase::Provisioning
+        );
+        let cond = ready_condition(&stored).unwrap();
+        assert_eq!(cond.reason, "BackendReady");
+    }
+
+    #[tokio::test]
+    async fn deleting_ignores_supervisor_session() {
+        let runtime = test_runtime(Arc::new(TestDriver::default())).await;
+        let sandbox = sandbox_record("sb-1", "sandbox-a", SandboxPhase::Provisioning);
+        runtime.store.put_message(&sandbox).await.unwrap();
+        register_test_supervisor_session(&runtime, "sb-1");
+
+        runtime
+            .apply_sandbox_update(DriverSandbox {
+                id: "sb-1".to_string(),
+                name: "sandbox-a".to_string(),
+                namespace: "default".to_string(),
+                workspace: "default".to_string(),
+                spec: None,
+                status: Some(make_deleting_driver_status()),
+            })
+            .await
+            .unwrap();
+
+        let stored = runtime
+            .store
+            .get_message::<Sandbox>("sb-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            SandboxPhase::try_from(stored.phase()).unwrap(),
+            SandboxPhase::Deleting
+        );
+    }
+
     #[tokio::test]
     async fn reconcile_store_with_backend_applies_driver_snapshot() {
         let runtime = test_runtime(Arc::new(TestDriver {
@@ -3186,6 +3510,7 @@ mod tests {
         };
         runtime.store.put_message(&sandbox).await.unwrap();
         runtime.sandbox_index.update_from_sandbox(&sandbox);
+        register_test_supervisor_session(&runtime, "sb-1");
 
         runtime
             .reconcile_store_with_backend(Duration::ZERO)
@@ -3284,6 +3609,7 @@ mod tests {
         let sandbox = sandbox_record("sb-1", "sandbox-a", SandboxPhase::Provisioning);
         runtime.store.put_message(&sandbox).await.unwrap();
         runtime.sandbox_index.update_from_sandbox(&sandbox);
+        register_test_supervisor_session(&runtime, "sb-1");
 
         runtime
             .reconcile_store_with_backend(Duration::ZERO)
