@@ -1169,83 +1169,92 @@ impl ComputeRuntime {
             .map(decode_sandbox_record)
             .transpose()?;
 
-        // If no existing record, create initial sandbox (first watch event for this sandbox)
-        if existing.is_none() {
-            use crate::persistence::WriteCondition;
-            let now_ms = openshell_core::time::now_ms();
+        match existing.as_ref() {
+            None => self.create_sandbox_record(incoming).await,
+            Some(_) => self.update_sandbox_record(incoming).await,
+        }
+    }
 
-            let session_connected = self.supervisor_sessions.has_session(&incoming.id);
-            let mut phase = derive_phase(incoming.status.as_ref());
-            let sandbox_name = incoming.name.clone();
+    // First watch event for a sandbox: build the initial record and persist it.
+    async fn create_sandbox_record(&self, incoming: DriverSandbox) -> Result<(), String> {
+        use crate::persistence::WriteCondition;
+        let now_ms = openshell_core::time::now_ms();
 
-            let supervisor_promoted = session_connected
-                && matches!(phase, SandboxPhase::Provisioning | SandboxPhase::Unknown);
-            if supervisor_promoted {
-                phase = SandboxPhase::Ready;
-            }
+        let session_connected = self.supervisor_sessions.has_session(&incoming.id);
+        let mut phase = derive_phase(incoming.status.as_ref());
+        let sandbox_name = incoming.name.clone();
 
-            let mut status = incoming
-                .status
-                .as_ref()
-                .map(|s| public_status_from_driver(s, phase, 0));
-            rewrite_user_facing_conditions(&mut status, None);
-            if supervisor_promoted {
-                ensure_supervisor_ready_status(&mut status, &sandbox_name);
-            }
-            let workspace = incoming.workspace.clone();
-            let mut sandbox = Sandbox {
-                metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
-                    id: incoming.id.clone(),
-                    name: sandbox_name,
-                    created_at_ms: now_ms,
-                    labels: HashMap::new(),
-                    resource_version: 0,
-                    annotations: HashMap::new(),
-                    workspace,
-                    deletion_timestamp_ms: 0,
-                }),
-                spec: None,
-                status,
-            };
-            sandbox.set_phase(phase as i32);
-
-            let labels_map = sandbox.object_labels();
-            let labels_json = if labels_map.as_ref().is_none_or(HashMap::is_empty) {
-                None
-            } else {
-                Some(
-                    serde_json::to_string(&labels_map)
-                        .map_err(|e| format!("failed to serialize labels: {e}"))?,
-                )
-            };
-            self.store
-                .put_if(
-                    Sandbox::object_type(),
-                    &incoming.id,
-                    sandbox.object_name(),
-                    sandbox.object_workspace(),
-                    &sandbox.encode_to_vec(),
-                    labels_json.as_deref(),
-                    WriteCondition::MustCreate,
-                )
-                .await
-                .map_err(|e| match e {
-                    crate::persistence::PersistenceError::Conflict {
-                        current_resource_version,
-                    } => format!(
-                        "concurrent modification detected during sandbox creation (current resource_version: {})",
-                        current_resource_version
-                            .map_or_else(|| "unknown".to_string(), |v| v.to_string())
-                    ),
-                    other => other.to_string(),
-                })?;
-
-            self.sandbox_index.update_from_sandbox(&sandbox);
-            self.sandbox_watch_bus.notify(sandbox.object_id());
-            return Ok(());
+        let supervisor_promoted = session_connected
+            && matches!(phase, SandboxPhase::Provisioning | SandboxPhase::Unknown);
+        if supervisor_promoted {
+            phase = SandboxPhase::Ready;
         }
 
-        // Single-attempt CAS: on conflict, the next watch event will naturally retry
+        let mut status = incoming
+            .status
+            .as_ref()
+            .map(|s| public_status_from_driver(s, phase, 0));
+        rewrite_user_facing_conditions(&mut status, None);
+        if supervisor_promoted {
+            ensure_supervisor_ready_status(&mut status, &sandbox_name);
+        }
+
+        let workspace = incoming.workspace.clone();
+        let mut sandbox = Sandbox {
+            metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                id: incoming.id.clone(),
+                name: sandbox_name,
+                created_at_ms: now_ms,
+                labels: HashMap::new(),
+                resource_version: 0,
+                annotations: HashMap::new(),
+                workspace,
+                deletion_timestamp_ms: 0,
+            }),
+            spec: None,
+            status,
+        };
+        sandbox.set_phase(phase as i32);
+
+        let labels_map = sandbox.object_labels();
+        let labels_json = if labels_map.as_ref().is_none_or(HashMap::is_empty) {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&labels_map)
+                    .map_err(|e| format!("failed to serialize labels: {e}"))?,
+            )
+        };
+        self.store
+            .put_if(
+                Sandbox::object_type(),
+                &incoming.id,
+                sandbox.object_name(),
+                sandbox.object_workspace(),
+                &sandbox.encode_to_vec(),
+                labels_json.as_deref(),
+                WriteCondition::MustCreate,
+            )
+            .await
+            .map_err(|e| match e {
+                crate::persistence::PersistenceError::Conflict {
+                    current_resource_version,
+                } => format!(
+                    "concurrent modification detected during sandbox creation (current resource_version: {})",
+                    current_resource_version
+                        .map_or_else(|| "unknown".to_string(), |v| v.to_string())
+                ),
+                other => other.to_string(),
+            })?;
+
+        self.sandbox_index.update_from_sandbox(&sandbox);
+        self.sandbox_watch_bus.notify(sandbox.object_id());
+        Ok(())
+    }
+
+    // Subsequent driver snapshot for an existing sandbox: apply a single-attempt CAS update.
+    // On conflict the next watch event will naturally retry.
+    async fn update_sandbox_record(&self, incoming: DriverSandbox) -> Result<(), String> {
         let session_connected = self.supervisor_sessions.has_session(&incoming.id);
         let sandbox_name = incoming.name.clone();
 
@@ -1310,7 +1319,6 @@ impl ComputeRuntime {
                     }
                 }
 
-                // Update metadata fields
                 if let Some(metadata) = sandbox.metadata.as_mut() {
                     metadata.name.clone_from(&sandbox_name);
                 }
