@@ -345,6 +345,14 @@ Podman resources after out-of-band container removal or label drift.
 | `OPENSHELL_PODMAN_TLS_CA` | `--podman-tls-ca` | unset | Host path to the CA certificate mounted for sandbox mTLS. |
 | `OPENSHELL_PODMAN_TLS_CERT` | `--podman-tls-cert` | unset | Host path to the client certificate mounted for sandbox mTLS. |
 | `OPENSHELL_PODMAN_TLS_KEY` | `--podman-tls-key` | unset | Host path to the client private key mounted for sandbox mTLS. |
+| `OPENSHELL_SANDBOX_HTTPS_PROXY` | `--sandbox-https-proxy` | unset | Corporate forward proxy URL injected into sandbox containers as `HTTPS_PROXY`. The in-container supervisor chains policy-approved upstream dials through it with HTTP CONNECT. Only `http://` proxy URLs are supported. |
+| `OPENSHELL_SANDBOX_HTTP_PROXY` | `--sandbox-http-proxy` | unset | Corporate forward proxy URL injected as `HTTP_PROXY` for plain HTTP requests. |
+| `OPENSHELL_SANDBOX_NO_PROXY` | `--sandbox-no-proxy` | unset | Comma-separated `NO_PROXY` list (hostnames, domain suffixes, IPs, CIDRs) dialed directly instead of through the corporate proxy. |
+
+Through the gateway, the same settings are the `https_proxy`, `http_proxy`, and
+`no_proxy` keys under `[openshell.drivers.podman]`; see
+`docs/reference/gateway-config.mdx`. Per-sandbox environment values take
+precedence over these operator defaults.
 
 ## Rootless-Specific Adaptations
 

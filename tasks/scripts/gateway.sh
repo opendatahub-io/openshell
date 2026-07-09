@@ -352,6 +352,15 @@ EOF
     if [[ -n "${GRPC_ENDPOINT}" ]]; then
       printf 'grpc_endpoint = "%s"\n' "${GRPC_ENDPOINT}" >>"${CONFIG_PATH}"
     fi
+    if [[ -n "${OPENSHELL_SANDBOX_HTTPS_PROXY:-}" ]]; then
+      printf 'https_proxy = "%s"\n' "${OPENSHELL_SANDBOX_HTTPS_PROXY}" >>"${CONFIG_PATH}"
+    fi
+    if [[ -n "${OPENSHELL_SANDBOX_HTTP_PROXY:-}" ]]; then
+      printf 'http_proxy = "%s"\n' "${OPENSHELL_SANDBOX_HTTP_PROXY}" >>"${CONFIG_PATH}"
+    fi
+    if [[ -n "${OPENSHELL_SANDBOX_NO_PROXY:-}" ]]; then
+      printf 'no_proxy = "%s"\n' "${OPENSHELL_SANDBOX_NO_PROXY}" >>"${CONFIG_PATH}"
+    fi
     ;;
 esac
 

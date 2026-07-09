@@ -7,6 +7,7 @@ use crate::identity::BinaryIdentityCache;
 use crate::l7::tls::ProxyTlsState;
 use crate::opa::{NetworkAction, OpaEngine, PolicyGenerationGuard};
 use crate::policy_local::{POLICY_LOCAL_HOST, PolicyLocalContext};
+use crate::upstream_proxy::{self, UpstreamProxyConfig, UpstreamScheme};
 use miette::{IntoDiagnostic, Result};
 use openshell_core::activity::{ActivitySender, try_record_activity};
 use openshell_core::denial::DenialEvent;
@@ -240,6 +241,24 @@ impl ProxyHandle {
             );
         }
 
+        // Corporate egress proxy configured on the supervisor's own
+        // environment (HTTPS_PROXY/HTTP_PROXY/NO_PROXY). Read once at startup;
+        // the workload cannot influence the supervisor's environment.
+        let upstream_proxy: Arc<Option<UpstreamProxyConfig>> =
+            Arc::new(UpstreamProxyConfig::from_env());
+        if let Some(cfg) = upstream_proxy.as_ref() {
+            let event = openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
+                .severity(SeverityId::Informational)
+                .status(StatusId::Success)
+                .state(openshell_ocsf::StateId::Enabled, "enabled")
+                .message(format!(
+                    "Upstream corporate proxy enabled: {}",
+                    cfg.summary()
+                ))
+                .build();
+            ocsf_emit!(event);
+        }
+
         let join = tokio::spawn(async move {
             // Wait for the OPA engine's symlink resolution reload to complete
             // before accepting connections. This prevents requests from
@@ -275,6 +294,7 @@ impl ProxyHandle {
                         let inf = inference_ctx.clone();
                         let policy_local = policy_local_ctx.clone();
                         let gw = trusted_host_gateway.clone();
+                        let up_proxy = upstream_proxy.clone();
                         let resolver = provider_credentials
                             .as_ref()
                             .and_then(ProviderCredentialState::resolver);
@@ -296,6 +316,7 @@ impl ProxyHandle {
                                 inf,
                                 policy_local,
                                 gw,
+                                up_proxy,
                                 resolver,
                                 dynamic_credentials,
                                 dtx,
@@ -627,6 +648,7 @@ async fn handle_tcp_connection(
     inference_ctx: Option<Arc<InferenceContext>>,
     policy_local_ctx: Option<Arc<PolicyLocalContext>>,
     trusted_host_gateway: Arc<Option<IpAddr>>,
+    upstream_proxy: Arc<Option<UpstreamProxyConfig>>,
     secret_resolver: Option<Arc<SecretResolver>>,
     dynamic_credentials: Option<
         Arc<
@@ -695,6 +717,7 @@ async fn handle_tcp_connection(
             entrypoint_pid,
             policy_local_ctx,
             trusted_host_gateway,
+            upstream_proxy,
             secret_resolver,
             dynamic_credentials,
             denial_tx.as_ref(),
@@ -1169,9 +1192,15 @@ async fn handle_tcp_connection(
         return Ok(());
     }
 
-    let mut upstream = TcpStream::connect(validated_addrs.as_slice())
-        .await
-        .into_diagnostic()?;
+    let mut upstream = dial_upstream(
+        &upstream_proxy,
+        UpstreamScheme::Https,
+        &host_lc,
+        port,
+        &validated_addrs,
+    )
+    .await
+    .into_diagnostic()?;
 
     debug!(
         "handle_tcp_connection dns_resolve_and_tcp_connect: {}ms host={host_lc}",
@@ -2903,6 +2932,33 @@ fn validate_declared_endpoint_resolved_addrs(
     Ok(())
 }
 
+/// Dial a validated upstream destination.
+///
+/// Connects directly to the SSRF-checked resolved addresses, or chains
+/// through the corporate proxy (HTTP CONNECT) when one is configured for
+/// this destination via the supervisor's `HTTPS_PROXY`/`HTTP_PROXY` and not
+/// excluded by `NO_PROXY`. Policy evaluation and SSRF validation must have
+/// already succeeded; only the final TCP dial changes.
+///
+/// The CONNECT target sent to the corporate proxy is the client-requested
+/// hostname, so hostname-filtering proxies and split-horizon DNS at the
+/// proxy keep working.
+async fn dial_upstream(
+    upstream_proxy: &Option<UpstreamProxyConfig>,
+    scheme: UpstreamScheme,
+    host_lc: &str,
+    port: u16,
+    addrs: &[SocketAddr],
+) -> std::io::Result<TcpStream> {
+    if let Some(endpoint) = upstream_proxy
+        .as_ref()
+        .and_then(|cfg| cfg.proxy_for(scheme, host_lc))
+    {
+        return upstream_proxy::connect_via(endpoint, host_lc, port).await;
+    }
+    TcpStream::connect(addrs).await
+}
+
 /// Resolve a host:port using sandbox `/etc/hosts` first (when available), then
 /// reject if any resolved address is internal.
 ///
@@ -3542,6 +3598,7 @@ async fn handle_forward_proxy(
     entrypoint_pid: Arc<AtomicU32>,
     policy_local_ctx: Option<Arc<PolicyLocalContext>>,
     trusted_host_gateway: Arc<Option<IpAddr>>,
+    upstream_proxy: Arc<Option<UpstreamProxyConfig>>,
     secret_resolver: Option<Arc<SecretResolver>>,
     dynamic_credentials: Option<
         Arc<
@@ -4575,8 +4632,21 @@ async fn handle_forward_proxy(
         return Ok(());
     }
 
-    // 6. Connect upstream
-    let mut upstream = match TcpStream::connect(addrs.as_slice()).await {
+    // 6. Connect upstream. Host-gateway aliases always dial directly — the
+    //    corporate proxy cannot reach the driver-injected host gateway.
+    let dial_result = if is_host_gateway_alias(&host_lc) {
+        TcpStream::connect(addrs.as_slice()).await
+    } else {
+        dial_upstream(
+            &upstream_proxy,
+            UpstreamScheme::Http,
+            &host_lc,
+            port,
+            &addrs,
+        )
+        .await
+    };
+    let mut upstream = match dial_result {
         Ok(s) => s,
         Err(e) => {
             let event = HttpActivityBuilder::new(openshell_ocsf::ctx::ctx())
@@ -9329,6 +9399,7 @@ network_policies:
                 None,            // inference_ctx
                 None,            // policy_local_ctx
                 Arc::new(None),  // trusted_host_gateway
+                Arc::new(None),  // upstream_proxy
                 None,            // secret_resolver
                 None,            // dynamic_credentials
                 Some(denial_tx), // denial_tx — positive allow/deny signal

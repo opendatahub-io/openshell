@@ -391,6 +391,15 @@ sandbox_pids_limit      = 2048
 # but increase process churn (each check spawns a conmon subprocess).
 # Set to 0 to disable health checks entirely. Default: 10.
 health_check_interval_secs = 10
+# Corporate forward proxy for sandbox egress. When set, the in-container
+# supervisor chains policy-approved upstream connections through this proxy
+# with HTTP CONNECT instead of dialing destinations directly. Only http://
+# proxy URLs are supported. NO_PROXY entries (hostnames, domain suffixes,
+# IPs, CIDRs) are dialed directly. Per-sandbox HTTPS_PROXY/HTTP_PROXY/NO_PROXY
+# environment values take precedence over these defaults.
+# https_proxy = "http://proxy.corp.com:8080"
+# http_proxy  = "http://proxy.corp.com:8080"
+# no_proxy    = "*.svc.cluster.local,10.0.0.0/8"
 ```
 
 ### MicroVM

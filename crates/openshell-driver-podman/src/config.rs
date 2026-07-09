@@ -133,6 +133,21 @@ pub struct PodmanComputeConfig {
     /// Set to `0` to disable health checks entirely.
     /// Defaults to [`DEFAULT_HEALTH_CHECK_INTERVAL_SECS`] (10 seconds).
     pub health_check_interval_secs: u64,
+    /// Corporate forward proxy URL injected into sandbox containers as
+    /// `HTTPS_PROXY`/`https_proxy` (e.g. `http://proxy.corp.com:8080`).
+    ///
+    /// The in-container supervisor chains policy-approved TLS tunnels
+    /// through this proxy with HTTP CONNECT instead of dialing upstream
+    /// destinations directly. Only `http://` proxy URLs are supported.
+    /// Per-sandbox environment values take precedence.
+    pub https_proxy: Option<String>,
+    /// Corporate forward proxy URL injected as `HTTP_PROXY`/`http_proxy`,
+    /// used for plain HTTP requests. See `https_proxy`.
+    pub http_proxy: Option<String>,
+    /// Comma-separated `NO_PROXY` list injected alongside the proxy URLs
+    /// (e.g. `*.svc.cluster.local,10.0.0.0/8`). Destinations matching an
+    /// entry are dialed directly instead of through the corporate proxy.
+    pub no_proxy: Option<String>,
 }
 
 pub const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 10;
@@ -188,6 +203,35 @@ impl PodmanComputeConfig {
         Ok(())
     }
 
+    /// Validate optional corporate proxy configuration.
+    ///
+    /// The in-container supervisor only supports `http://` forward proxies,
+    /// so reject other schemes at config time instead of silently ignoring
+    /// them inside every sandbox.
+    pub fn validate_proxy_config(&self) -> Result<(), crate::client::PodmanApiError> {
+        for (field, value) in [
+            ("https_proxy", &self.https_proxy),
+            ("http_proxy", &self.http_proxy),
+        ] {
+            let Some(url) = value else { continue };
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                return Err(crate::client::PodmanApiError::InvalidInput(format!(
+                    "{field} must not be empty when set"
+                )));
+            }
+            if let Some((scheme, _)) = trimmed.split_once("://")
+                && !scheme.eq_ignore_ascii_case("http")
+            {
+                return Err(crate::client::PodmanApiError::InvalidInput(format!(
+                    "{field} uses unsupported scheme '{scheme}': only http:// forward \
+                     proxies are supported by the sandbox supervisor"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate optional host gateway override.
     pub fn validate_host_gateway_ip(&self) -> Result<(), crate::client::PodmanApiError> {
         let trimmed = self.host_gateway_ip.trim();
@@ -235,6 +279,9 @@ impl Default for PodmanComputeConfig {
             sandbox_pids_limit: DEFAULT_SANDBOX_PIDS_LIMIT,
             enable_bind_mounts: false,
             health_check_interval_secs: DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
+            https_proxy: None,
+            http_proxy: None,
+            no_proxy: None,
         }
     }
 }
@@ -261,6 +308,10 @@ impl std::fmt::Debug for PodmanComputeConfig {
                 "health_check_interval_secs",
                 &self.health_check_interval_secs,
             )
+            // Proxy URLs may embed credentials in userinfo; log presence only.
+            .field("https_proxy", &self.https_proxy.is_some())
+            .field("http_proxy", &self.http_proxy.is_some())
+            .field("no_proxy", &self.no_proxy)
             .finish()
     }
 }
@@ -320,6 +371,49 @@ mod tests {
         };
         let err = cfg.validate_runtime_limits().unwrap_err();
         assert!(err.to_string().contains("sandbox_pids_limit"));
+    }
+
+    // ── Proxy config validation ───────────────────────────────────────
+
+    #[test]
+    fn validate_proxy_config_accepts_unset_and_http() {
+        assert!(
+            PodmanComputeConfig::default()
+                .validate_proxy_config()
+                .is_ok()
+        );
+        let cfg = PodmanComputeConfig {
+            https_proxy: Some("http://proxy.corp.com:8080".to_string()),
+            http_proxy: Some("proxy.corp.com:3128".to_string()),
+            no_proxy: Some("*.svc.cluster.local".to_string()),
+            ..PodmanComputeConfig::default()
+        };
+        assert!(cfg.validate_proxy_config().is_ok());
+    }
+
+    #[test]
+    fn validate_proxy_config_rejects_non_http_schemes() {
+        for url in ["https://proxy:443", "socks5://proxy:1080"] {
+            let cfg = PodmanComputeConfig {
+                https_proxy: Some(url.to_string()),
+                ..PodmanComputeConfig::default()
+            };
+            let err = cfg.validate_proxy_config().unwrap_err();
+            assert!(
+                err.to_string().contains("unsupported scheme"),
+                "{url}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_proxy_config_rejects_empty_value() {
+        let cfg = PodmanComputeConfig {
+            http_proxy: Some("  ".to_string()),
+            ..PodmanComputeConfig::default()
+        };
+        let err = cfg.validate_proxy_config().unwrap_err();
+        assert!(err.to_string().contains("http_proxy"), "{err}");
     }
 
     // ── TLS config validation ─────────────────────────────────────────

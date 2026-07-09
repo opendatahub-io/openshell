@@ -385,6 +385,25 @@ fn build_env(
         env.insert(openshell_core::sandbox_env::USER_ENVIRONMENT.into(), json);
     }
 
+    // 1.5. Operator-configured corporate egress proxy. The in-container
+    // supervisor reads these from its own environment and chains approved
+    // upstream dials through the corporate proxy; the workload child's proxy
+    // variables are rewritten separately to point at the local policy proxy.
+    // Inserted as defaults so per-sandbox user env wins. Both cases are set
+    // because proxy-aware tooling disagrees on which one it reads.
+    for (name, value) in [
+        ("HTTPS_PROXY", &config.https_proxy),
+        ("https_proxy", &config.https_proxy),
+        ("HTTP_PROXY", &config.http_proxy),
+        ("http_proxy", &config.http_proxy),
+        ("NO_PROXY", &config.no_proxy),
+        ("no_proxy", &config.no_proxy),
+    ] {
+        if let Some(value) = value {
+            env.entry(name.into()).or_insert_with(|| value.clone());
+        }
+    }
+
     // 2. Required driver vars (highest priority -- always overwrite).
     env.insert(
         openshell_core::sandbox_env::SANDBOX.into(),
@@ -1647,6 +1666,85 @@ mod tests {
                     "telemetry toggle must come from the deployment environment"
                 );
             },
+        );
+    }
+
+    #[test]
+    fn container_spec_injects_operator_proxy_env() {
+        let sandbox = test_sandbox("test-id", "test-name");
+        let mut config = test_config();
+        config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
+        config.http_proxy = Some("http://proxy.corp.com:3128".to_string());
+        config.no_proxy = Some("*.svc.cluster.local,10.0.0.0/8".to_string());
+
+        let spec = build_container_spec(&sandbox, &config);
+        let env_map = spec["env"].as_object().expect("env should be an object");
+
+        for key in ["HTTPS_PROXY", "https_proxy"] {
+            assert_eq!(
+                env_map.get(key).and_then(|v| v.as_str()),
+                Some("http://proxy.corp.com:8080"),
+                "{key} should carry the operator proxy URL"
+            );
+        }
+        for key in ["HTTP_PROXY", "http_proxy"] {
+            assert_eq!(
+                env_map.get(key).and_then(|v| v.as_str()),
+                Some("http://proxy.corp.com:3128"),
+                "{key} should carry the operator proxy URL"
+            );
+        }
+        for key in ["NO_PROXY", "no_proxy"] {
+            assert_eq!(
+                env_map.get(key).and_then(|v| v.as_str()),
+                Some("*.svc.cluster.local,10.0.0.0/8"),
+                "{key} should carry the operator NO_PROXY list"
+            );
+        }
+    }
+
+    #[test]
+    fn container_spec_omits_proxy_env_when_unconfigured() {
+        let sandbox = test_sandbox("test-id", "test-name");
+        let spec = build_container_spec(&sandbox, &test_config());
+        let env_map = spec["env"].as_object().expect("env should be an object");
+
+        for key in ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"] {
+            assert!(
+                !env_map.contains_key(key),
+                "{key} should be absent without operator proxy config"
+            );
+        }
+    }
+
+    #[test]
+    fn container_spec_user_env_overrides_operator_proxy() {
+        use openshell_core::proto::compute::v1::{DriverSandboxSpec, DriverSandboxTemplate};
+
+        let mut sandbox = test_sandbox("test-id", "test-name");
+        sandbox.spec = Some(DriverSandboxSpec {
+            environment: std::collections::HashMap::from([(
+                "HTTPS_PROXY".to_string(),
+                "http://sandbox-specific:9999".to_string(),
+            )]),
+            template: Some(DriverSandboxTemplate::default()),
+            ..Default::default()
+        });
+        let mut config = test_config();
+        config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
+
+        let spec = build_container_spec(&sandbox, &config);
+        let env_map = spec["env"].as_object().expect("env should be an object");
+
+        assert_eq!(
+            env_map.get("HTTPS_PROXY").and_then(|v| v.as_str()),
+            Some("http://sandbox-specific:9999"),
+            "per-sandbox HTTPS_PROXY should win over operator config"
+        );
+        assert_eq!(
+            env_map.get("https_proxy").and_then(|v| v.as_str()),
+            Some("http://proxy.corp.com:8080"),
+            "unset lowercase variant still falls back to operator config"
         );
     }
 

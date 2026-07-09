@@ -103,6 +103,19 @@ struct Args {
     /// Host path to the client private key for sandbox mTLS.
     #[arg(long, env = "OPENSHELL_PODMAN_TLS_KEY")]
     podman_tls_key: Option<PathBuf>,
+
+    /// Corporate forward proxy URL injected into sandbox containers as
+    /// `HTTPS_PROXY` for the supervisor's upstream dials (http:// only).
+    #[arg(long, env = "OPENSHELL_SANDBOX_HTTPS_PROXY")]
+    sandbox_https_proxy: Option<String>,
+
+    /// Corporate forward proxy URL injected as `HTTP_PROXY` (http:// only).
+    #[arg(long, env = "OPENSHELL_SANDBOX_HTTP_PROXY")]
+    sandbox_http_proxy: Option<String>,
+
+    /// Comma-separated `NO_PROXY` list injected alongside the proxy URLs.
+    #[arg(long, env = "OPENSHELL_SANDBOX_NO_PROXY")]
+    sandbox_no_proxy: Option<String>,
 }
 
 #[tokio::main]
@@ -133,6 +146,9 @@ async fn main() -> Result<()> {
         guest_tls_cert: args.podman_tls_cert,
         guest_tls_key: args.podman_tls_key,
         sandbox_pids_limit: args.sandbox_pids_limit,
+        https_proxy: args.sandbox_https_proxy,
+        http_proxy: args.sandbox_http_proxy,
+        no_proxy: args.sandbox_no_proxy,
         ..PodmanComputeConfig::default()
     })
     .await
