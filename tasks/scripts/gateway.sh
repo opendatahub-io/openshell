@@ -355,16 +355,20 @@ EOF
     if [[ -n "${GRPC_ENDPOINT}" ]]; then
       printf 'grpc_endpoint = "%s"\n' "${GRPC_ENDPOINT}" >>"${CONFIG_PATH}"
     fi
-    if [[ -n "${OPENSHELL_SANDBOX_HTTPS_PROXY:-}" ]]; then
+    # ${VAR+x} distinguishes unset from set-but-empty: an unset variable
+    # writes nothing, but an explicitly empty one is written through so the
+    # gateway's fail-closed proxy validation rejects it at startup instead of
+    # this script silently dropping it.
+    if [[ -n "${OPENSHELL_SANDBOX_HTTPS_PROXY+x}" ]]; then
       printf 'https_proxy = "%s"\n' "${OPENSHELL_SANDBOX_HTTPS_PROXY}" >>"${CONFIG_PATH}"
     fi
-    if [[ -n "${OPENSHELL_SANDBOX_HTTP_PROXY:-}" ]]; then
+    if [[ -n "${OPENSHELL_SANDBOX_HTTP_PROXY+x}" ]]; then
       printf 'http_proxy = "%s"\n' "${OPENSHELL_SANDBOX_HTTP_PROXY}" >>"${CONFIG_PATH}"
     fi
-    if [[ -n "${OPENSHELL_SANDBOX_NO_PROXY:-}" ]]; then
+    if [[ -n "${OPENSHELL_SANDBOX_NO_PROXY+x}" ]]; then
       printf 'no_proxy = "%s"\n' "${OPENSHELL_SANDBOX_NO_PROXY}" >>"${CONFIG_PATH}"
     fi
-    if [[ -n "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE:-}" ]]; then
+    if [[ -n "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE+x}" ]]; then
       printf 'proxy_auth_file = "%s"\n' "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE}" >>"${CONFIG_PATH}"
     fi
     ;;

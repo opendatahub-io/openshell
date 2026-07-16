@@ -201,8 +201,9 @@ impl UpstreamProxyConfig {
     /// any present-but-invalid value is fatal instead of being treated as
     /// unset: a present-but-empty (or whitespace-only) reserved variable, an
     /// invalid or unsupported proxy URL, an auth file that is set but
-    /// unreadable or holds a malformed credential, or an auth file with no
-    /// proxy configured. Failing closed here prevents a misconfiguration
+    /// unreadable or holds a malformed credential, or an auth file or
+    /// `NO_PROXY` list with no proxy configured. Failing closed here
+    /// prevents a misconfiguration
     /// from silently degrading to direct dialing or unauthenticated proxy
     /// access. Only fully unset variables mean "no proxy".
     pub fn from_env() -> Result<Option<Self>, String> {
@@ -235,10 +236,16 @@ impl UpstreamProxyConfig {
         let auth_file = var(UPSTREAM_PROXY_AUTH_FILE)?;
         let no_proxy_list = var(UPSTREAM_NO_PROXY)?;
         if https.is_none() && http.is_none() {
-            if auth_file.is_some() {
-                return Err(format!(
-                    "{UPSTREAM_PROXY_AUTH_FILE} is set but no upstream proxy is configured"
-                ));
+            // Auxiliary proxy settings without a proxy mean the operator
+            // believed a proxy boundary was in effect; refuse rather than
+            // silently running with direct egress.
+            for (name, value) in [
+                (UPSTREAM_PROXY_AUTH_FILE, &auth_file),
+                (UPSTREAM_NO_PROXY, &no_proxy_list),
+            ] {
+                if value.is_some() {
+                    return Err(format!("{name} is set but no upstream proxy is configured"));
+                }
             }
             return Ok(None);
         }
@@ -618,10 +625,17 @@ mod tests {
     }
 
     #[test]
-    fn auth_file_without_proxy_is_fatal() {
-        let err =
-            config_from(&[(PROXY_AUTH_FILE, "/etc/openshell/auth/upstream-proxy")]).unwrap_err();
-        assert!(err.contains(PROXY_AUTH_FILE), "{err}");
+    fn auxiliary_settings_without_proxy_are_fatal() {
+        // An auth file or NO_PROXY list only makes sense relative to a proxy
+        // boundary the operator believed was in effect.
+        for (name, value) in [
+            (PROXY_AUTH_FILE, "/etc/openshell/auth/upstream-proxy"),
+            (NO_PROXY, "*.svc.cluster.local"),
+        ] {
+            let err = config_from(&[(name, value)]).unwrap_err();
+            assert!(err.contains(name), "{err}");
+            assert!(err.contains("no upstream proxy"), "{err}");
+        }
     }
 
     #[test]

@@ -120,10 +120,11 @@ policy proxy.
 
 The configuration is fail-closed: a reserved variable that is present but
 invalid — a present-but-empty value, an unsupported or malformed proxy URL, an
-unreadable auth file, or a malformed credential — is fatal to supervisor
-startup instead of being treated as unset, so a misconfiguration can never
-silently degrade to direct dialing or unauthenticated proxy access. Only a
-fully unset variable means "no proxy". The driver validates the same rules at
+unreadable auth file, a malformed credential, or an auth file or `NO_PROXY`
+list set while no proxy URL is configured — is fatal to supervisor startup
+instead of being treated as unset, so a misconfiguration can never silently
+degrade to direct dialing or unauthenticated proxy access. Only a fully unset
+variable means "no proxy". The driver validates the same rules at
 sandbox-create time through validators shared with the supervisor
 (`openshell_core::driver_utils::parse_upstream_proxy_url` and
 `parse_upstream_proxy_credential`).

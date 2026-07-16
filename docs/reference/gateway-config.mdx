@@ -400,9 +400,11 @@ health_check_interval_secs = 10
 # HTTPS_PROXY/HTTP_PROXY/NO_PROXY variables a sandbox sets do not affect it.
 #
 # Configuration is fail-closed: an invalid proxy URL is rejected at gateway
-# startup, and a set-but-invalid value reaching a sandbox (for example an
-# unreadable or malformed auth file) is fatal to that sandbox's supervisor
-# instead of silently falling back to direct or unauthenticated egress.
+# startup, setting no_proxy or proxy_auth_file without a proxy URL is
+# rejected as well, and a set-but-invalid value reaching a sandbox (for
+# example an unreadable or malformed auth file) is fatal to that sandbox's
+# supervisor instead of silently falling back to direct or unauthenticated
+# egress.
 #
 # Credentials must NOT be embedded in the URL (an inline user:pass@ is
 # rejected at startup, since it would be stored here and exposed in container
