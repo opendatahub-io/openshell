@@ -53,12 +53,15 @@ const VOLUME_PREFIX: &str = "openshell-sandbox-";
 
 /// Secret name prefix for per-sandbox gateway JWTs.
 const TOKEN_SECRET_PREFIX: &str = "openshell-token-";
+const PROXY_AUTH_SECRET_PREFIX: &str = "openshell-proxy-auth-";
 
 /// Container-side mount paths for client TLS materials and the sandbox token.
 const TLS_CA_MOUNT_PATH: &str = openshell_core::driver_utils::TLS_CA_MOUNT_PATH;
 const TLS_CERT_MOUNT_PATH: &str = openshell_core::driver_utils::TLS_CERT_MOUNT_PATH;
 const TLS_KEY_MOUNT_PATH: &str = openshell_core::driver_utils::TLS_KEY_MOUNT_PATH;
 const SANDBOX_TOKEN_MOUNT_PATH: &str = openshell_core::driver_utils::SANDBOX_TOKEN_MOUNT_PATH;
+const UPSTREAM_PROXY_AUTH_MOUNT_PATH: &str =
+    openshell_core::driver_utils::UPSTREAM_PROXY_AUTH_MOUNT_PATH;
 
 /// Directory inside sandbox containers where the supervisor binary is mounted.
 const SUPERVISOR_MOUNT_DIR: &str = openshell_core::driver_utils::SUPERVISOR_CONTAINER_DIR;
@@ -160,6 +163,12 @@ pub fn volume_name(sandbox_id: &str) -> String {
 #[must_use]
 pub fn token_secret_name(sandbox_id: &str) -> String {
     format!("{TOKEN_SECRET_PREFIX}{sandbox_id}")
+}
+
+/// Build the per-sandbox Podman secret name for the corporate proxy credentials.
+#[must_use]
+pub fn proxy_auth_secret_name(sandbox_id: &str) -> String {
+    format!("{PROXY_AUTH_SECRET_PREFIX}{sandbox_id}")
 }
 
 /// Truncate a container ID to 12 characters (standard short form).
@@ -399,6 +408,14 @@ fn build_env(
     // stripped, then replaced with the operator value (if configured), so the
     // supervisor can never observe a reserved proxy variable the operator did
     // not set.
+    //
+    // Proxy credentials are never passed through the environment: when
+    // `proxy_auth_file` is configured the supervisor reads them from a
+    // root-only secret mount, and only the mount *path* is exported.
+    let proxy_auth_mount = config
+        .proxy_auth_file
+        .as_ref()
+        .map(|_| UPSTREAM_PROXY_AUTH_MOUNT_PATH.to_string());
     for (name, value) in [
         (
             openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
@@ -411,6 +428,10 @@ fn build_env(
         (
             openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
             &config.no_proxy,
+        ),
+        (
+            openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE,
+            &proxy_auth_mount,
         ),
     ] {
         env.remove(name);
@@ -1027,15 +1048,32 @@ pub fn build_container_spec_with_token_and_gpu_devices(
         },
         resource_limits,
         secret_env: BTreeMap::new(),
-        secrets: token_secret_name.map_or_else(Vec::new, |source| {
-            vec![SecretMount {
-                source: source.to_string(),
-                target: SANDBOX_TOKEN_MOUNT_PATH.into(),
-                uid: 0,
-                gid: 0,
-                mode: 0o400,
-            }]
-        }),
+        secrets: {
+            let mut secrets = Vec::new();
+            if let Some(source) = token_secret_name {
+                secrets.push(SecretMount {
+                    source: source.to_string(),
+                    target: SANDBOX_TOKEN_MOUNT_PATH.into(),
+                    uid: 0,
+                    gid: 0,
+                    mode: 0o400,
+                });
+            }
+            // Corporate proxy credentials, when configured, are mounted as a
+            // root-only secret. The driver creates a matching Podman secret
+            // (see `create_sandbox_proxy_auth_secret`) named deterministically
+            // from the sandbox id, so no name needs threading through here.
+            if config.proxy_auth_file.is_some() {
+                secrets.push(SecretMount {
+                    source: proxy_auth_secret_name(&sandbox.id),
+                    target: UPSTREAM_PROXY_AUTH_MOUNT_PATH.into(),
+                    uid: 0,
+                    gid: 0,
+                    mode: 0o400,
+                });
+            }
+            secrets
+        },
         stop_timeout: config.stop_timeout_secs,
         // Inject stable host aliases into /etc/hosts so sandbox containers can
         // reach services on the host. `host.openshell.internal` is the driver-
@@ -2525,6 +2563,58 @@ mod tests {
             !mounts
                 .iter()
                 .any(|m| { m["destination"].as_str() == Some("/etc/openshell/auth/sandbox.jwt") })
+        );
+    }
+
+    #[test]
+    fn container_spec_proxy_auth_file_mounts_secret_and_sets_path_only() {
+        let sandbox = test_sandbox("proxy-id", "proxy-name");
+        let mut config = test_config();
+        config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
+        config.proxy_auth_file = Some("/etc/openshell/secrets/proxy-auth".to_string());
+
+        let spec = build_container_spec(&sandbox, &config);
+        let env_map = spec["env"].as_object().expect("env should be an object");
+
+        // The supervisor gets only the mount *path*, never the credential.
+        assert_eq!(
+            env_map
+                .get(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE)
+                .and_then(|v| v.as_str()),
+            Some(UPSTREAM_PROXY_AUTH_MOUNT_PATH)
+        );
+        // The URL carried in the environment must remain credential-free.
+        assert_eq!(
+            env_map
+                .get(openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY)
+                .and_then(|v| v.as_str()),
+            Some("http://proxy.corp.com:8080")
+        );
+
+        let secrets = spec["secrets"]
+            .as_array()
+            .expect("secrets should be an array");
+        assert!(
+            secrets.iter().any(|secret| {
+                secret["source"].as_str() == Some(proxy_auth_secret_name(&sandbox.id).as_str())
+                    && secret["target"].as_str() == Some(UPSTREAM_PROXY_AUTH_MOUNT_PATH)
+                    && secret["mode"].as_u64() == Some(0o400)
+            }),
+            "proxy credentials must be delivered through a root-only secret mount"
+        );
+    }
+
+    #[test]
+    fn container_spec_omits_proxy_auth_mount_when_unconfigured() {
+        let sandbox = test_sandbox("proxy-id", "proxy-name");
+        let mut config = test_config();
+        config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
+
+        let spec = build_container_spec(&sandbox, &config);
+        let env_map = spec["env"].as_object().expect("env should be an object");
+        assert!(
+            !env_map.contains_key(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE),
+            "auth-file path must be absent when no proxy_auth_file is configured"
         );
     }
 

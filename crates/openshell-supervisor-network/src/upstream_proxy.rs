@@ -58,7 +58,7 @@ pub enum UpstreamScheme {
 pub struct ProxyEndpoint {
     host: String,
     port: u16,
-    /// Pre-computed `Basic <base64>` header value from URL userinfo.
+    /// Pre-computed `Basic <base64>` header value from the proxy auth file.
     /// Never logged.
     proxy_authorization: Option<String>,
 }
@@ -188,7 +188,26 @@ impl UpstreamProxyConfig {
     /// template environment cannot override them.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        Self::from_lookup(|name| std::env::var(name).ok())
+        let mut config = Self::from_lookup(|name| std::env::var(name).ok())?;
+
+        // Load proxy credentials from the reserved auth file, if configured,
+        // and apply them to every endpoint. The file is delivered through a
+        // root-only secret mount so the credentials never appear in the
+        // environment or container metadata.
+        if let Some(path) = std::env::var(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE)
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(credential) => config.apply_proxy_auth(basic_auth_header(&credential)),
+                Err(err) => warn!(
+                    "failed to read upstream proxy auth file '{path}': {err}; \
+                     proceeding without proxy credentials"
+                ),
+            }
+        }
+
+        Some(config)
     }
 
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
@@ -209,6 +228,19 @@ impl UpstreamProxyConfig {
             http,
             no_proxy,
         })
+    }
+
+    /// Attach a pre-built `Proxy-Authorization` header value to every
+    /// configured endpoint. A `None` value clears any existing credentials.
+    fn apply_proxy_auth(&mut self, proxy_authorization: Option<String>) {
+        for endpoint in [self.https.as_mut(), self.http.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            endpoint
+                .proxy_authorization
+                .clone_from(&proxy_authorization);
+        }
     }
 
     /// The corporate proxy to use for `host`, or `None` when the destination
@@ -239,8 +271,13 @@ impl UpstreamProxyConfig {
     }
 }
 
-/// Parse an `http://[user:pass@]host[:port]` proxy URL. Unsupported schemes
-/// (TLS or SOCKS proxies) are rejected with a warning.
+/// Parse an `http://host[:port]` proxy URL. Unsupported schemes (TLS or SOCKS
+/// proxies) are rejected with a warning.
+///
+/// Credentials are never taken from the URL: they are delivered out of band
+/// through [`UPSTREAM_PROXY_AUTH_FILE`](openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE)
+/// so they never appear in config or container metadata. Any `user:pass@`
+/// userinfo present in the URL is ignored with a warning.
 fn parse_proxy_url(raw: &str, var_name: &str) -> Option<ProxyEndpoint> {
     let raw = raw.trim();
     let rest = match raw.split_once("://") {
@@ -258,26 +295,24 @@ fn parse_proxy_url(raw: &str, var_name: &str) -> Option<ProxyEndpoint> {
     };
     // Drop any path component.
     let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    let (userinfo, authority) = match rest.rsplit_once('@') {
-        Some((userinfo, authority)) => (Some(userinfo), authority),
-        None => (None, rest),
+    let authority = match rest.rsplit_once('@') {
+        Some((_userinfo, authority)) => {
+            warn!(
+                "{var_name} contains inline credentials, which are ignored; \
+                 supply proxy credentials via the proxy auth file"
+            );
+            authority
+        }
+        None => rest,
     };
     let Some((host, port)) = split_host_port(authority) else {
         warn!("{var_name} has an invalid proxy address '{authority}'; ignoring");
         return None;
     };
-    let proxy_authorization = userinfo.map(|userinfo| {
-        let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
-        let credentials = format!("{}:{}", percent_decode(user), percent_decode(pass));
-        format!(
-            "Basic {}",
-            base64::engine::general_purpose::STANDARD.encode(credentials)
-        )
-    });
     Some(ProxyEndpoint {
         host,
         port,
-        proxy_authorization,
+        proxy_authorization: None,
     })
 }
 
@@ -305,28 +340,22 @@ fn split_host_port(authority: &str) -> Option<(String, u16)> {
     }
 }
 
-/// Minimal percent-decoder for URL userinfo.
-fn percent_decode(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let (Some(hi), Some(lo)) = (
-                (bytes[i + 1] as char).to_digit(16),
-                (bytes[i + 2] as char).to_digit(16),
-            )
-        {
-            #[allow(clippy::cast_possible_truncation)]
-            out.push((hi * 16 + lo) as u8);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
+/// Build a `Proxy-Authorization: Basic <base64>` header value from a raw
+/// `user:pass` credential.
+///
+/// Returns `None` for an empty credential or one containing control characters
+/// (CR, LF, NUL) that could inject additional HTTP headers. The credential is
+/// used verbatim: it is delivered through a trusted operator file, not a URL,
+/// so there is no percent-encoding to decode.
+fn basic_auth_header(credential: &str) -> Option<String> {
+    let credential = credential.trim();
+    if credential.is_empty() || credential.contains(|c: char| c.is_control()) {
+        return None;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    Some(format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(credential)
+    ))
 }
 
 /// Open a tunnel to `host:port` through the corporate proxy with HTTP CONNECT.
@@ -510,17 +539,55 @@ mod tests {
     }
 
     #[test]
-    fn userinfo_becomes_basic_auth() {
-        let cfg = config_from(&[(HTTPS_PROXY, "http://user:p%40ss@proxy:8080")]).unwrap();
+    fn url_userinfo_is_ignored_not_used_as_credentials() {
+        // Inline credentials in the URL must never become the proxy auth;
+        // credentials come only from the auth file.
+        let cfg = config_from(&[(HTTPS_PROXY, "http://user:secret@proxy:8080")]).unwrap();
         let ep = cfg.proxy_for(UpstreamScheme::Https, "example.com").unwrap();
-        let auth = ep.proxy_authorization.as_deref().unwrap();
-        let expected = base64::engine::general_purpose::STANDARD.encode("user:p@ss");
-        assert_eq!(auth, format!("Basic {expected}"));
+        assert_eq!(ep.display_addr(), "proxy:8080");
+        assert!(
+            ep.proxy_authorization.is_none(),
+            "URL userinfo must not be used as proxy credentials"
+        );
+    }
+
+    #[test]
+    fn basic_auth_header_encodes_and_rejects_control_chars() {
+        assert_eq!(
+            basic_auth_header("user:p@ss").as_deref(),
+            Some(
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode("user:p@ss")
+                )
+                .as_str()
+            )
+        );
+        assert!(basic_auth_header("  ").is_none());
+        assert!(basic_auth_header("user:pa\r\nss").is_none());
+        assert!(basic_auth_header("user:pa\nInjected: header").is_none());
+    }
+
+    #[test]
+    fn apply_proxy_auth_sets_header_on_all_endpoints() {
+        let mut cfg = config_from(&[
+            (HTTPS_PROXY, "http://proxy:8080"),
+            (HTTP_PROXY, "http://proxy:3128"),
+        ])
+        .unwrap();
+        cfg.apply_proxy_auth(basic_auth_header("user:secret"));
+        for scheme in [UpstreamScheme::Https, UpstreamScheme::Http] {
+            let ep = cfg.proxy_for(scheme, "example.com").unwrap();
+            let auth = ep.proxy_authorization.as_deref().unwrap();
+            let expected = base64::engine::general_purpose::STANDARD.encode("user:secret");
+            assert_eq!(auth, format!("Basic {expected}"));
+        }
     }
 
     #[test]
     fn debug_output_hides_credentials() {
-        let cfg = config_from(&[(HTTPS_PROXY, "http://user:secret@proxy:8080")]).unwrap();
+        let mut cfg = config_from(&[(HTTPS_PROXY, "http://proxy:8080")]).unwrap();
+        cfg.apply_proxy_auth(basic_auth_header("user:secret"));
         let debug = format!("{cfg:?}");
         assert!(!debug.contains("secret"));
         assert!(!cfg.summary().contains("secret"));

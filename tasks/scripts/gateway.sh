@@ -310,6 +310,9 @@ echo "Generating local gateway credentials..."
 
 mkdir -p "${STATE_DIR}"
 CONFIG_PATH="${STATE_DIR}/gateway.toml"
+# The config may reference credential-bearing material (e.g. proxy_auth_file);
+# keep it owner-only regardless of the ambient umask.
+install -m 600 /dev/null "${CONFIG_PATH}"
 cat >"${CONFIG_PATH}" <<EOF
 [openshell]
 version = 1
@@ -360,6 +363,9 @@ EOF
     fi
     if [[ -n "${OPENSHELL_SANDBOX_NO_PROXY:-}" ]]; then
       printf 'no_proxy = "%s"\n' "${OPENSHELL_SANDBOX_NO_PROXY}" >>"${CONFIG_PATH}"
+    fi
+    if [[ -n "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE:-}" ]]; then
+      printf 'proxy_auth_file = "%s"\n' "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE}" >>"${CONFIG_PATH}"
     fi
     ;;
 esac

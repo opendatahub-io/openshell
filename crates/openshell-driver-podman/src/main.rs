@@ -104,18 +104,26 @@ struct Args {
     #[arg(long, env = "OPENSHELL_PODMAN_TLS_KEY")]
     podman_tls_key: Option<PathBuf>,
 
-    /// Corporate forward proxy URL injected into sandbox containers as
-    /// `HTTPS_PROXY` for the supervisor's upstream dials (http:// only).
+    /// Corporate forward proxy URL for the supervisor's upstream TLS dials
+    /// (http:// only). Credentials must not be embedded in the URL; use
+    /// `--sandbox-proxy-auth-file` instead.
     #[arg(long, env = "OPENSHELL_SANDBOX_HTTPS_PROXY")]
     sandbox_https_proxy: Option<String>,
 
-    /// Corporate forward proxy URL injected as `HTTP_PROXY` (http:// only).
+    /// Corporate forward proxy URL for plain HTTP (http:// only). Credentials
+    /// must not be embedded in the URL; use `--sandbox-proxy-auth-file`.
     #[arg(long, env = "OPENSHELL_SANDBOX_HTTP_PROXY")]
     sandbox_http_proxy: Option<String>,
 
     /// Comma-separated `NO_PROXY` list injected alongside the proxy URLs.
     #[arg(long, env = "OPENSHELL_SANDBOX_NO_PROXY")]
     sandbox_no_proxy: Option<String>,
+
+    /// Path to a file containing the corporate proxy credentials as
+    /// `user:pass`. Delivered to the supervisor through a root-only secret
+    /// mount so the credentials never appear in config or container metadata.
+    #[arg(long, env = "OPENSHELL_SANDBOX_PROXY_AUTH_FILE")]
+    sandbox_proxy_auth_file: Option<String>,
 }
 
 #[tokio::main]
@@ -149,6 +157,7 @@ async fn main() -> Result<()> {
         https_proxy: args.sandbox_https_proxy,
         http_proxy: args.sandbox_http_proxy,
         no_proxy: args.sandbox_no_proxy,
+        proxy_auth_file: args.sandbox_proxy_auth_file,
         ..PodmanComputeConfig::default()
     })
     .await

@@ -85,6 +85,7 @@ const SUPERVISOR_ONLY_ENV_VARS: &[&str] = &[
     openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
     openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY,
     openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
+    openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE,
 ];
 
 pub fn is_supervisor_only_env_var(key: &str) -> bool {
@@ -2269,6 +2270,7 @@ mod tests {
             openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
             openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY,
             openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
+            openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE,
         ] {
             assert!(
                 is_supervisor_only_env_var(key),

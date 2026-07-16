@@ -6,6 +6,19 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+/// Parse a proxy URL, defaulting a missing scheme to `http://`.
+///
+/// A bare `host:port` (no `://`) is normalized to `http://host:port` so it
+/// parses the same way the in-sandbox supervisor treats a scheme-less proxy
+/// value. Returns the parsed [`url::Url`] for scheme/userinfo/host inspection.
+fn parse_proxy_url(raw: &str) -> Result<url::Url, url::ParseError> {
+    if raw.contains("://") {
+        url::Url::parse(raw)
+    } else {
+        url::Url::parse(&format!("http://{raw}"))
+    }
+}
+
 /// Default Podman bridge network name.
 pub const DEFAULT_NETWORK_NAME: &str = "openshell";
 pub const MACOS_PODMAN_MACHINE_HOST_GATEWAY_IP: &str = "192.168.127.254";
@@ -153,6 +166,15 @@ pub struct PodmanComputeConfig {
     /// `*.svc.cluster.local,10.0.0.0/8`). Destinations matching an entry are
     /// dialed directly instead of through the corporate proxy.
     pub no_proxy: Option<String>,
+    /// Path (on the gateway host) to a file containing the corporate proxy
+    /// credentials as `user:pass`.
+    ///
+    /// Credentials must be supplied through this file, never embedded in the
+    /// proxy URL: an inline `user:pass@` in `https_proxy`/`http_proxy` is
+    /// rejected at startup because it would leak into `gateway.toml` and
+    /// container metadata. The gateway reads this file at sandbox-create time
+    /// and delivers it to the supervisor through a root-only secret mount.
+    pub proxy_auth_file: Option<String>,
 }
 
 pub const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 10;
@@ -210,9 +232,12 @@ impl PodmanComputeConfig {
 
     /// Validate optional corporate proxy configuration.
     ///
-    /// The in-container supervisor only supports `http://` forward proxies,
-    /// so reject other schemes at config time instead of silently ignoring
-    /// them inside every sandbox.
+    /// The in-container supervisor only supports `http://` forward proxies, so
+    /// reject other schemes at config time instead of silently ignoring them
+    /// inside every sandbox. Credentials must be supplied through
+    /// `proxy_auth_file`; an inline `user:pass@` in the URL is rejected because
+    /// it would otherwise be stored in `gateway.toml` and exposed in container
+    /// metadata.
     pub fn validate_proxy_config(&self) -> Result<(), crate::client::PodmanApiError> {
         for (field, value) in [
             ("https_proxy", &self.https_proxy),
@@ -225,13 +250,44 @@ impl PodmanComputeConfig {
                     "{field} must not be empty when set"
                 )));
             }
-            if let Some((scheme, _)) = trimmed.split_once("://")
-                && !scheme.eq_ignore_ascii_case("http")
-            {
+
+            let parsed = parse_proxy_url(trimmed).map_err(|e| {
+                crate::client::PodmanApiError::InvalidInput(format!(
+                    "{field} is not a valid proxy URL: {e}"
+                ))
+            })?;
+
+            if !parsed.scheme().eq_ignore_ascii_case("http") {
                 return Err(crate::client::PodmanApiError::InvalidInput(format!(
-                    "{field} uses unsupported scheme '{scheme}': only http:// forward \
-                     proxies are supported by the sandbox supervisor"
+                    "{field} uses unsupported scheme '{}': only http:// forward \
+                     proxies are supported by the sandbox supervisor",
+                    parsed.scheme()
                 )));
+            }
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return Err(crate::client::PodmanApiError::InvalidInput(format!(
+                    "{field} must not embed credentials in the URL; supply them via \
+                     proxy_auth_file so they are not stored in config or container metadata"
+                )));
+            }
+            if parsed.host_str().is_none_or(str::is_empty) {
+                return Err(crate::client::PodmanApiError::InvalidInput(format!(
+                    "{field} is missing a proxy host"
+                )));
+            }
+        }
+
+        if let Some(path) = self.proxy_auth_file.as_deref() {
+            if path.trim().is_empty() {
+                return Err(crate::client::PodmanApiError::InvalidInput(
+                    "proxy_auth_file must not be empty when set".to_string(),
+                ));
+            }
+            if self.https_proxy.is_none() && self.http_proxy.is_none() {
+                return Err(crate::client::PodmanApiError::InvalidInput(
+                    "proxy_auth_file is set but no https_proxy/http_proxy is configured"
+                        .to_string(),
+                ));
             }
         }
         Ok(())
@@ -287,6 +343,7 @@ impl Default for PodmanComputeConfig {
             https_proxy: None,
             http_proxy: None,
             no_proxy: None,
+            proxy_auth_file: None,
         }
     }
 }
@@ -317,6 +374,7 @@ impl std::fmt::Debug for PodmanComputeConfig {
             .field("https_proxy", &self.https_proxy.is_some())
             .field("http_proxy", &self.http_proxy.is_some())
             .field("no_proxy", &self.no_proxy)
+            .field("proxy_auth_file", &self.proxy_auth_file.is_some())
             .finish()
     }
 }
@@ -419,6 +477,45 @@ mod tests {
         };
         let err = cfg.validate_proxy_config().unwrap_err();
         assert!(err.to_string().contains("http_proxy"), "{err}");
+    }
+
+    #[test]
+    fn validate_proxy_config_rejects_inline_credentials() {
+        for url in [
+            "http://user:pass@proxy.corp.com:8080",
+            "http://user@proxy.corp.com:8080",
+            "user:pass@proxy.corp.com:8080",
+        ] {
+            let cfg = PodmanComputeConfig {
+                https_proxy: Some(url.to_string()),
+                ..PodmanComputeConfig::default()
+            };
+            let err = cfg.validate_proxy_config().unwrap_err();
+            assert!(
+                err.to_string().contains("proxy_auth_file"),
+                "{url} should be rejected and point at proxy_auth_file: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_proxy_config_accepts_auth_file_with_proxy() {
+        let cfg = PodmanComputeConfig {
+            https_proxy: Some("http://proxy.corp.com:8080".to_string()),
+            proxy_auth_file: Some("/etc/openshell/secrets/proxy-auth".to_string()),
+            ..PodmanComputeConfig::default()
+        };
+        assert!(cfg.validate_proxy_config().is_ok());
+    }
+
+    #[test]
+    fn validate_proxy_config_rejects_auth_file_without_proxy() {
+        let cfg = PodmanComputeConfig {
+            proxy_auth_file: Some("/etc/openshell/secrets/proxy-auth".to_string()),
+            ..PodmanComputeConfig::default()
+        };
+        let err = cfg.validate_proxy_config().unwrap_err();
+        assert!(err.to_string().contains("proxy_auth_file"), "{err}");
     }
 
     // ── TLS config validation ─────────────────────────────────────────

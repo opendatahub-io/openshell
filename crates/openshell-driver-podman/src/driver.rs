@@ -114,6 +114,56 @@ async fn cleanup_sandbox_token_secret(client: &PodmanClient, secret_name: &str) 
     }
 }
 
+/// Read the operator's proxy credentials file and stage it as a per-sandbox
+/// Podman secret, so the credentials reach the supervisor through a root-only
+/// mount rather than the container environment.
+///
+/// Fails closed: when `proxy_auth_file` is configured but cannot be read or is
+/// empty/malformed, the sandbox is not created.
+async fn create_sandbox_proxy_auth_secret(
+    client: &PodmanClient,
+    config: &PodmanComputeConfig,
+    sandbox: &DriverSandbox,
+) -> Result<Option<String>, ComputeDriverError> {
+    let Some(path) = config.proxy_auth_file.as_deref() else {
+        return Ok(None);
+    };
+
+    let raw = tokio::fs::read_to_string(path).await.map_err(|e| {
+        ComputeDriverError::Message(format!("failed to read proxy_auth_file '{path}': {e}"))
+    })?;
+    let credential = raw.trim();
+    if credential.is_empty() {
+        return Err(ComputeDriverError::InvalidArgument(format!(
+            "proxy_auth_file '{path}' is empty"
+        )));
+    }
+    // A credential containing CR/LF/NUL would allow HTTP header injection once
+    // the supervisor places it in the Proxy-Authorization header.
+    if credential.contains(['\r', '\n', '\0']) {
+        return Err(ComputeDriverError::InvalidArgument(format!(
+            "proxy_auth_file '{path}' must not contain control characters"
+        )));
+    }
+
+    let secret_name = container::proxy_auth_secret_name(&sandbox.id);
+    client
+        .create_secret(&secret_name, format!("{credential}\n").as_bytes())
+        .await
+        .map_err(ComputeDriverError::from)?;
+    Ok(Some(secret_name))
+}
+
+async fn cleanup_sandbox_proxy_auth_secret(client: &PodmanClient, secret_name: &str) {
+    if let Err(err) = client.remove_secret(secret_name).await {
+        warn!(
+            secret = %secret_name,
+            error = %err,
+            "Failed to remove Podman sandbox proxy-auth secret"
+        );
+    }
+}
+
 fn local_podman_cdi_gpu_inventory_from(dev_root: &Path) -> CdiGpuInventory {
     let mut device_ids = std::fs::read_dir(dev_root)
         .ok()
@@ -543,6 +593,29 @@ impl PodmanComputeDriver {
                 return Err(e);
             }
         };
+        let proxy_auth_secret_name =
+            match create_sandbox_proxy_auth_secret(&self.client, &self.config, sandbox).await {
+                Ok(name) => name,
+                Err(e) => {
+                    let _ = self.client.remove_volume(&vol_name).await;
+                    if let Some(secret) = token_secret_name.as_deref() {
+                        cleanup_sandbox_token_secret(&self.client, secret).await;
+                    }
+                    return Err(e);
+                }
+            };
+
+        // Clean up the volume and both per-sandbox secrets on any failure past
+        // this point.
+        let cleanup_created = || async {
+            let _ = self.client.remove_volume(&vol_name).await;
+            if let Some(secret) = token_secret_name.as_deref() {
+                cleanup_sandbox_token_secret(&self.client, secret).await;
+            }
+            if let Some(secret) = proxy_auth_secret_name.as_deref() {
+                cleanup_sandbox_proxy_auth_secret(&self.client, secret).await;
+            }
+        };
 
         // 3. Create container.
         let gpu_devices = match self.resolve_gpu_cdi_devices(
@@ -552,10 +625,7 @@ impl PodmanComputeDriver {
         ) {
             Ok(devices) => devices,
             Err(e) => {
-                let _ = self.client.remove_volume(&vol_name).await;
-                if let Some(secret) = token_secret_name.as_deref() {
-                    cleanup_sandbox_token_secret(&self.client, secret).await;
-                }
+                cleanup_created().await;
                 return Err(e);
             }
         };
@@ -567,10 +637,7 @@ impl PodmanComputeDriver {
         ) {
             Ok(spec) => spec,
             Err(e) => {
-                let _ = self.client.remove_volume(&vol_name).await;
-                if let Some(secret) = token_secret_name.as_deref() {
-                    cleanup_sandbox_token_secret(&self.client, secret).await;
-                }
+                cleanup_created().await;
                 return Err(e);
             }
         };
@@ -581,17 +648,11 @@ impl PodmanComputeDriver {
                 // sandbox's ID, not the conflicting container's ID (which
                 // has the same name but a different ID), so it would be
                 // orphaned otherwise.
-                let _ = self.client.remove_volume(&vol_name).await;
-                if let Some(secret) = token_secret_name.as_deref() {
-                    cleanup_sandbox_token_secret(&self.client, secret).await;
-                }
+                cleanup_created().await;
                 return Err(ComputeDriverError::AlreadyExists);
             }
             Err(e) => {
-                let _ = self.client.remove_volume(&vol_name).await;
-                if let Some(secret) = token_secret_name.as_deref() {
-                    cleanup_sandbox_token_secret(&self.client, secret).await;
-                }
+                cleanup_created().await;
                 return Err(ComputeDriverError::from(e));
             }
         }
@@ -604,10 +665,7 @@ impl PodmanComputeDriver {
                 "Failed to start container; cleaning up"
             );
             let _ = self.client.remove_container(&name).await;
-            let _ = self.client.remove_volume(&vol_name).await;
-            if let Some(secret) = token_secret_name.as_deref() {
-                cleanup_sandbox_token_secret(&self.client, secret).await;
-            }
+            cleanup_created().await;
             return Err(ComputeDriverError::from(e));
         }
 
@@ -690,6 +748,11 @@ impl PodmanComputeDriver {
             );
         }
         cleanup_sandbox_token_secret(&self.client, &container::token_secret_name(sandbox_id)).await;
+        cleanup_sandbox_proxy_auth_secret(
+            &self.client,
+            &container::proxy_auth_secret_name(sandbox_id),
+        )
+        .await;
 
         Ok(container_existed)
     }

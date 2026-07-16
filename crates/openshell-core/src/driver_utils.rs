@@ -75,6 +75,13 @@ pub const TLS_KEY_MOUNT_PATH: &str = "/etc/openshell/tls/client/tls.key";
 /// Container-side mount path for the per-sandbox JWT token.
 pub const SANDBOX_TOKEN_MOUNT_PATH: &str = "/etc/openshell/auth/sandbox.jwt";
 
+/// Container-side mount path for the corporate upstream-proxy credentials.
+///
+/// The file holds the `user:pass` userinfo used to build the
+/// `Proxy-Authorization` header. It is delivered through a root-only secret
+/// mount so the credential never appears in container environment/metadata.
+pub const UPSTREAM_PROXY_AUTH_MOUNT_PATH: &str = "/etc/openshell/auth/upstream-proxy";
+
 /// Return the XDG state path for a driver's sandbox JWT token file.
 ///
 /// The resulting path is `$XDG_STATE_HOME/openshell/<driver_subdir>[/<namespace>]/<sandbox_id>/sandbox.jwt`.

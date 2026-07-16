@@ -138,3 +138,12 @@ pub const UPSTREAM_HTTP_PROXY: &str = "OPENSHELL_UPSTREAM_HTTP_PROXY";
 /// Operator-owned counterpart to [`UPSTREAM_HTTPS_PROXY`]; see that constant
 /// for the trust-boundary rationale.
 pub const UPSTREAM_NO_PROXY: &str = "OPENSHELL_UPSTREAM_NO_PROXY";
+
+/// Filesystem path (inside the sandbox) to the corporate proxy credentials.
+///
+/// The file holds `user:pass` userinfo the supervisor turns into a
+/// `Proxy-Authorization: Basic` header. Credentials are delivered through this
+/// root-only file rather than embedded in the proxy URL, so they never appear
+/// in container environment or metadata. Compute drivers write this in the
+/// required-variable tier; the value is a path, not a secret.
+pub const UPSTREAM_PROXY_AUTH_FILE: &str = "OPENSHELL_UPSTREAM_PROXY_AUTH_FILE";

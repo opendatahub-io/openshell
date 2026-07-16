@@ -398,9 +398,16 @@ health_check_interval_secs = 10
 # IPs, CIDRs) are dialed directly. This is an operator-owned egress boundary:
 # sandbox and template environment cannot override it, and the conventional
 # HTTPS_PROXY/HTTP_PROXY/NO_PROXY variables a sandbox sets do not affect it.
-# https_proxy = "http://proxy.corp.com:8080"
-# http_proxy  = "http://proxy.corp.com:8080"
-# no_proxy    = "*.svc.cluster.local,10.0.0.0/8"
+#
+# Credentials must NOT be embedded in the URL (an inline user:pass@ is
+# rejected at startup, since it would be stored here and exposed in container
+# metadata). Instead point proxy_auth_file at a file containing "user:pass";
+# the gateway delivers it to the supervisor through a root-only secret mount.
+# Keep gateway.toml and the auth file owner-readable only (mode 0600).
+# https_proxy     = "http://proxy.corp.com:8080"
+# http_proxy      = "http://proxy.corp.com:8080"
+# no_proxy        = "*.svc.cluster.local,10.0.0.0/8"
+# proxy_auth_file = "/etc/openshell/secrets/proxy-auth"
 ```
 
 ### MicroVM
