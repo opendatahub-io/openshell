@@ -394,8 +394,10 @@ health_check_interval_secs = 10
 # Corporate forward proxy for sandbox egress. When set, the in-container
 # supervisor chains policy-approved upstream connections through this proxy
 # with HTTP CONNECT instead of dialing destinations directly. Only http://
-# proxy URLs are supported. NO_PROXY entries (hostnames, domain suffixes,
-# IPs, CIDRs) are dialed directly. This is an operator-owned egress boundary:
+# proxy URLs are supported, in scheme://host:port form: a URL carrying a
+# path, query, or fragment is rejected rather than silently truncated.
+# NO_PROXY entries (hostnames, domain suffixes, IPs, CIDRs) are dialed
+# directly. This is an operator-owned egress boundary:
 # sandbox and template environment cannot override it, and the conventional
 # HTTPS_PROXY/HTTP_PROXY/NO_PROXY variables a sandbox sets do not affect it.
 #

@@ -584,6 +584,16 @@ mod tests {
     fn malformed_proxy_address_is_fatal() {
         let err = config_from(&[(HTTP_PROXY, "http://proxy:notaport")]).unwrap_err();
         assert!(err.contains(HTTP_PROXY), "{err}");
+        // A path/query/fragment addresses an endpoint, not a proxy; it is
+        // rejected rather than silently discarded.
+        for url in [
+            "http://proxy:8080/path",
+            "http://proxy:8080?x=1",
+            "http://proxy:8080#frag",
+        ] {
+            let err = config_from(&[(HTTPS_PROXY, url)]).unwrap_err();
+            assert!(err.contains(HTTPS_PROXY), "{url}: {err}");
+        }
         // One invalid endpoint is fatal even when the other one is valid.
         let err = config_from(&[
             (HTTPS_PROXY, "http://proxy.corp.com:8080"),

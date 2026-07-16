@@ -125,13 +125,21 @@ pub enum UpstreamProxyUrlError {
     /// The URL has no host component.
     #[error("proxy URL is missing a proxy host")]
     MissingHost,
+    /// The URL carries a path, query, or fragment. A forward proxy is
+    /// addressed by `host:port` only, so extra components indicate a
+    /// misconfiguration (e.g. a pasted endpoint URL) and are rejected instead
+    /// of being silently discarded.
+    #[error("proxy URL must not contain a {0}; use scheme://host:port only")]
+    UnexpectedComponent(&'static str),
 }
 
 /// Parse and validate a corporate upstream-proxy URL.
 ///
 /// A bare `host:port` (no `://`) is normalized to `http://host:port`. Only
 /// `http://` proxies are accepted, inline userinfo is rejected, and the port
-/// defaults to 80.
+/// defaults to 80. The URL must address the proxy only: a path (other than
+/// a bare trailing `/`), query, or fragment is rejected rather than silently
+/// discarded.
 ///
 /// # Errors
 ///
@@ -166,6 +174,17 @@ pub fn parse_upstream_proxy_url(raw: &str) -> Result<UpstreamProxyAddr, Upstream
     };
     if host.is_empty() {
         return Err(UpstreamProxyUrlError::MissingHost);
+    }
+    // The `url` crate normalizes an absent path to "/" for http URLs, so a
+    // bare trailing slash is indistinguishable from no path and is accepted.
+    if !matches!(parsed.path(), "" | "/") {
+        return Err(UpstreamProxyUrlError::UnexpectedComponent("path"));
+    }
+    if parsed.query().is_some() {
+        return Err(UpstreamProxyUrlError::UnexpectedComponent("query"));
+    }
+    if parsed.fragment().is_some() {
+        return Err(UpstreamProxyUrlError::UnexpectedComponent("fragment"));
     }
     Ok(UpstreamProxyAddr {
         host,
@@ -374,6 +393,27 @@ mod tests {
             Err(UpstreamProxyUrlError::Invalid(_))
         ));
         assert!(parse_upstream_proxy_url("http://").is_err());
+    }
+
+    #[test]
+    fn upstream_proxy_url_rejects_path_query_and_fragment() {
+        for (url, component) in [
+            ("http://proxy.corp.com:8080/some/path", "path"),
+            ("proxy.corp.com:8080/some/path", "path"),
+            ("http://proxy.corp.com:8080?x=1", "query"),
+            ("http://proxy.corp.com:8080/?x=1", "query"),
+            ("http://proxy.corp.com:8080#frag", "fragment"),
+        ] {
+            assert_eq!(
+                parse_upstream_proxy_url(url),
+                Err(UpstreamProxyUrlError::UnexpectedComponent(component)),
+                "{url}"
+            );
+        }
+        // A bare trailing slash is URL normalization, not a real path.
+        let addr = parse_upstream_proxy_url("http://proxy.corp.com:8080/").unwrap();
+        assert_eq!(addr.host, "proxy.corp.com");
+        assert_eq!(addr.port, 8080);
     }
 
     #[test]

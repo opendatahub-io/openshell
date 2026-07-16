@@ -460,6 +460,25 @@ mod tests {
     }
 
     #[test]
+    fn validate_proxy_config_rejects_url_components() {
+        for url in [
+            "http://proxy.corp.com:8080/path",
+            "http://proxy.corp.com:8080?x=1",
+            "http://proxy.corp.com:8080#frag",
+        ] {
+            let cfg = PodmanComputeConfig {
+                https_proxy: Some(url.to_string()),
+                ..PodmanComputeConfig::default()
+            };
+            let err = cfg.validate_proxy_config().unwrap_err();
+            assert!(
+                err.to_string().contains("scheme://host:port"),
+                "{url}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn validate_proxy_config_rejects_empty_value() {
         let cfg = PodmanComputeConfig {
             http_proxy: Some("  ".to_string()),

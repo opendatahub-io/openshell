@@ -112,7 +112,8 @@ compute drivers write in their required-variable tier; sandbox and template
 environment cannot override them. The conventional `HTTPS_PROXY`/`HTTP_PROXY`/
 `NO_PROXY` variables a sandbox controls are ignored on this path. Reserved
 `NO_PROXY` destinations, loopback, and host-gateway aliases always dial
-directly. Only `http://` proxy URLs are supported. Local DNS resolution and
+directly. Only `http://` proxy URLs in `scheme://host:port` form are
+supported; a path, query, or fragment is rejected. Local DNS resolution and
 SSRF validation still run before the proxied dial; the CONNECT target sent to
 the corporate proxy is the requested hostname. The workload child's proxy
 variables are unaffected — they are always rewritten to point at the local
