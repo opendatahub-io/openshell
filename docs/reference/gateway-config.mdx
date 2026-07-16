@@ -408,6 +408,9 @@ health_check_interval_secs = 10
 # rejected at startup, since it would be stored here and exposed in container
 # metadata). Instead point proxy_auth_file at a file containing "user:pass";
 # the gateway delivers it to the supervisor through a root-only secret mount.
+# The credential must use the user:pass form (non-empty user, no control
+# characters); the same validation runs at sandbox-create time and in the
+# supervisor, so a credential accepted here is never rejected in-container.
 # Keep gateway.toml and the auth file owner-readable only (mode 0600).
 # https_proxy     = "http://proxy.corp.com:8080"
 # http_proxy      = "http://proxy.corp.com:8080"

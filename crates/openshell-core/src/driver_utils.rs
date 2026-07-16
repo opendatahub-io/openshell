@@ -173,6 +173,60 @@ pub fn parse_upstream_proxy_url(raw: &str) -> Result<UpstreamProxyAddr, Upstream
     })
 }
 
+/// Why an upstream proxy credential was rejected by
+/// [`parse_upstream_proxy_credential`].
+///
+/// Variants carry no payload so an error can never leak credential content
+/// into logs or user-facing messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UpstreamProxyCredentialError {
+    /// The credential is empty or whitespace-only.
+    #[error("credential is empty")]
+    Empty,
+    /// The credential contains control characters (CR, LF, NUL, tab, ...)
+    /// that could inject additional HTTP headers.
+    #[error("credential contains control characters")]
+    ControlCharacters,
+    /// The credential has no `:` separating user from password.
+    #[error("credential must use the user:pass form (missing ':')")]
+    MissingSeparator,
+    /// The credential has an empty user before the `:` separator.
+    #[error("credential must use the user:pass form (empty user)")]
+    EmptyUser,
+}
+
+/// Validate a corporate upstream-proxy credential read from the proxy auth
+/// file, returning the trimmed `user:pass` value.
+///
+/// Single source of truth for what counts as a valid proxy credential: the
+/// compute driver applies it at sandbox-create time (before staging the
+/// secret) and the in-container supervisor applies it again before building
+/// the `Proxy-Authorization: Basic` header, so a credential one side accepts
+/// is never rejected by the other.
+///
+/// Surrounding whitespace (including the conventional trailing newline) is
+/// trimmed. The user part must be non-empty; the password may be empty and
+/// may itself contain `:` (per RFC 7617 the first `:` is the separator).
+///
+/// # Errors
+///
+/// Returns an [`UpstreamProxyCredentialError`] describing the first rule the
+/// value violates. Errors never contain the credential itself.
+pub fn parse_upstream_proxy_credential(raw: &str) -> Result<&str, UpstreamProxyCredentialError> {
+    let credential = raw.trim();
+    if credential.is_empty() {
+        return Err(UpstreamProxyCredentialError::Empty);
+    }
+    if credential.contains(|c: char| c.is_control()) {
+        return Err(UpstreamProxyCredentialError::ControlCharacters);
+    }
+    match credential.split_once(':') {
+        None => Err(UpstreamProxyCredentialError::MissingSeparator),
+        Some(("", _)) => Err(UpstreamProxyCredentialError::EmptyUser),
+        Some(_) => Ok(credential),
+    }
+}
+
 /// Return the XDG state path for a driver's sandbox JWT token file.
 ///
 /// The resulting path is `$XDG_STATE_HOME/openshell/<driver_subdir>[/<namespace>]/<sandbox_id>/sandbox.jwt`.
@@ -320,5 +374,51 @@ mod tests {
             Err(UpstreamProxyUrlError::Invalid(_))
         ));
         assert!(parse_upstream_proxy_url("http://").is_err());
+    }
+
+    #[test]
+    fn upstream_proxy_credential_accepts_user_pass_and_trims() {
+        assert_eq!(
+            parse_upstream_proxy_credential("user:pass\n"),
+            Ok("user:pass")
+        );
+        // The password may be empty and may contain further colons.
+        assert_eq!(parse_upstream_proxy_credential("user:"), Ok("user:"));
+        assert_eq!(
+            parse_upstream_proxy_credential("user:p@:ss"),
+            Ok("user:p@:ss")
+        );
+    }
+
+    #[test]
+    fn upstream_proxy_credential_rejects_empty() {
+        for raw in ["", "  ", "\n"] {
+            assert_eq!(
+                parse_upstream_proxy_credential(raw),
+                Err(UpstreamProxyCredentialError::Empty)
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_proxy_credential_rejects_control_characters() {
+        for raw in ["user:pa\r\nss", "user:pa\0ss", "user:pa\tss"] {
+            assert_eq!(
+                parse_upstream_proxy_credential(raw),
+                Err(UpstreamProxyCredentialError::ControlCharacters)
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_proxy_credential_rejects_malformed_user_pass_form() {
+        assert_eq!(
+            parse_upstream_proxy_credential("userpass"),
+            Err(UpstreamProxyCredentialError::MissingSeparator)
+        );
+        assert_eq!(
+            parse_upstream_proxy_credential(":pass"),
+            Err(UpstreamProxyCredentialError::EmptyUser)
+        );
     }
 }

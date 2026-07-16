@@ -21,13 +21,14 @@
 //!
 //! Scope and invariants:
 //! - Only `http://` proxy URLs are supported. Configuration is fail-closed:
-//!   any present-but-invalid reserved value — an unsupported (`https://`,
-//!   SOCKS) or malformed proxy URL, an unreadable auth file, or a malformed
-//!   credential — is a fatal startup error rather than being silently
-//!   ignored, so a typo can never quietly downgrade the operator's egress
-//!   boundary to direct dialing or unauthenticated proxy access. Validation
-//!   semantics are shared with the compute driver via
-//!   [`openshell_core::driver_utils::parse_upstream_proxy_url`].
+//!   any present-but-invalid reserved value — a present-but-empty variable,
+//!   an unsupported (`https://`, SOCKS) or malformed proxy URL, an unreadable
+//!   auth file, or a malformed credential — is a fatal startup error rather
+//!   than being silently ignored, so a typo can never quietly downgrade the
+//!   operator's egress boundary to direct dialing or unauthenticated proxy
+//!   access. Validation semantics are shared with the compute driver via
+//!   [`openshell_core::driver_utils::parse_upstream_proxy_url`] and
+//!   [`openshell_core::driver_utils::parse_upstream_proxy_credential`].
 //! - Policy evaluation, DNS resolution, and SSRF checks run exactly as in the
 //!   direct-dial path; the corporate proxy only replaces the final TCP dial.
 //! - The reserved `NO_PROXY` list decides which destinations bypass the
@@ -184,8 +185,7 @@ impl UpstreamProxyConfig {
     /// [`UPSTREAM_HTTP_PROXY`](openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY),
     /// [`UPSTREAM_NO_PROXY`](openshell_core::sandbox_env::UPSTREAM_NO_PROXY),
     /// [`UPSTREAM_PROXY_AUTH_FILE`](openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE)).
-    /// Returns `Ok(None)` when no proxy is configured (unset or empty
-    /// variables).
+    /// Returns `Ok(None)` when no proxy is configured (unset variables).
     ///
     /// The conventional `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`
     /// variables are intentionally ignored here: they are set by the sandbox
@@ -199,11 +199,12 @@ impl UpstreamProxyConfig {
     ///
     /// These reserved variables are an operator-owned security boundary, so
     /// any present-but-invalid value is fatal instead of being treated as
-    /// unset: an invalid or unsupported proxy URL, an auth file that is set
-    /// but unreadable or holds a malformed credential, or an auth file with
-    /// no proxy configured. Failing closed here prevents a misconfiguration
+    /// unset: a present-but-empty (or whitespace-only) reserved variable, an
+    /// invalid or unsupported proxy URL, an auth file that is set but
+    /// unreadable or holds a malformed credential, or an auth file with no
+    /// proxy configured. Failing closed here prevents a misconfiguration
     /// from silently degrading to direct dialing or unauthenticated proxy
-    /// access.
+    /// access. Only fully unset variables mean "no proxy".
     pub fn from_env() -> Result<Option<Self>, String> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
@@ -212,14 +213,27 @@ impl UpstreamProxyConfig {
         use openshell_core::sandbox_env::{
             UPSTREAM_HTTP_PROXY, UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY, UPSTREAM_PROXY_AUTH_FILE,
         };
-        let var = |name: &str| lookup(name).filter(|v| !v.trim().is_empty());
-        let https = var(UPSTREAM_HTTPS_PROXY)
+        // Only a fully unset reserved variable means "not configured". A
+        // present-but-empty value is a misconfiguration (the compute driver
+        // never writes one), so it is fatal rather than silently downgrading
+        // the boundary to direct dialing or unauthenticated proxy access.
+        let var = |name: &str| -> Result<Option<String>, String> {
+            match lookup(name) {
+                None => Ok(None),
+                Some(value) if value.trim().is_empty() => Err(format!(
+                    "{name} is set but empty; unset it to disable the upstream proxy"
+                )),
+                Some(value) => Ok(Some(value)),
+            }
+        };
+        let https = var(UPSTREAM_HTTPS_PROXY)?
             .map(|url| parse_proxy_url(&url, UPSTREAM_HTTPS_PROXY))
             .transpose()?;
-        let http = var(UPSTREAM_HTTP_PROXY)
+        let http = var(UPSTREAM_HTTP_PROXY)?
             .map(|url| parse_proxy_url(&url, UPSTREAM_HTTP_PROXY))
             .transpose()?;
-        let auth_file = var(UPSTREAM_PROXY_AUTH_FILE);
+        let auth_file = var(UPSTREAM_PROXY_AUTH_FILE)?;
+        let no_proxy_list = var(UPSTREAM_NO_PROXY)?;
         if https.is_none() && http.is_none() {
             if auth_file.is_some() {
                 return Err(format!(
@@ -228,7 +242,7 @@ impl UpstreamProxyConfig {
             }
             return Ok(None);
         }
-        let no_proxy = NoProxy::parse(&var(UPSTREAM_NO_PROXY).unwrap_or_default());
+        let no_proxy = NoProxy::parse(&no_proxy_list.unwrap_or_default());
         let mut config = Self {
             https,
             http,
@@ -317,22 +331,21 @@ fn parse_proxy_url(raw: &str, var_name: &str) -> Result<ProxyEndpoint, String> {
 /// Build a `Proxy-Authorization: Basic <base64>` header value from a raw
 /// `user:pass` credential.
 ///
-/// The credential is used verbatim: it is delivered through a trusted
-/// operator file, not a URL, so there is no percent-encoding to decode.
+/// The credential is used verbatim after trimming: it is delivered through a
+/// trusted operator file, not a URL, so there is no percent-encoding to
+/// decode. Validation is shared with the compute driver through
+/// [`parse_upstream_proxy_credential`](openshell_core::driver_utils::parse_upstream_proxy_credential),
+/// so a credential the driver staged at sandbox-create time is never rejected
+/// here.
 ///
 /// # Errors
 ///
-/// Rejects an empty credential and one containing control characters (CR, LF,
-/// NUL) that could inject additional HTTP headers. Error messages never
-/// include the credential content.
+/// Rejects an empty credential, one containing control characters that could
+/// inject additional HTTP headers, and one not in `user:pass` form. Error
+/// messages never include the credential content.
 fn basic_auth_header(credential: &str) -> Result<String, String> {
-    let credential = credential.trim();
-    if credential.is_empty() {
-        return Err("credential is empty".to_string());
-    }
-    if credential.contains(|c: char| c.is_control()) {
-        return Err("credential contains control characters".to_string());
-    }
+    let credential = openshell_core::driver_utils::parse_upstream_proxy_credential(credential)
+        .map_err(|err| err.to_string())?;
     Ok(format!(
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(credential)
@@ -494,12 +507,21 @@ mod tests {
     }
 
     #[test]
-    fn empty_values_yield_none() {
-        assert!(
-            config_from(&[(HTTPS_PROXY, "  "), (HTTP_PROXY, "")])
-                .unwrap()
-                .is_none()
-        );
+    fn present_but_empty_values_are_fatal() {
+        // A reserved variable the operator did not set is absent, never
+        // empty: the driver only writes configured values. A present-but
+        // -blank value is therefore a misconfiguration and must not silently
+        // mean "no proxy".
+        for (name, value) in [
+            (HTTPS_PROXY, ""),
+            (HTTP_PROXY, "  "),
+            (NO_PROXY, " "),
+            (PROXY_AUTH_FILE, ""),
+        ] {
+            let err = config_from(&[(name, value)]).unwrap_err();
+            assert!(err.contains(name), "{err}");
+            assert!(err.contains("empty"), "{err}");
+        }
     }
 
     #[test]
@@ -576,7 +598,9 @@ mod tests {
 
     #[test]
     fn malformed_auth_file_credential_is_fatal() {
-        for credential in ["  ", "user:pa\r\nss"] {
+        // Empty, header-injecting, and non-`user:pass` credentials are all
+        // rejected by the parser shared with the compute driver.
+        for credential in ["  ", "user:pa\r\nss", "userpass", ":pass"] {
             let file = tempfile::NamedTempFile::new().unwrap();
             std::fs::write(file.path(), credential).unwrap();
             let path = file.path().to_str().unwrap().to_string();
@@ -621,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn basic_auth_header_encodes_and_rejects_control_chars() {
+    fn basic_auth_header_encodes_and_rejects_malformed_credentials() {
         assert_eq!(
             basic_auth_header("user:p@ss").as_deref(),
             Ok(format!(
@@ -633,6 +657,7 @@ mod tests {
         assert!(basic_auth_header("  ").is_err());
         assert!(basic_auth_header("user:pa\r\nss").is_err());
         assert!(basic_auth_header("user:pa\nInjected: header").is_err());
+        assert!(basic_auth_header("no-separator").is_err());
     }
 
     #[test]
@@ -713,7 +738,8 @@ mod tests {
 
     #[test]
     fn loopback_and_localhost_always_bypass() {
-        let cfg = no_proxy_cfg("");
+        // No NO_PROXY at all: loopback still bypasses unconditionally.
+        let cfg = config_ok(&[(HTTPS_PROXY, "http://proxy:8080")]);
         assert!(bypasses(&cfg, "localhost"));
         assert!(bypasses(&cfg, "127.0.0.1"));
         assert!(bypasses(&cfg, "::1"));

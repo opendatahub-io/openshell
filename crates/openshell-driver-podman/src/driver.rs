@@ -118,8 +118,11 @@ async fn cleanup_sandbox_token_secret(client: &PodmanClient, secret_name: &str) 
 /// Podman secret, so the credentials reach the supervisor through a root-only
 /// mount rather than the container environment.
 ///
-/// Fails closed: when `proxy_auth_file` is configured but cannot be read or is
-/// empty/malformed, the sandbox is not created.
+/// Fails closed: when `proxy_auth_file` is configured but cannot be read or
+/// does not hold a valid `user:pass` credential, the sandbox is not created.
+/// Credential validation is shared with the in-container supervisor through
+/// [`openshell_core::driver_utils::parse_upstream_proxy_credential`], so a
+/// credential staged here can never be rejected at supervisor startup.
 async fn create_sandbox_proxy_auth_secret(
     client: &PodmanClient,
     config: &PodmanComputeConfig,
@@ -132,19 +135,10 @@ async fn create_sandbox_proxy_auth_secret(
     let raw = tokio::fs::read_to_string(path).await.map_err(|e| {
         ComputeDriverError::Message(format!("failed to read proxy_auth_file '{path}': {e}"))
     })?;
-    let credential = raw.trim();
-    if credential.is_empty() {
-        return Err(ComputeDriverError::InvalidArgument(format!(
-            "proxy_auth_file '{path}' is empty"
-        )));
-    }
-    // A credential containing CR/LF/NUL would allow HTTP header injection once
-    // the supervisor places it in the Proxy-Authorization header.
-    if credential.contains(['\r', '\n', '\0']) {
-        return Err(ComputeDriverError::InvalidArgument(format!(
-            "proxy_auth_file '{path}' must not contain control characters"
-        )));
-    }
+    let credential =
+        openshell_core::driver_utils::parse_upstream_proxy_credential(&raw).map_err(|err| {
+            ComputeDriverError::InvalidArgument(format!("proxy_auth_file '{path}': {err}"))
+        })?;
 
     let secret_name = container::proxy_auth_secret_name(&sandbox.id);
     client
