@@ -78,6 +78,13 @@ const SUPERVISOR_ONLY_ENV_VARS: &[&str] = &[
     openshell_core::sandbox_env::TLS_CERT,
     openshell_core::sandbox_env::TLS_KEY,
     openshell_core::sandbox_env::PROVIDER_SPIFFE_WORKLOAD_API_SOCKET,
+    // Corporate proxy routing is a supervisor-only egress boundary and the URLs
+    // may embed proxy credentials (`http://user:pass@proxy`). The workload
+    // reaches egress through the local policy proxy, never the corporate proxy
+    // directly, so these must not be inherited by sandbox child processes.
+    openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
+    openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY,
+    openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
 ];
 
 pub fn is_supervisor_only_env_var(key: &str) -> bool {
@@ -2255,6 +2262,19 @@ mod tests {
             );
         }
         assert!(stdout.contains("OPENSHELL_ENDPOINT=https://gateway.example.test"));
+
+        // The reserved corporate-proxy variables can carry proxy credentials
+        // and must be treated as supervisor-only so they are stripped above.
+        for key in [
+            openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
+            openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY,
+            openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
+        ] {
+            assert!(
+                is_supervisor_only_env_var(key),
+                "{key} must be supervisor-only so it is not leaked to the workload"
+            );
+        }
     }
 
     #[test]

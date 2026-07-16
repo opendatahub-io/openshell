@@ -103,15 +103,20 @@ handled by the inference interception path:
 External inference endpoints that do not use `inference.local` are treated like
 ordinary network traffic and must be allowed by policy.
 
-In proxy-required networks, the supervisor honors `HTTPS_PROXY`/`HTTP_PROXY`/
-`NO_PROXY` from its own environment: after policy and SSRF checks pass, it
-chains the upstream dial through the corporate forward proxy with HTTP CONNECT
-instead of connecting directly. `NO_PROXY` destinations, loopback, and
-host-gateway aliases always dial directly. Only `http://` proxy URLs are
-supported. Local DNS resolution and SSRF validation still run before the
-proxied dial; the CONNECT target sent to the corporate proxy is the requested
-hostname. The workload child's proxy variables are unaffected — they are
-always rewritten to point at the local policy proxy.
+In proxy-required networks, the supervisor chains the upstream dial through a
+corporate forward proxy with HTTP CONNECT instead of connecting directly, once
+policy and SSRF checks pass. The proxy configuration is an operator-owned
+boundary read from reserved `OPENSHELL_UPSTREAM_HTTPS_PROXY` /
+`OPENSHELL_UPSTREAM_HTTP_PROXY` / `OPENSHELL_UPSTREAM_NO_PROXY` variables that
+compute drivers write in their required-variable tier; sandbox and template
+environment cannot override them. The conventional `HTTPS_PROXY`/`HTTP_PROXY`/
+`NO_PROXY` variables a sandbox controls are ignored on this path. Reserved
+`NO_PROXY` destinations, loopback, and host-gateway aliases always dial
+directly. Only `http://` proxy URLs are supported. Local DNS resolution and
+SSRF validation still run before the proxied dial; the CONNECT target sent to
+the corporate proxy is the requested hostname. The workload child's proxy
+variables are unaffected — they are always rewritten to point at the local
+policy proxy.
 
 ## Credentials
 

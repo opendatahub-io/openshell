@@ -395,8 +395,9 @@ health_check_interval_secs = 10
 # supervisor chains policy-approved upstream connections through this proxy
 # with HTTP CONNECT instead of dialing destinations directly. Only http://
 # proxy URLs are supported. NO_PROXY entries (hostnames, domain suffixes,
-# IPs, CIDRs) are dialed directly. Per-sandbox HTTPS_PROXY/HTTP_PROXY/NO_PROXY
-# environment values take precedence over these defaults.
+# IPs, CIDRs) are dialed directly. This is an operator-owned egress boundary:
+# sandbox and template environment cannot override it, and the conventional
+# HTTPS_PROXY/HTTP_PROXY/NO_PROXY variables a sandbox sets do not affect it.
 # https_proxy = "http://proxy.corp.com:8080"
 # http_proxy  = "http://proxy.corp.com:8080"
 # no_proxy    = "*.svc.cluster.local,10.0.0.0/8"

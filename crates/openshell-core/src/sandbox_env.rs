@@ -114,3 +114,27 @@ pub const SANDBOX_UID: &str = "OPENSHELL_SANDBOX_UID";
 /// Used alongside UID for PVC init container `chown` operations and when the
 /// supervisor drops privileges to a group other than the UID's primary group.
 pub const SANDBOX_GID: &str = "OPENSHELL_SANDBOX_GID";
+
+/// Corporate forward-proxy URL the supervisor chains TLS (CONNECT) egress
+/// through, e.g. `http://proxy.corp.com:8080`.
+///
+/// This is an operator-owned egress boundary. Compute drivers set it from
+/// gateway configuration in the supervisor's required-variable tier so that
+/// sandbox spec/template environment cannot override it. The supervisor reads
+/// *only* this reserved name — never the conventional `HTTPS_PROXY` /
+/// `ALL_PROXY` variables, which the sandbox creator controls and which are
+/// reserved for pointing the workload child at the local policy proxy.
+pub const UPSTREAM_HTTPS_PROXY: &str = "OPENSHELL_UPSTREAM_HTTPS_PROXY";
+
+/// Corporate forward-proxy URL the supervisor uses for plain-HTTP egress.
+///
+/// Operator-owned counterpart to [`UPSTREAM_HTTPS_PROXY`]; see that constant
+/// for the trust-boundary rationale.
+pub const UPSTREAM_HTTP_PROXY: &str = "OPENSHELL_UPSTREAM_HTTP_PROXY";
+
+/// Comma-separated `NO_PROXY`-style list of destinations the supervisor dials
+/// directly instead of chaining through the corporate proxy.
+///
+/// Operator-owned counterpart to [`UPSTREAM_HTTPS_PROXY`]; see that constant
+/// for the trust-boundary rationale.
+pub const UPSTREAM_NO_PROXY: &str = "OPENSHELL_UPSTREAM_NO_PROXY";

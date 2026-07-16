@@ -385,26 +385,40 @@ fn build_env(
         env.insert(openshell_core::sandbox_env::USER_ENVIRONMENT.into(), json);
     }
 
-    // 1.5. Operator-configured corporate egress proxy. The in-container
-    // supervisor reads these from its own environment and chains approved
-    // upstream dials through the corporate proxy; the workload child's proxy
-    // variables are rewritten separately to point at the local policy proxy.
-    // Inserted as defaults so per-sandbox user env wins. Both cases are set
-    // because proxy-aware tooling disagrees on which one it reads.
+    // 2. Required driver vars (highest priority -- always overwrite).
+
+    // Operator-configured corporate egress proxy. This is a security boundary,
+    // so it is written in the required-variable tier under reserved
+    // supervisor-only names. The conventional `HTTPS_PROXY`/`NO_PROXY` variants
+    // are deliberately NOT used here: those belong to the sandbox creator and
+    // are separately rewritten to point the workload child at the local policy
+    // proxy, so letting them steer the supervisor would let a sandbox pick an
+    // arbitrary proxy or disable proxying with `NO_PROXY=*`.
+    //
+    // Any sandbox/template-supplied value under a reserved name is first
+    // stripped, then replaced with the operator value (if configured), so the
+    // supervisor can never observe a reserved proxy variable the operator did
+    // not set.
     for (name, value) in [
-        ("HTTPS_PROXY", &config.https_proxy),
-        ("https_proxy", &config.https_proxy),
-        ("HTTP_PROXY", &config.http_proxy),
-        ("http_proxy", &config.http_proxy),
-        ("NO_PROXY", &config.no_proxy),
-        ("no_proxy", &config.no_proxy),
+        (
+            openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
+            &config.https_proxy,
+        ),
+        (
+            openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY,
+            &config.http_proxy,
+        ),
+        (
+            openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
+            &config.no_proxy,
+        ),
     ] {
+        env.remove(name);
         if let Some(value) = value {
-            env.entry(name.into()).or_insert_with(|| value.clone());
+            env.insert(name.into(), value.clone());
         }
     }
 
-    // 2. Required driver vars (highest priority -- always overwrite).
     env.insert(
         openshell_core::sandbox_env::SANDBOX.into(),
         sandbox.name.clone(),
@@ -1671,6 +1685,10 @@ mod tests {
 
     #[test]
     fn container_spec_injects_operator_proxy_env() {
+        use openshell_core::sandbox_env::{
+            UPSTREAM_HTTP_PROXY, UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY,
+        };
+
         let sandbox = test_sandbox("test-id", "test-name");
         let mut config = test_config();
         config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
@@ -1680,36 +1698,43 @@ mod tests {
         let spec = build_container_spec(&sandbox, &config);
         let env_map = spec["env"].as_object().expect("env should be an object");
 
-        for key in ["HTTPS_PROXY", "https_proxy"] {
-            assert_eq!(
-                env_map.get(key).and_then(|v| v.as_str()),
-                Some("http://proxy.corp.com:8080"),
-                "{key} should carry the operator proxy URL"
-            );
-        }
-        for key in ["HTTP_PROXY", "http_proxy"] {
-            assert_eq!(
-                env_map.get(key).and_then(|v| v.as_str()),
-                Some("http://proxy.corp.com:3128"),
-                "{key} should carry the operator proxy URL"
-            );
-        }
-        for key in ["NO_PROXY", "no_proxy"] {
-            assert_eq!(
-                env_map.get(key).and_then(|v| v.as_str()),
-                Some("*.svc.cluster.local,10.0.0.0/8"),
-                "{key} should carry the operator NO_PROXY list"
+        assert_eq!(
+            env_map.get(UPSTREAM_HTTPS_PROXY).and_then(|v| v.as_str()),
+            Some("http://proxy.corp.com:8080"),
+            "reserved upstream HTTPS var should carry the operator proxy URL"
+        );
+        assert_eq!(
+            env_map.get(UPSTREAM_HTTP_PROXY).and_then(|v| v.as_str()),
+            Some("http://proxy.corp.com:3128"),
+            "reserved upstream HTTP var should carry the operator proxy URL"
+        );
+        assert_eq!(
+            env_map.get(UPSTREAM_NO_PROXY).and_then(|v| v.as_str()),
+            Some("*.svc.cluster.local,10.0.0.0/8"),
+            "reserved upstream NO_PROXY var should carry the operator list"
+        );
+
+        // The conventional proxy variables must NOT be set from operator
+        // config: they belong to the sandbox creator, not the supervisor.
+        for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+            assert!(
+                !env_map.contains_key(key),
+                "{key} must not be populated from operator proxy config"
             );
         }
     }
 
     #[test]
     fn container_spec_omits_proxy_env_when_unconfigured() {
+        use openshell_core::sandbox_env::{
+            UPSTREAM_HTTP_PROXY, UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY,
+        };
+
         let sandbox = test_sandbox("test-id", "test-name");
         let spec = build_container_spec(&sandbox, &test_config());
         let env_map = spec["env"].as_object().expect("env should be an object");
 
-        for key in ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"] {
+        for key in [UPSTREAM_HTTPS_PROXY, UPSTREAM_HTTP_PROXY, UPSTREAM_NO_PROXY] {
             assert!(
                 !env_map.contains_key(key),
                 "{key} should be absent without operator proxy config"
@@ -1718,16 +1743,32 @@ mod tests {
     }
 
     #[test]
-    fn container_spec_user_env_overrides_operator_proxy() {
+    fn container_spec_user_env_cannot_override_operator_proxy() {
         use openshell_core::proto::compute::v1::{DriverSandboxSpec, DriverSandboxTemplate};
+        use openshell_core::sandbox_env::{UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY};
 
+        // A sandbox creator tries to redirect egress at an attacker proxy and
+        // disable proxying with `NO_PROXY=*` through both spec and template env.
         let mut sandbox = test_sandbox("test-id", "test-name");
         sandbox.spec = Some(DriverSandboxSpec {
-            environment: std::collections::HashMap::from([(
-                "HTTPS_PROXY".to_string(),
-                "http://sandbox-specific:9999".to_string(),
-            )]),
-            template: Some(DriverSandboxTemplate::default()),
+            environment: std::collections::HashMap::from([
+                (
+                    "HTTPS_PROXY".to_string(),
+                    "http://attacker:9999".to_string(),
+                ),
+                (
+                    UPSTREAM_HTTPS_PROXY.to_string(),
+                    "http://attacker:9999".to_string(),
+                ),
+                (UPSTREAM_NO_PROXY.to_string(), "*".to_string()),
+            ]),
+            template: Some(DriverSandboxTemplate {
+                environment: std::collections::HashMap::from([(
+                    UPSTREAM_NO_PROXY.to_string(),
+                    "*".to_string(),
+                )]),
+                ..Default::default()
+            }),
             ..Default::default()
         });
         let mut config = test_config();
@@ -1737,14 +1778,13 @@ mod tests {
         let env_map = spec["env"].as_object().expect("env should be an object");
 
         assert_eq!(
-            env_map.get("HTTPS_PROXY").and_then(|v| v.as_str()),
-            Some("http://sandbox-specific:9999"),
-            "per-sandbox HTTPS_PROXY should win over operator config"
-        );
-        assert_eq!(
-            env_map.get("https_proxy").and_then(|v| v.as_str()),
+            env_map.get(UPSTREAM_HTTPS_PROXY).and_then(|v| v.as_str()),
             Some("http://proxy.corp.com:8080"),
-            "unset lowercase variant still falls back to operator config"
+            "operator proxy must win over any sandbox-supplied reserved value"
+        );
+        assert!(
+            !env_map.contains_key(UPSTREAM_NO_PROXY),
+            "sandbox must not be able to inject a reserved NO_PROXY bypass"
         );
     }
 

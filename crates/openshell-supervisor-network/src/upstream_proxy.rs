@@ -5,20 +5,28 @@
 //!
 //! In proxy-required enterprise networks (issue #1792) the supervisor cannot
 //! dial policy-approved destinations directly: all outbound traffic must go
-//! through a corporate forward proxy. This module reads the standard
-//! `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` variables from the
-//! supervisor's **own** environment (the workload child's proxy variables are
-//! rewritten separately to point at the local policy proxy) and chains
-//! approved connections through the corporate proxy with HTTP CONNECT.
+//! through a corporate forward proxy. This module reads the operator-owned
+//! reserved `OPENSHELL_UPSTREAM_HTTPS_PROXY` / `OPENSHELL_UPSTREAM_HTTP_PROXY`
+//! / `OPENSHELL_UPSTREAM_NO_PROXY` variables from the supervisor's **own**
+//! environment and chains approved connections through the corporate proxy
+//! with HTTP CONNECT.
+//!
+//! The conventional `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`
+//! variables are intentionally ignored: those are controlled by the sandbox
+//! creator and are rewritten separately to point the workload child at the
+//! local policy proxy, so honoring them would let a sandbox pick an arbitrary
+//! upstream proxy or disable proxying with `NO_PROXY=*`. The compute driver
+//! writes the reserved names in its required-variable tier, which sandbox and
+//! template environment cannot override.
 //!
 //! Scope and invariants:
 //! - Only `http://` proxy URLs are supported. `https://` and SOCKS proxies
 //!   are ignored with a warning.
 //! - Policy evaluation, DNS resolution, and SSRF checks run exactly as in the
 //!   direct-dial path; the corporate proxy only replaces the final TCP dial.
-//! - `NO_PROXY` decides which destinations bypass the corporate proxy and
-//!   keep dialing directly (cluster-internal services, host gateway, etc.).
-//!   Loopback destinations always bypass the proxy.
+//! - The reserved `NO_PROXY` list decides which destinations bypass the
+//!   corporate proxy and keep dialing directly (cluster-internal services,
+//!   host gateway, etc.). Loopback destinations always bypass the proxy.
 
 use std::io::{Error as IoError, ErrorKind};
 use std::net::IpAddr;
@@ -164,31 +172,38 @@ pub struct UpstreamProxyConfig {
 }
 
 impl UpstreamProxyConfig {
-    /// Read `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` (lowercase
-    /// variants take precedence) from the process environment. Returns `None`
-    /// when no usable proxy is configured.
+    /// Read the operator-owned corporate proxy configuration from the
+    /// supervisor's reserved environment variables
+    /// ([`UPSTREAM_HTTPS_PROXY`](openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY),
+    /// [`UPSTREAM_HTTP_PROXY`](openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY),
+    /// [`UPSTREAM_NO_PROXY`](openshell_core::sandbox_env::UPSTREAM_NO_PROXY)).
+    /// Returns `None` when no usable proxy is configured.
+    ///
+    /// The conventional `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`
+    /// variables are intentionally ignored here: they are set by the sandbox
+    /// creator (and rewritten to point workload children at the local policy
+    /// proxy), so honoring them would let a sandbox choose an arbitrary
+    /// upstream proxy or disable proxying entirely. The compute driver writes
+    /// the reserved names in its required-variable tier, where sandbox and
+    /// template environment cannot override them.
     #[must_use]
     pub fn from_env() -> Option<Self> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
-        let var = |upper: &str, lower: &str| {
-            lookup(lower)
-                .or_else(|| lookup(upper))
-                .filter(|v| !v.trim().is_empty())
+        use openshell_core::sandbox_env::{
+            UPSTREAM_HTTP_PROXY, UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY,
         };
-        let all = var("ALL_PROXY", "all_proxy");
-        let https = var("HTTPS_PROXY", "https_proxy")
-            .or_else(|| all.clone())
-            .and_then(|url| parse_proxy_url(&url, "HTTPS_PROXY"));
-        let http = var("HTTP_PROXY", "http_proxy")
-            .or(all)
-            .and_then(|url| parse_proxy_url(&url, "HTTP_PROXY"));
+        let var = |name: &str| lookup(name).filter(|v| !v.trim().is_empty());
+        let https =
+            var(UPSTREAM_HTTPS_PROXY).and_then(|url| parse_proxy_url(&url, UPSTREAM_HTTPS_PROXY));
+        let http =
+            var(UPSTREAM_HTTP_PROXY).and_then(|url| parse_proxy_url(&url, UPSTREAM_HTTP_PROXY));
         if https.is_none() && http.is_none() {
             return None;
         }
-        let no_proxy = NoProxy::parse(&var("NO_PROXY", "no_proxy").unwrap_or_default());
+        let no_proxy = NoProxy::parse(&var(UPSTREAM_NO_PROXY).unwrap_or_default());
         Some(Self {
             https,
             http,
@@ -428,6 +443,10 @@ async fn connect_via_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openshell_core::sandbox_env::{
+        UPSTREAM_HTTP_PROXY as HTTP_PROXY, UPSTREAM_HTTPS_PROXY as HTTPS_PROXY,
+        UPSTREAM_NO_PROXY as NO_PROXY,
+    };
 
     fn config_from(pairs: &[(&str, &str)]) -> Option<UpstreamProxyConfig> {
         UpstreamProxyConfig::from_lookup(|name| {
@@ -444,13 +463,28 @@ mod tests {
     }
 
     #[test]
+    fn conventional_proxy_vars_are_ignored() {
+        // The sandbox creator controls these names; they must not steer the
+        // supervisor's operator-owned egress boundary.
+        assert!(
+            config_from(&[
+                ("HTTPS_PROXY", "http://attacker:9999"),
+                ("HTTP_PROXY", "http://attacker:9999"),
+                ("ALL_PROXY", "http://attacker:9999"),
+                ("https_proxy", "http://attacker:9999"),
+            ])
+            .is_none()
+        );
+    }
+
+    #[test]
     fn empty_values_yield_none() {
-        assert!(config_from(&[("HTTPS_PROXY", "  "), ("HTTP_PROXY", "")]).is_none());
+        assert!(config_from(&[(HTTPS_PROXY, "  "), (HTTP_PROXY, "")]).is_none());
     }
 
     #[test]
     fn https_proxy_parsed_with_port() {
-        let cfg = config_from(&[("HTTPS_PROXY", "http://proxy.corp.com:8080")]).unwrap();
+        let cfg = config_from(&[(HTTPS_PROXY, "http://proxy.corp.com:8080")]).unwrap();
         let ep = cfg
             .proxy_for(UpstreamScheme::Https, "api.stripe.com")
             .unwrap();
@@ -463,42 +497,21 @@ mod tests {
     }
 
     #[test]
-    fn lowercase_takes_precedence() {
-        let cfg = config_from(&[
-            ("HTTPS_PROXY", "http://upper:1111"),
-            ("https_proxy", "http://lower:2222"),
-        ])
-        .unwrap();
-        let ep = cfg.proxy_for(UpstreamScheme::Https, "example.com").unwrap();
-        assert_eq!(ep.display_addr(), "lower:2222");
-    }
-
-    #[test]
-    fn all_proxy_fills_both_schemes() {
-        let cfg = config_from(&[("ALL_PROXY", "http://proxy:3128")]).unwrap();
-        assert!(
-            cfg.proxy_for(UpstreamScheme::Https, "example.com")
-                .is_some()
-        );
-        assert!(cfg.proxy_for(UpstreamScheme::Http, "example.com").is_some());
-    }
-
-    #[test]
     fn scheme_defaults_to_http_and_port_defaults_to_80() {
-        let cfg = config_from(&[("HTTP_PROXY", "proxy.corp.com")]).unwrap();
+        let cfg = config_from(&[(HTTP_PROXY, "proxy.corp.com")]).unwrap();
         let ep = cfg.proxy_for(UpstreamScheme::Http, "example.com").unwrap();
         assert_eq!(ep.display_addr(), "proxy.corp.com:80");
     }
 
     #[test]
     fn tls_and_socks_proxies_rejected() {
-        assert!(config_from(&[("HTTPS_PROXY", "https://proxy:443")]).is_none());
-        assert!(config_from(&[("HTTPS_PROXY", "socks5://proxy:1080")]).is_none());
+        assert!(config_from(&[(HTTPS_PROXY, "https://proxy:443")]).is_none());
+        assert!(config_from(&[(HTTPS_PROXY, "socks5://proxy:1080")]).is_none());
     }
 
     #[test]
     fn userinfo_becomes_basic_auth() {
-        let cfg = config_from(&[("HTTPS_PROXY", "http://user:p%40ss@proxy:8080")]).unwrap();
+        let cfg = config_from(&[(HTTPS_PROXY, "http://user:p%40ss@proxy:8080")]).unwrap();
         let ep = cfg.proxy_for(UpstreamScheme::Https, "example.com").unwrap();
         let auth = ep.proxy_authorization.as_deref().unwrap();
         let expected = base64::engine::general_purpose::STANDARD.encode("user:p@ss");
@@ -507,7 +520,7 @@ mod tests {
 
     #[test]
     fn debug_output_hides_credentials() {
-        let cfg = config_from(&[("HTTPS_PROXY", "http://user:secret@proxy:8080")]).unwrap();
+        let cfg = config_from(&[(HTTPS_PROXY, "http://user:secret@proxy:8080")]).unwrap();
         let debug = format!("{cfg:?}");
         assert!(!debug.contains("secret"));
         assert!(!cfg.summary().contains("secret"));
@@ -515,7 +528,7 @@ mod tests {
 
     #[test]
     fn ipv6_proxy_address_parses() {
-        let cfg = config_from(&[("HTTPS_PROXY", "http://[fd00::1]:8080")]).unwrap();
+        let cfg = config_from(&[(HTTPS_PROXY, "http://[fd00::1]:8080")]).unwrap();
         let ep = cfg.proxy_for(UpstreamScheme::Https, "example.com").unwrap();
         assert_eq!(ep.display_addr(), "fd00::1:8080");
     }
@@ -523,7 +536,7 @@ mod tests {
     // -- NO_PROXY matching --
 
     fn no_proxy_cfg(no_proxy: &str) -> UpstreamProxyConfig {
-        config_from(&[("HTTPS_PROXY", "http://proxy:8080"), ("NO_PROXY", no_proxy)]).unwrap()
+        config_from(&[(HTTPS_PROXY, "http://proxy:8080"), (NO_PROXY, no_proxy)]).unwrap()
     }
 
     fn bypasses(cfg: &UpstreamProxyConfig, host: &str) -> bool {

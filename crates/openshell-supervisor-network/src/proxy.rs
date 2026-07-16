@@ -242,8 +242,10 @@ impl ProxyHandle {
         }
 
         // Corporate egress proxy configured on the supervisor's own
-        // environment (HTTPS_PROXY/HTTP_PROXY/NO_PROXY). Read once at startup;
-        // the workload cannot influence the supervisor's environment.
+        // environment via the operator-owned reserved OPENSHELL_UPSTREAM_*
+        // variables. Read once at startup; the workload cannot influence the
+        // supervisor's environment, and the conventional HTTPS_PROXY/NO_PROXY
+        // variables it does control are ignored on this path.
         let upstream_proxy: Arc<Option<UpstreamProxyConfig>> =
             Arc::new(UpstreamProxyConfig::from_env());
         if let Some(cfg) = upstream_proxy.as_ref() {
@@ -2936,9 +2938,10 @@ fn validate_declared_endpoint_resolved_addrs(
 ///
 /// Connects directly to the SSRF-checked resolved addresses, or chains
 /// through the corporate proxy (HTTP CONNECT) when one is configured for
-/// this destination via the supervisor's `HTTPS_PROXY`/`HTTP_PROXY` and not
-/// excluded by `NO_PROXY`. Policy evaluation and SSRF validation must have
-/// already succeeded; only the final TCP dial changes.
+/// this destination via the supervisor's reserved upstream proxy variables
+/// and not excluded by the reserved `NO_PROXY` list. Policy evaluation and
+/// SSRF validation must have already succeeded; only the final TCP dial
+/// changes.
 ///
 /// The CONNECT target sent to the corporate proxy is the client-requested
 /// hostname, so hostname-filtering proxies and split-horizon DNS at the
