@@ -7,7 +7,7 @@ use crate::identity::BinaryIdentityCache;
 use crate::l7::tls::ProxyTlsState;
 use crate::opa::{NetworkAction, OpaEngine, PolicyGenerationGuard};
 use crate::policy_local::{POLICY_LOCAL_HOST, PolicyLocalContext};
-use crate::upstream_proxy::{self, UpstreamProxyConfig, UpstreamScheme};
+use crate::upstream_proxy::{self, UpstreamProxyConfig};
 use miette::{IntoDiagnostic, Result};
 use openshell_core::activity::{ActivitySender, try_record_activity};
 use openshell_core::denial::DenialEvent;
@@ -738,7 +738,6 @@ async fn handle_tcp_connection(
             entrypoint_pid,
             policy_local_ctx,
             trusted_host_gateway,
-            upstream_proxy,
             secret_resolver,
             dynamic_credentials,
             denial_tx.as_ref(),
@@ -1213,15 +1212,9 @@ async fn handle_tcp_connection(
         return Ok(());
     }
 
-    let mut upstream = dial_upstream(
-        &upstream_proxy,
-        UpstreamScheme::Https,
-        &host_lc,
-        port,
-        &validated_addrs,
-    )
-    .await
-    .into_diagnostic()?;
+    let mut upstream = dial_upstream(&upstream_proxy, &host_lc, port, &validated_addrs)
+        .await
+        .into_diagnostic()?;
 
     debug!(
         "handle_tcp_connection dns_resolve_and_tcp_connect: {}ms host={host_lc}",
@@ -2953,28 +2946,28 @@ fn validate_declared_endpoint_resolved_addrs(
     Ok(())
 }
 
-/// Dial a validated upstream destination.
+/// Dial a validated upstream destination for a TLS (CONNECT) tunnel.
 ///
 /// Connects directly to the SSRF-checked resolved addresses, or chains
 /// through the corporate proxy (HTTP CONNECT) when one is configured for
 /// this destination via the supervisor's reserved upstream proxy variables
 /// and not excluded by the reserved `NO_PROXY` list. Policy evaluation and
 /// SSRF validation must have already succeeded; only the final TCP dial
-/// changes.
+/// changes. Plain-HTTP requests never take this path: they always dial the
+/// destination directly.
 ///
 /// The CONNECT target sent to the corporate proxy is the client-requested
 /// hostname, so hostname-filtering proxies and split-horizon DNS at the
 /// proxy keep working.
 async fn dial_upstream(
     upstream_proxy: &Option<UpstreamProxyConfig>,
-    scheme: UpstreamScheme,
     host_lc: &str,
     port: u16,
     addrs: &[SocketAddr],
 ) -> std::io::Result<TcpStream> {
     if let Some(endpoint) = upstream_proxy
         .as_ref()
-        .and_then(|cfg| cfg.proxy_for(scheme, host_lc))
+        .and_then(|cfg| cfg.proxy_for(host_lc))
     {
         return upstream_proxy::connect_via(endpoint, host_lc, port).await;
     }
@@ -3620,7 +3613,6 @@ async fn handle_forward_proxy(
     entrypoint_pid: Arc<AtomicU32>,
     policy_local_ctx: Option<Arc<PolicyLocalContext>>,
     trusted_host_gateway: Arc<Option<IpAddr>>,
-    upstream_proxy: Arc<Option<UpstreamProxyConfig>>,
     secret_resolver: Option<Arc<SecretResolver>>,
     dynamic_credentials: Option<
         Arc<
@@ -4654,20 +4646,11 @@ async fn handle_forward_proxy(
         return Ok(());
     }
 
-    // 6. Connect upstream. Host-gateway aliases always dial directly — the
-    //    corporate proxy cannot reach the driver-injected host gateway.
-    let dial_result = if is_host_gateway_alias(&host_lc) {
-        TcpStream::connect(addrs.as_slice()).await
-    } else {
-        dial_upstream(
-            &upstream_proxy,
-            UpstreamScheme::Http,
-            &host_lc,
-            port,
-            &addrs,
-        )
-        .await
-    };
+    // 6. Connect upstream. Plain-HTTP requests always dial the destination
+    //    directly: only TLS (CONNECT) tunnels chain through the corporate
+    //    proxy, since plain-HTTP forwarding would need absolute-form requests
+    //    rather than a CONNECT tunnel.
+    let dial_result = TcpStream::connect(addrs.as_slice()).await;
     let mut upstream = match dial_result {
         Ok(s) => s,
         Err(e) => {

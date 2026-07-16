@@ -6,10 +6,14 @@
 //! In proxy-required enterprise networks (issue #1792) the supervisor cannot
 //! dial policy-approved destinations directly: all outbound traffic must go
 //! through a corporate forward proxy. This module reads the operator-owned
-//! reserved `OPENSHELL_UPSTREAM_HTTPS_PROXY` / `OPENSHELL_UPSTREAM_HTTP_PROXY`
-//! / `OPENSHELL_UPSTREAM_NO_PROXY` variables from the supervisor's **own**
-//! environment and chains approved connections through the corporate proxy
-//! with HTTP CONNECT.
+//! reserved `OPENSHELL_UPSTREAM_HTTPS_PROXY` / `OPENSHELL_UPSTREAM_NO_PROXY`
+//! variables from the supervisor's **own** environment and chains approved
+//! TLS tunnels through the corporate proxy with HTTP CONNECT.
+//!
+//! Only TLS (CONNECT) egress is chained: plain-HTTP requests always dial the
+//! destination directly. Forwarding plain HTTP through a corporate proxy
+//! requires absolute-form request forwarding rather than CONNECT tunneling
+//! and is out of scope for this feature.
 //!
 //! The conventional `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`
 //! variables are intentionally ignored: those are controlled by the sandbox
@@ -50,15 +54,6 @@ const MAX_CONNECT_RESPONSE_BYTES: usize = 8 * 1024;
 /// End-to-end budget for dialing the corporate proxy and completing the
 /// CONNECT handshake.
 const CONNECT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Which proxy variable applies to a destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpstreamScheme {
-    /// TLS-bound tunnels (client issued CONNECT): `HTTPS_PROXY`.
-    Https,
-    /// Plain HTTP forward-proxy requests: `HTTP_PROXY`.
-    Http,
-}
 
 /// A parsed corporate proxy endpoint.
 #[derive(Clone)]
@@ -173,8 +168,7 @@ impl NoProxy {
 /// Corporate proxy configuration read from the supervisor's environment.
 #[derive(Debug, Clone)]
 pub struct UpstreamProxyConfig {
-    https: Option<ProxyEndpoint>,
-    http: Option<ProxyEndpoint>,
+    https: ProxyEndpoint,
     no_proxy: NoProxy,
 }
 
@@ -182,7 +176,6 @@ impl UpstreamProxyConfig {
     /// Read the operator-owned corporate proxy configuration from the
     /// supervisor's reserved environment variables
     /// ([`UPSTREAM_HTTPS_PROXY`](openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY),
-    /// [`UPSTREAM_HTTP_PROXY`](openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY),
     /// [`UPSTREAM_NO_PROXY`](openshell_core::sandbox_env::UPSTREAM_NO_PROXY),
     /// [`UPSTREAM_PROXY_AUTH_FILE`](openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE)).
     /// Returns `Ok(None)` when no proxy is configured (unset variables).
@@ -212,7 +205,7 @@ impl UpstreamProxyConfig {
 
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         use openshell_core::sandbox_env::{
-            UPSTREAM_HTTP_PROXY, UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY, UPSTREAM_PROXY_AUTH_FILE,
+            UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY, UPSTREAM_PROXY_AUTH_FILE,
         };
         // Only a fully unset reserved variable means "not configured". A
         // present-but-empty value is a misconfiguration (the compute driver
@@ -230,12 +223,9 @@ impl UpstreamProxyConfig {
         let https = var(UPSTREAM_HTTPS_PROXY)?
             .map(|url| parse_proxy_url(&url, UPSTREAM_HTTPS_PROXY))
             .transpose()?;
-        let http = var(UPSTREAM_HTTP_PROXY)?
-            .map(|url| parse_proxy_url(&url, UPSTREAM_HTTP_PROXY))
-            .transpose()?;
         let auth_file = var(UPSTREAM_PROXY_AUTH_FILE)?;
         let no_proxy_list = var(UPSTREAM_NO_PROXY)?;
-        if https.is_none() && http.is_none() {
+        let Some(mut https) = https else {
             // Auxiliary proxy settings without a proxy mean the operator
             // believed a proxy boundary was in effect; refuse rather than
             // silently running with direct egress.
@@ -248,18 +238,11 @@ impl UpstreamProxyConfig {
                 }
             }
             return Ok(None);
-        }
-        let no_proxy = NoProxy::parse(&no_proxy_list.unwrap_or_default());
-        let mut config = Self {
-            https,
-            http,
-            no_proxy,
         };
 
-        // Load proxy credentials from the reserved auth file, if configured,
-        // and apply them to every endpoint. The file is delivered through a
-        // root-only secret mount so the credentials never appear in the
-        // environment or container metadata.
+        // Load proxy credentials from the reserved auth file, if configured.
+        // The file is delivered through a root-only secret mount so the
+        // credentials never appear in the environment or container metadata.
         if let Some(path) = auth_file {
             let credential = std::fs::read_to_string(&path).map_err(|err| {
                 format!("failed to read upstream proxy auth file '{path}': {err}")
@@ -267,46 +250,31 @@ impl UpstreamProxyConfig {
             let header = basic_auth_header(&credential).map_err(|err| {
                 format!("invalid credential in upstream proxy auth file '{path}': {err}")
             })?;
-            config.apply_proxy_auth(header);
+            https.proxy_authorization = Some(header);
         }
 
-        Ok(Some(config))
+        Ok(Some(Self {
+            https,
+            no_proxy: NoProxy::parse(&no_proxy_list.unwrap_or_default()),
+        }))
     }
 
-    /// Attach a pre-built `Proxy-Authorization` header value to every
-    /// configured endpoint.
-    fn apply_proxy_auth(&mut self, proxy_authorization: String) {
-        for endpoint in [self.https.as_mut(), self.http.as_mut()]
-            .into_iter()
-            .flatten()
-        {
-            endpoint.proxy_authorization = Some(proxy_authorization.clone());
-        }
-    }
-
-    /// The corporate proxy to use for `host`, or `None` when the destination
-    /// must be dialed directly.
+    /// The corporate proxy to use for a TLS tunnel to `host`, or `None` when
+    /// the destination must be dialed directly.
     #[must_use]
-    pub fn proxy_for(&self, scheme: UpstreamScheme, host: &str) -> Option<&ProxyEndpoint> {
+    pub fn proxy_for(&self, host: &str) -> Option<&ProxyEndpoint> {
         if self.no_proxy.matches(host) {
             return None;
         }
-        match scheme {
-            UpstreamScheme::Https => self.https.as_ref(),
-            UpstreamScheme::Http => self.http.as_ref(),
-        }
+        Some(&self.https)
     }
 
     /// Credential-free summary for startup logging.
     #[must_use]
     pub fn summary(&self) -> String {
-        let fmt = |ep: Option<&ProxyEndpoint>| {
-            ep.map_or_else(|| "-".to_string(), ProxyEndpoint::display_addr)
-        };
         format!(
-            "https_proxy={} http_proxy={} no_proxy_entries={}",
-            fmt(self.https.as_ref()),
-            fmt(self.http.as_ref()),
+            "https_proxy={} no_proxy_entries={}",
+            self.https.display_addr(),
             self.no_proxy.entries.len()
         )
     }
@@ -474,8 +442,8 @@ async fn connect_via_inner(
 mod tests {
     use super::*;
     use openshell_core::sandbox_env::{
-        UPSTREAM_HTTP_PROXY as HTTP_PROXY, UPSTREAM_HTTPS_PROXY as HTTPS_PROXY,
-        UPSTREAM_NO_PROXY as NO_PROXY, UPSTREAM_PROXY_AUTH_FILE as PROXY_AUTH_FILE,
+        UPSTREAM_HTTPS_PROXY as HTTPS_PROXY, UPSTREAM_NO_PROXY as NO_PROXY,
+        UPSTREAM_PROXY_AUTH_FILE as PROXY_AUTH_FILE,
     };
 
     fn config_from(pairs: &[(&str, &str)]) -> Result<Option<UpstreamProxyConfig>, String> {
@@ -521,7 +489,7 @@ mod tests {
         // mean "no proxy".
         for (name, value) in [
             (HTTPS_PROXY, ""),
-            (HTTP_PROXY, "  "),
+            (HTTPS_PROXY, "  "),
             (NO_PROXY, " "),
             (PROXY_AUTH_FILE, ""),
         ] {
@@ -534,21 +502,15 @@ mod tests {
     #[test]
     fn https_proxy_parsed_with_port() {
         let cfg = config_ok(&[(HTTPS_PROXY, "http://proxy.corp.com:8080")]);
-        let ep = cfg
-            .proxy_for(UpstreamScheme::Https, "api.stripe.com")
-            .unwrap();
+        let ep = cfg.proxy_for("api.stripe.com").unwrap();
         assert_eq!(ep.display_addr(), "proxy.corp.com:8080");
         assert!(ep.proxy_authorization.is_none());
-        assert!(
-            cfg.proxy_for(UpstreamScheme::Http, "api.stripe.com")
-                .is_none()
-        );
     }
 
     #[test]
     fn scheme_defaults_to_http_and_port_defaults_to_80() {
-        let cfg = config_ok(&[(HTTP_PROXY, "proxy.corp.com")]);
-        let ep = cfg.proxy_for(UpstreamScheme::Http, "example.com").unwrap();
+        let cfg = config_ok(&[(HTTPS_PROXY, "proxy.corp.com")]);
+        let ep = cfg.proxy_for("example.com").unwrap();
         assert_eq!(ep.display_addr(), "proxy.corp.com:80");
     }
 
@@ -582,8 +544,8 @@ mod tests {
 
     #[test]
     fn malformed_proxy_address_is_fatal() {
-        let err = config_from(&[(HTTP_PROXY, "http://proxy:notaport")]).unwrap_err();
-        assert!(err.contains(HTTP_PROXY), "{err}");
+        let err = config_from(&[(HTTPS_PROXY, "http://proxy:notaport")]).unwrap_err();
+        assert!(err.contains(HTTPS_PROXY), "{err}");
         // A path/query/fragment addresses an endpoint, not a proxy; it is
         // rejected rather than silently discarded.
         for url in [
@@ -594,13 +556,6 @@ mod tests {
             let err = config_from(&[(HTTPS_PROXY, url)]).unwrap_err();
             assert!(err.contains(HTTPS_PROXY), "{url}: {err}");
         }
-        // One invalid endpoint is fatal even when the other one is valid.
-        let err = config_from(&[
-            (HTTPS_PROXY, "http://proxy.corp.com:8080"),
-            (HTTP_PROXY, "socks5://proxy:1080"),
-        ])
-        .unwrap_err();
-        assert!(err.contains(HTTP_PROXY), "{err}");
     }
 
     #[test]
@@ -649,23 +604,17 @@ mod tests {
     }
 
     #[test]
-    fn auth_file_credentials_are_applied_to_all_endpoints() {
+    fn auth_file_credentials_are_applied_to_the_endpoint() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), "user:secret\n").unwrap();
         let path = file.path().to_str().unwrap().to_string();
-        let cfg = config_ok(&[
-            (HTTPS_PROXY, "http://proxy:8080"),
-            (HTTP_PROXY, "http://proxy:3128"),
-            (PROXY_AUTH_FILE, &path),
-        ]);
+        let cfg = config_ok(&[(HTTPS_PROXY, "http://proxy:8080"), (PROXY_AUTH_FILE, &path)]);
         let expected = format!(
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode("user:secret")
         );
-        for scheme in [UpstreamScheme::Https, UpstreamScheme::Http] {
-            let ep = cfg.proxy_for(scheme, "example.com").unwrap();
-            assert_eq!(ep.proxy_authorization.as_deref(), Some(expected.as_str()));
-        }
+        let ep = cfg.proxy_for("example.com").unwrap();
+        assert_eq!(ep.proxy_authorization.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
@@ -687,7 +636,7 @@ mod tests {
     #[test]
     fn debug_output_hides_credentials() {
         let mut cfg = config_ok(&[(HTTPS_PROXY, "http://proxy:8080")]);
-        cfg.apply_proxy_auth(basic_auth_header("user:secret").unwrap());
+        cfg.https.proxy_authorization = Some(basic_auth_header("user:secret").unwrap());
         let debug = format!("{cfg:?}");
         assert!(!debug.contains("secret"));
         assert!(!cfg.summary().contains("secret"));
@@ -696,7 +645,7 @@ mod tests {
     #[test]
     fn ipv6_proxy_address_parses() {
         let cfg = config_ok(&[(HTTPS_PROXY, "http://[fd00::1]:8080")]);
-        let ep = cfg.proxy_for(UpstreamScheme::Https, "example.com").unwrap();
+        let ep = cfg.proxy_for("example.com").unwrap();
         assert_eq!(ep.display_addr(), "fd00::1:8080");
     }
 
@@ -707,7 +656,7 @@ mod tests {
     }
 
     fn bypasses(cfg: &UpstreamProxyConfig, host: &str) -> bool {
-        cfg.proxy_for(UpstreamScheme::Https, host).is_none()
+        cfg.proxy_for(host).is_none()
     }
 
     #[test]

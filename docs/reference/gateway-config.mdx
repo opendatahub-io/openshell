@@ -392,10 +392,11 @@ sandbox_pids_limit      = 2048
 # Set to 0 to disable health checks entirely. Default: 10.
 health_check_interval_secs = 10
 # Corporate forward proxy for sandbox egress. When set, the in-container
-# supervisor chains policy-approved upstream connections through this proxy
-# with HTTP CONNECT instead of dialing destinations directly. Only http://
-# proxy URLs are supported, in scheme://host:port form: a URL carrying a
-# path, query, or fragment is rejected rather than silently truncated.
+# supervisor chains policy-approved TLS tunnels through this proxy with HTTP
+# CONNECT instead of dialing destinations directly. Plain-HTTP requests are
+# not proxied and always dial the destination directly. Only http:// proxy
+# URLs are supported, in scheme://host:port form: a URL carrying a path,
+# query, or fragment is rejected rather than silently truncated.
 # NO_PROXY entries (hostnames, domain suffixes, IPs, CIDRs) are dialed
 # directly. This is an operator-owned egress boundary:
 # sandbox and template environment cannot override it, and the conventional
@@ -417,7 +418,6 @@ health_check_interval_secs = 10
 # supervisor, so a credential accepted here is never rejected in-container.
 # Keep gateway.toml and the auth file owner-readable only (mode 0600).
 # https_proxy     = "http://proxy.corp.com:8080"
-# http_proxy      = "http://proxy.corp.com:8080"
 # no_proxy        = "*.svc.cluster.local,10.0.0.0/8"
 # proxy_auth_file = "/etc/openshell/secrets/proxy-auth"
 ```

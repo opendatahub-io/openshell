@@ -103,21 +103,25 @@ handled by the inference interception path:
 External inference endpoints that do not use `inference.local` are treated like
 ordinary network traffic and must be allowed by policy.
 
-In proxy-required networks, the supervisor chains the upstream dial through a
-corporate forward proxy with HTTP CONNECT instead of connecting directly, once
-policy and SSRF checks pass. The proxy configuration is an operator-owned
-boundary read from reserved `OPENSHELL_UPSTREAM_HTTPS_PROXY` /
-`OPENSHELL_UPSTREAM_HTTP_PROXY` / `OPENSHELL_UPSTREAM_NO_PROXY` variables that
-compute drivers write in their required-variable tier; sandbox and template
-environment cannot override them. The conventional `HTTPS_PROXY`/`HTTP_PROXY`/
-`NO_PROXY` variables a sandbox controls are ignored on this path. Reserved
-`NO_PROXY` destinations, loopback, and host-gateway aliases always dial
-directly. Only `http://` proxy URLs in `scheme://host:port` form are
-supported; a path, query, or fragment is rejected. Local DNS resolution and
-SSRF validation still run before the proxied dial; the CONNECT target sent to
-the corporate proxy is the requested hostname. The workload child's proxy
-variables are unaffected — they are always rewritten to point at the local
-policy proxy.
+In proxy-required networks, the supervisor chains upstream TLS tunnels through
+a corporate forward proxy with HTTP CONNECT instead of connecting directly,
+once policy and SSRF checks pass. Only TLS (CONNECT) egress is chained:
+plain-HTTP requests always dial the destination directly, because forwarding
+plain HTTP through a proxy requires absolute-form request forwarding rather
+than CONNECT tunneling and is out of scope. The proxy configuration is an
+operator-owned boundary read from reserved `OPENSHELL_UPSTREAM_HTTPS_PROXY` /
+`OPENSHELL_UPSTREAM_NO_PROXY` variables that compute drivers write in their
+required-variable tier; sandbox and template environment cannot override them.
+The conventional `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` variables a sandbox
+controls are ignored on this path. Reserved `NO_PROXY` destinations and
+loopback always dial directly; add driver-injected host aliases (e.g.
+`host.containers.internal`) to the reserved `NO_PROXY` list when the corporate
+proxy cannot reach the container host. Only `http://` proxy URLs in
+`scheme://host:port` form are supported; a path, query, or fragment is
+rejected. Local DNS resolution and SSRF validation still run before the
+proxied dial; the CONNECT target sent to the corporate proxy is the requested
+hostname. The workload child's proxy variables are unaffected — they are
+always rewritten to point at the local policy proxy.
 
 The configuration is fail-closed: a reserved variable that is present but
 invalid — a present-but-empty value, an unsupported or malformed proxy URL, an

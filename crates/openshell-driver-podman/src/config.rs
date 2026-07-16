@@ -144,10 +144,6 @@ pub struct PodmanComputeConfig {
     /// required-variable tier so sandbox/template environment cannot override
     /// it, and the conventional `HTTPS_PROXY` variables are not used.
     pub https_proxy: Option<String>,
-    /// Corporate forward proxy URL injected as the reserved
-    /// `OPENSHELL_UPSTREAM_HTTP_PROXY` variable, used for plain HTTP requests.
-    /// See `https_proxy`.
-    pub http_proxy: Option<String>,
     /// Comma-separated `NO_PROXY` list injected as the reserved
     /// `OPENSHELL_UPSTREAM_NO_PROXY` variable (e.g.
     /// `*.svc.cluster.local,10.0.0.0/8`). Destinations matching an entry are
@@ -157,7 +153,7 @@ pub struct PodmanComputeConfig {
     /// credentials as `user:pass`.
     ///
     /// Credentials must be supplied through this file, never embedded in the
-    /// proxy URL: an inline `user:pass@` in `https_proxy`/`http_proxy` is
+    /// proxy URL: an inline `user:pass@` in `https_proxy` is
     /// rejected at startup because it would leak into `gateway.toml` and
     /// container metadata. The gateway reads this file at sandbox-create time
     /// and delivers it to the supervisor through a root-only secret mount.
@@ -230,21 +226,18 @@ impl PodmanComputeConfig {
     /// container metadata.
     pub fn validate_proxy_config(&self) -> Result<(), crate::client::PodmanApiError> {
         use openshell_core::driver_utils::{UpstreamProxyUrlError, parse_upstream_proxy_url};
-        for (field, value) in [
-            ("https_proxy", &self.https_proxy),
-            ("http_proxy", &self.http_proxy),
-        ] {
-            let Some(url) = value else { continue };
+        if let Some(url) = &self.https_proxy {
             parse_upstream_proxy_url(url).map_err(|err| {
                 crate::client::PodmanApiError::InvalidInput(match err {
                     UpstreamProxyUrlError::Empty => {
-                        format!("{field} must not be empty when set")
+                        "https_proxy must not be empty when set".to_string()
                     }
-                    UpstreamProxyUrlError::InlineCredentials => format!(
-                        "{field} must not embed credentials in the URL; supply them via \
+                    UpstreamProxyUrlError::InlineCredentials => {
+                        "https_proxy must not embed credentials in the URL; supply them via \
                          proxy_auth_file so they are not stored in config or container metadata"
-                    ),
-                    err => format!("{field} {err}"),
+                            .to_string()
+                    }
+                    err => format!("https_proxy {err}"),
                 })
             })?;
         }
@@ -260,9 +253,9 @@ impl PodmanComputeConfig {
             // A bypass list only makes sense relative to a proxy boundary. An
             // operator who set one believed proxying was in effect, so accepting
             // it while all egress dials directly would hide a fail-open state.
-            if self.https_proxy.is_none() && self.http_proxy.is_none() {
+            if self.https_proxy.is_none() {
                 return Err(crate::client::PodmanApiError::InvalidInput(
-                    "no_proxy is set but no https_proxy/http_proxy is configured".to_string(),
+                    "no_proxy is set but no https_proxy is configured".to_string(),
                 ));
             }
         }
@@ -273,10 +266,9 @@ impl PodmanComputeConfig {
                     "proxy_auth_file must not be empty when set".to_string(),
                 ));
             }
-            if self.https_proxy.is_none() && self.http_proxy.is_none() {
+            if self.https_proxy.is_none() {
                 return Err(crate::client::PodmanApiError::InvalidInput(
-                    "proxy_auth_file is set but no https_proxy/http_proxy is configured"
-                        .to_string(),
+                    "proxy_auth_file is set but no https_proxy is configured".to_string(),
                 ));
             }
         }
@@ -331,7 +323,6 @@ impl Default for PodmanComputeConfig {
             enable_bind_mounts: false,
             health_check_interval_secs: DEFAULT_HEALTH_CHECK_INTERVAL_SECS,
             https_proxy: None,
-            http_proxy: None,
             no_proxy: None,
             proxy_auth_file: None,
         }
@@ -362,7 +353,6 @@ impl std::fmt::Debug for PodmanComputeConfig {
             )
             // Proxy URLs may embed credentials in userinfo; log presence only.
             .field("https_proxy", &self.https_proxy.is_some())
-            .field("http_proxy", &self.http_proxy.is_some())
             .field("no_proxy", &self.no_proxy)
             .field("proxy_auth_file", &self.proxy_auth_file.is_some())
             .finish()
@@ -437,7 +427,6 @@ mod tests {
         );
         let cfg = PodmanComputeConfig {
             https_proxy: Some("http://proxy.corp.com:8080".to_string()),
-            http_proxy: Some("proxy.corp.com:3128".to_string()),
             no_proxy: Some("*.svc.cluster.local".to_string()),
             ..PodmanComputeConfig::default()
         };
@@ -481,11 +470,11 @@ mod tests {
     #[test]
     fn validate_proxy_config_rejects_empty_value() {
         let cfg = PodmanComputeConfig {
-            http_proxy: Some("  ".to_string()),
+            https_proxy: Some("  ".to_string()),
             ..PodmanComputeConfig::default()
         };
         let err = cfg.validate_proxy_config().unwrap_err();
-        assert!(err.to_string().contains("http_proxy"), "{err}");
+        assert!(err.to_string().contains("https_proxy"), "{err}");
     }
 
     #[test]

@@ -126,12 +126,6 @@ pub const SANDBOX_GID: &str = "OPENSHELL_SANDBOX_GID";
 /// reserved for pointing the workload child at the local policy proxy.
 pub const UPSTREAM_HTTPS_PROXY: &str = "OPENSHELL_UPSTREAM_HTTPS_PROXY";
 
-/// Corporate forward-proxy URL the supervisor uses for plain-HTTP egress.
-///
-/// Operator-owned counterpart to [`UPSTREAM_HTTPS_PROXY`]; see that constant
-/// for the trust-boundary rationale.
-pub const UPSTREAM_HTTP_PROXY: &str = "OPENSHELL_UPSTREAM_HTTP_PROXY";
-
 /// Comma-separated `NO_PROXY`-style list of destinations the supervisor dials
 /// directly instead of chaining through the corporate proxy.
 ///

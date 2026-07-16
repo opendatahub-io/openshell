@@ -362,9 +362,6 @@ EOF
     if [[ -n "${OPENSHELL_SANDBOX_HTTPS_PROXY+x}" ]]; then
       printf 'https_proxy = "%s"\n' "${OPENSHELL_SANDBOX_HTTPS_PROXY}" >>"${CONFIG_PATH}"
     fi
-    if [[ -n "${OPENSHELL_SANDBOX_HTTP_PROXY+x}" ]]; then
-      printf 'http_proxy = "%s"\n' "${OPENSHELL_SANDBOX_HTTP_PROXY}" >>"${CONFIG_PATH}"
-    fi
     if [[ -n "${OPENSHELL_SANDBOX_NO_PROXY+x}" ]]; then
       printf 'no_proxy = "%s"\n' "${OPENSHELL_SANDBOX_NO_PROXY}" >>"${CONFIG_PATH}"
     fi

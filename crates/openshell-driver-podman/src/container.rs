@@ -422,10 +422,6 @@ fn build_env(
             &config.https_proxy,
         ),
         (
-            openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY,
-            &config.http_proxy,
-        ),
-        (
             openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
             &config.no_proxy,
         ),
@@ -1723,14 +1719,11 @@ mod tests {
 
     #[test]
     fn container_spec_injects_operator_proxy_env() {
-        use openshell_core::sandbox_env::{
-            UPSTREAM_HTTP_PROXY, UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY,
-        };
+        use openshell_core::sandbox_env::{UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY};
 
         let sandbox = test_sandbox("test-id", "test-name");
         let mut config = test_config();
         config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
-        config.http_proxy = Some("http://proxy.corp.com:3128".to_string());
         config.no_proxy = Some("*.svc.cluster.local,10.0.0.0/8".to_string());
 
         let spec = build_container_spec(&sandbox, &config);
@@ -1740,11 +1733,6 @@ mod tests {
             env_map.get(UPSTREAM_HTTPS_PROXY).and_then(|v| v.as_str()),
             Some("http://proxy.corp.com:8080"),
             "reserved upstream HTTPS var should carry the operator proxy URL"
-        );
-        assert_eq!(
-            env_map.get(UPSTREAM_HTTP_PROXY).and_then(|v| v.as_str()),
-            Some("http://proxy.corp.com:3128"),
-            "reserved upstream HTTP var should carry the operator proxy URL"
         );
         assert_eq!(
             env_map.get(UPSTREAM_NO_PROXY).and_then(|v| v.as_str()),
@@ -1764,15 +1752,13 @@ mod tests {
 
     #[test]
     fn container_spec_omits_proxy_env_when_unconfigured() {
-        use openshell_core::sandbox_env::{
-            UPSTREAM_HTTP_PROXY, UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY,
-        };
+        use openshell_core::sandbox_env::{UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY};
 
         let sandbox = test_sandbox("test-id", "test-name");
         let spec = build_container_spec(&sandbox, &test_config());
         let env_map = spec["env"].as_object().expect("env should be an object");
 
-        for key in [UPSTREAM_HTTPS_PROXY, UPSTREAM_HTTP_PROXY, UPSTREAM_NO_PROXY] {
+        for key in [UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY] {
             assert!(
                 !env_map.contains_key(key),
                 "{key} should be absent without operator proxy config"

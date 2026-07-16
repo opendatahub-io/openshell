@@ -110,12 +110,7 @@ struct Args {
     #[arg(long, env = "OPENSHELL_SANDBOX_HTTPS_PROXY")]
     sandbox_https_proxy: Option<String>,
 
-    /// Corporate forward proxy URL for plain HTTP (http:// only). Credentials
-    /// must not be embedded in the URL; use `--sandbox-proxy-auth-file`.
-    #[arg(long, env = "OPENSHELL_SANDBOX_HTTP_PROXY")]
-    sandbox_http_proxy: Option<String>,
-
-    /// Comma-separated `NO_PROXY` list injected alongside the proxy URLs.
+    /// Comma-separated `NO_PROXY` list injected alongside the proxy URL.
     #[arg(long, env = "OPENSHELL_SANDBOX_NO_PROXY")]
     sandbox_no_proxy: Option<String>,
 
@@ -155,7 +150,6 @@ async fn main() -> Result<()> {
         guest_tls_key: args.podman_tls_key,
         sandbox_pids_limit: args.sandbox_pids_limit,
         https_proxy: args.sandbox_https_proxy,
-        http_proxy: args.sandbox_http_proxy,
         no_proxy: args.sandbox_no_proxy,
         proxy_auth_file: args.sandbox_proxy_auth_file,
         ..PodmanComputeConfig::default()

@@ -83,7 +83,6 @@ const SUPERVISOR_ONLY_ENV_VARS: &[&str] = &[
     // reaches egress through the local policy proxy, never the corporate proxy
     // directly, so these must not be inherited by sandbox child processes.
     openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
-    openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY,
     openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
     openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE,
 ];
@@ -2268,7 +2267,6 @@ mod tests {
         // and must be treated as supervisor-only so they are stripped above.
         for key in [
             openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
-            openshell_core::sandbox_env::UPSTREAM_HTTP_PROXY,
             openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
             openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE,
         ] {
