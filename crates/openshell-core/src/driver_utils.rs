@@ -82,6 +82,97 @@ pub const SANDBOX_TOKEN_MOUNT_PATH: &str = "/etc/openshell/auth/sandbox.jwt";
 /// mount so the credential never appears in container environment/metadata.
 pub const UPSTREAM_PROXY_AUTH_MOUNT_PATH: &str = "/etc/openshell/auth/upstream-proxy";
 
+/// A validated corporate upstream-proxy address.
+///
+/// Produced by [`parse_upstream_proxy_url`], which is the single source of
+/// truth for what counts as a valid upstream proxy URL. Compute drivers use
+/// it to reject bad operator config at sandbox-create time, and the
+/// in-container supervisor applies the same rules to the reserved
+/// `OPENSHELL_UPSTREAM_*` variables so a value one side accepts is never
+/// rejected (or silently ignored) by the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamProxyAddr {
+    /// Proxy hostname, IPv4, or IPv6 address (IPv6 without brackets).
+    pub host: String,
+    /// Proxy TCP port (defaults to 80 when the URL has none).
+    pub port: u16,
+}
+
+/// Why an upstream proxy URL was rejected by [`parse_upstream_proxy_url`].
+///
+/// Kept as a typed error so each consumer (driver config validation,
+/// supervisor startup) can phrase the message for its own surface while
+/// enforcing identical semantics.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UpstreamProxyUrlError {
+    /// The value is empty or whitespace-only.
+    #[error("proxy URL is empty")]
+    Empty,
+    /// The value does not parse as a URL.
+    #[error("not a valid proxy URL: {0}")]
+    Invalid(url::ParseError),
+    /// The URL uses a scheme other than `http` (TLS and SOCKS proxies are
+    /// not supported by the sandbox supervisor).
+    #[error(
+        "unsupported proxy scheme '{0}': only http:// forward proxies are \
+         supported by the sandbox supervisor"
+    )]
+    UnsupportedScheme(String),
+    /// The URL embeds `user:pass@` credentials, which would leak into config
+    /// and container metadata. Credentials must come from the proxy auth file.
+    #[error("proxy URL must not embed credentials; supply them via the proxy auth file")]
+    InlineCredentials,
+    /// The URL has no host component.
+    #[error("proxy URL is missing a proxy host")]
+    MissingHost,
+}
+
+/// Parse and validate a corporate upstream-proxy URL.
+///
+/// A bare `host:port` (no `://`) is normalized to `http://host:port`. Only
+/// `http://` proxies are accepted, inline userinfo is rejected, and the port
+/// defaults to 80.
+///
+/// # Errors
+///
+/// Returns an [`UpstreamProxyUrlError`] describing the first rule the value
+/// violates.
+pub fn parse_upstream_proxy_url(raw: &str) -> Result<UpstreamProxyAddr, UpstreamProxyUrlError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(UpstreamProxyUrlError::Empty);
+    }
+    let parsed = if trimmed.contains("://") {
+        url::Url::parse(trimmed)
+    } else {
+        url::Url::parse(&format!("http://{trimmed}"))
+    }
+    .map_err(UpstreamProxyUrlError::Invalid)?;
+
+    if !parsed.scheme().eq_ignore_ascii_case("http") {
+        return Err(UpstreamProxyUrlError::UnsupportedScheme(
+            parsed.scheme().to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(UpstreamProxyUrlError::InlineCredentials);
+    }
+    let host = match parsed.host() {
+        // `Host::Ipv6` renders without brackets, which is what socket
+        // connect APIs expect.
+        Some(url::Host::Ipv6(ip)) => ip.to_string(),
+        Some(host) => host.to_string(),
+        None => return Err(UpstreamProxyUrlError::MissingHost),
+    };
+    if host.is_empty() {
+        return Err(UpstreamProxyUrlError::MissingHost);
+    }
+    Ok(UpstreamProxyAddr {
+        host,
+        port: parsed.port().unwrap_or(80),
+    })
+}
+
 /// Return the XDG state path for a driver's sandbox JWT token file.
 ///
 /// The resulting path is `$XDG_STATE_HOME/openshell/<driver_subdir>[/<namespace>]/<sandbox_id>/sandbox.jwt`.
@@ -169,4 +260,65 @@ pub fn supervisor_image_tag(image: &str) -> Option<&str> {
 /// all other versioned tags are treated as immutable and pulled at most once.
 pub fn supervisor_image_should_refresh(image: &str) -> bool {
     matches!(supervisor_image_tag(image), Some("dev" | "latest"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_proxy_url_accepts_http_with_port() {
+        let addr = parse_upstream_proxy_url("http://proxy.corp.com:8080").unwrap();
+        assert_eq!(addr.host, "proxy.corp.com");
+        assert_eq!(addr.port, 8080);
+    }
+
+    #[test]
+    fn upstream_proxy_url_defaults_scheme_and_port() {
+        let addr = parse_upstream_proxy_url("proxy.corp.com").unwrap();
+        assert_eq!(addr.host, "proxy.corp.com");
+        assert_eq!(addr.port, 80);
+        let addr = parse_upstream_proxy_url("proxy.corp.com:3128").unwrap();
+        assert_eq!(addr.port, 3128);
+    }
+
+    #[test]
+    fn upstream_proxy_url_ipv6_host_is_bracket_free() {
+        let addr = parse_upstream_proxy_url("http://[fd00::1]:8080").unwrap();
+        assert_eq!(addr.host, "fd00::1");
+        assert_eq!(addr.port, 8080);
+    }
+
+    #[test]
+    fn upstream_proxy_url_rejects_tls_and_socks_schemes() {
+        for url in ["https://proxy:443", "socks5://proxy:1080"] {
+            assert!(matches!(
+                parse_upstream_proxy_url(url),
+                Err(UpstreamProxyUrlError::UnsupportedScheme(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn upstream_proxy_url_rejects_inline_credentials() {
+        for url in ["http://user:pass@proxy:8080", "http://user@proxy:8080"] {
+            assert_eq!(
+                parse_upstream_proxy_url(url),
+                Err(UpstreamProxyUrlError::InlineCredentials)
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_proxy_url_rejects_empty_and_invalid() {
+        assert_eq!(
+            parse_upstream_proxy_url("  "),
+            Err(UpstreamProxyUrlError::Empty)
+        );
+        assert!(matches!(
+            parse_upstream_proxy_url("http://proxy:notaport"),
+            Err(UpstreamProxyUrlError::Invalid(_))
+        ));
+        assert!(parse_upstream_proxy_url("http://").is_err());
+    }
 }

@@ -246,8 +246,27 @@ impl ProxyHandle {
         // variables. Read once at startup; the workload cannot influence the
         // supervisor's environment, and the conventional HTTPS_PROXY/NO_PROXY
         // variables it does control are ignored on this path.
+        //
+        // This is an operator-owned security boundary, so a present-but-invalid
+        // value (bad proxy URL, unreadable auth file, malformed credential) is
+        // fatal to proxy startup: failing closed prevents a misconfiguration
+        // from silently degrading to direct dialing or unauthenticated proxy
+        // access.
         let upstream_proxy: Arc<Option<UpstreamProxyConfig>> =
-            Arc::new(UpstreamProxyConfig::from_env());
+            Arc::new(UpstreamProxyConfig::from_env().map_err(|err| {
+                let event =
+                    openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
+                        .severity(SeverityId::High)
+                        .status(StatusId::Failure)
+                        .state(openshell_ocsf::StateId::Disabled, "invalid")
+                        .message(format!(
+                            "Upstream corporate proxy configuration invalid; \
+                             refusing to start: {err}"
+                        ))
+                        .build();
+                ocsf_emit!(event);
+                miette::miette!("invalid upstream corporate proxy configuration: {err}")
+            })?);
         if let Some(cfg) = upstream_proxy.as_ref() {
             let event = openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                 .severity(SeverityId::Informational)

@@ -118,14 +118,22 @@ the corporate proxy is the requested hostname. The workload child's proxy
 variables are unaffected — they are always rewritten to point at the local
 policy proxy.
 
+The configuration is fail-closed: a reserved variable that is present but
+invalid — an unsupported or malformed proxy URL, an unreadable auth file, or a
+malformed credential — is fatal to supervisor startup instead of being treated
+as unset, so a misconfiguration can never silently degrade to direct dialing
+or unauthenticated proxy access. The driver validates the same rules at
+sandbox-create time through a validator shared with the supervisor
+(`openshell_core::driver_utils::parse_upstream_proxy_url`).
+
 Proxy credentials are never embedded in the URL: an inline `user:pass@` is
-rejected at startup because it would be stored in `gateway.toml` and exposed in
-container metadata. Operators supply credentials via `proxy_auth_file`; the
-driver stages them as a root-only secret mounted at a fixed path and exports
-only that path in `OPENSHELL_UPSTREAM_PROXY_AUTH_FILE`. The supervisor reads the
-file and builds the `Proxy-Authorization: Basic` header, rejecting credentials
-containing control characters. The reserved proxy variables — including the
-auth-file path — are stripped from workload child processes.
+rejected because it would be stored in `gateway.toml` and exposed in container
+metadata. Operators supply credentials via `proxy_auth_file`; the driver
+stages them as a root-only secret mounted at a fixed path and exports only
+that path in `OPENSHELL_UPSTREAM_PROXY_AUTH_FILE`. The supervisor reads the
+file and builds the `Proxy-Authorization: Basic` header; an empty credential
+or one containing control characters is fatal. The reserved proxy variables —
+including the auth-file path — are stripped from workload child processes.
 
 ## Credentials
 

@@ -6,19 +6,6 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-/// Parse a proxy URL, defaulting a missing scheme to `http://`.
-///
-/// A bare `host:port` (no `://`) is normalized to `http://host:port` so it
-/// parses the same way the in-sandbox supervisor treats a scheme-less proxy
-/// value. Returns the parsed [`url::Url`] for scheme/userinfo/host inspection.
-fn parse_proxy_url(raw: &str) -> Result<url::Url, url::ParseError> {
-    if raw.contains("://") {
-        url::Url::parse(raw)
-    } else {
-        url::Url::parse(&format!("http://{raw}"))
-    }
-}
-
 /// Default Podman bridge network name.
 pub const DEFAULT_NETWORK_NAME: &str = "openshell";
 pub const MACOS_PODMAN_MACHINE_HOST_GATEWAY_IP: &str = "192.168.127.254";
@@ -232,49 +219,34 @@ impl PodmanComputeConfig {
 
     /// Validate optional corporate proxy configuration.
     ///
-    /// The in-container supervisor only supports `http://` forward proxies, so
-    /// reject other schemes at config time instead of silently ignoring them
-    /// inside every sandbox. Credentials must be supplied through
-    /// `proxy_auth_file`; an inline `user:pass@` in the URL is rejected because
-    /// it would otherwise be stored in `gateway.toml` and exposed in container
-    /// metadata.
+    /// Shares validation semantics with the in-container supervisor through
+    /// [`openshell_core::driver_utils::parse_upstream_proxy_url`], so a value
+    /// accepted here can never be rejected by the supervisor at sandbox
+    /// startup (or vice versa). The supervisor only supports `http://`
+    /// forward proxies, so other schemes are rejected at config time instead
+    /// of failing inside every sandbox. Credentials must be supplied through
+    /// `proxy_auth_file`; an inline `user:pass@` in the URL is rejected
+    /// because it would otherwise be stored in `gateway.toml` and exposed in
+    /// container metadata.
     pub fn validate_proxy_config(&self) -> Result<(), crate::client::PodmanApiError> {
+        use openshell_core::driver_utils::{UpstreamProxyUrlError, parse_upstream_proxy_url};
         for (field, value) in [
             ("https_proxy", &self.https_proxy),
             ("http_proxy", &self.http_proxy),
         ] {
             let Some(url) = value else { continue };
-            let trimmed = url.trim();
-            if trimmed.is_empty() {
-                return Err(crate::client::PodmanApiError::InvalidInput(format!(
-                    "{field} must not be empty when set"
-                )));
-            }
-
-            let parsed = parse_proxy_url(trimmed).map_err(|e| {
-                crate::client::PodmanApiError::InvalidInput(format!(
-                    "{field} is not a valid proxy URL: {e}"
-                ))
+            parse_upstream_proxy_url(url).map_err(|err| {
+                crate::client::PodmanApiError::InvalidInput(match err {
+                    UpstreamProxyUrlError::Empty => {
+                        format!("{field} must not be empty when set")
+                    }
+                    UpstreamProxyUrlError::InlineCredentials => format!(
+                        "{field} must not embed credentials in the URL; supply them via \
+                         proxy_auth_file so they are not stored in config or container metadata"
+                    ),
+                    err => format!("{field} {err}"),
+                })
             })?;
-
-            if !parsed.scheme().eq_ignore_ascii_case("http") {
-                return Err(crate::client::PodmanApiError::InvalidInput(format!(
-                    "{field} uses unsupported scheme '{}': only http:// forward \
-                     proxies are supported by the sandbox supervisor",
-                    parsed.scheme()
-                )));
-            }
-            if !parsed.username().is_empty() || parsed.password().is_some() {
-                return Err(crate::client::PodmanApiError::InvalidInput(format!(
-                    "{field} must not embed credentials in the URL; supply them via \
-                     proxy_auth_file so they are not stored in config or container metadata"
-                )));
-            }
-            if parsed.host_str().is_none_or(str::is_empty) {
-                return Err(crate::client::PodmanApiError::InvalidInput(format!(
-                    "{field} is missing a proxy host"
-                )));
-            }
         }
 
         if let Some(path) = self.proxy_auth_file.as_deref() {
@@ -463,7 +435,7 @@ mod tests {
             };
             let err = cfg.validate_proxy_config().unwrap_err();
             assert!(
-                err.to_string().contains("unsupported scheme"),
+                err.to_string().contains("unsupported proxy scheme"),
                 "{url}: {err}"
             );
         }
