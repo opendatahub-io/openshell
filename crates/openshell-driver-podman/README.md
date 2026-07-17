@@ -351,8 +351,9 @@ Podman resources after out-of-band container removal or label drift.
 | `OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE` | `--sandbox-proxy-auth-allow-insecure` | unset | Explicit acknowledgement (`true`) that the credential is sent as cleartext Basic auth over the plain-TCP connection to the `http://` proxy. Required when the auth file is set; rejected when it is not. |
 | `OPENSHELL_SANDBOX_PROXY_CONNECT_BY_HOSTNAME` | `--sandbox-proxy-connect-by-hostname` | unset | Send the destination hostname in CONNECT requests instead of a validated IP. Last resort for proxies whose ACLs filter on hostnames: the proxy then resolves the name itself, so sandbox SSRF/`allowed_ips` validation no longer binds the connection. |
 
-Through the gateway, the same settings are the `https_proxy`, `no_proxy`, and
-`proxy_auth_file` keys under `[openshell.drivers.podman]`; see
+Through the gateway, the same settings are the `https_proxy`, `no_proxy`,
+`proxy_auth_file`, `proxy_auth_allow_insecure`, and
+`proxy_connect_by_hostname` keys under `[openshell.drivers.podman]`; see
 `docs/reference/gateway-config.mdx`.
 
 This is an operator-owned egress boundary: the supervisor reads it from reserved

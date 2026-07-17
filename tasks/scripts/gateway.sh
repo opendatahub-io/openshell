@@ -41,6 +41,28 @@ Environment:
                           Podman supervisor sideload image. Defaults to
                           openshell/supervisor:dev and is built on demand.
 
+Corporate proxy (Podman driver only):
+  OPENSHELL_SANDBOX_HTTPS_PROXY
+                          Corporate forward proxy URL for sandbox TLS
+                          egress, in explicit http://host:port form.
+  OPENSHELL_SANDBOX_NO_PROXY
+                          Comma-separated NO_PROXY list (hostnames, domain
+                          suffixes, IPs, CIDRs, optional :port qualifiers)
+                          dialed directly instead of through the proxy.
+  OPENSHELL_SANDBOX_PROXY_AUTH_FILE
+                          Path to a file with proxy credentials as
+                          user:pass. Requires the acknowledgement below —
+                          the gateway refuses to start with one but not
+                          the other.
+  OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE
+                          Set to true to acknowledge that the credential
+                          is sent as cleartext Basic auth over the
+                          plain-TCP connection to the http:// proxy.
+  OPENSHELL_SANDBOX_PROXY_CONNECT_BY_HOSTNAME
+                          Set to true to send the destination hostname in
+                          CONNECT instead of a validated IP. Last resort
+                          for hostname-filtering proxy ACLs.
+
 Docker and VM runs delegate to gateway:docker and gateway:vm setup scripts.
 EOF
 }

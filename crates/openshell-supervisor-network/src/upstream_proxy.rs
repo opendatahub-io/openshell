@@ -1199,6 +1199,54 @@ mod tests {
     }
 
     #[test]
+    fn no_proxy_bracketed_ipv6_entry_honors_port_qualifier() {
+        // The colons of an IPv6 literal must not be misread as a port
+        // qualifier; only the bracketed form can carry one.
+        let cfg = no_proxy_cfg("[fd00::1]:8443");
+        assert!(bypasses_port(&cfg, "fd00::1", 8443));
+        assert!(bypasses_port(&cfg, "[fd00::1]", 8443));
+        assert!(!bypasses_port(&cfg, "fd00::1", 443));
+        assert!(!bypasses_port(&cfg, "fd00::2", 8443));
+
+        // A bare IPv6 entry keeps every-port semantics.
+        let cfg = no_proxy_cfg("fd00::1");
+        assert!(bypasses_port(&cfg, "fd00::1", 8443));
+        assert!(bypasses_port(&cfg, "fd00::1", 443));
+    }
+
+    #[test]
+    fn no_proxy_ipv6_cidr_matches_resolved_addresses_of_hostnames() {
+        let cfg = no_proxy_cfg("fd00::/8");
+        // An IPv6-literal host inside the range bypasses at hostname level.
+        assert!(bypasses(&cfg, "fd00::7"));
+        assert!(!bypasses(&cfg, "2001:db8::1"));
+
+        // A hostname resolving into the range dials directly, restricted to
+        // the resolved addresses the entry contains.
+        let inside = sock("fd00::42", 443);
+        let outside = sock("2001:db8::1", 443);
+        match cfg.decision("svc.internal", 443, &[outside, inside]) {
+            ProxyDecision::Direct(addrs) => assert_eq!(addrs, vec![inside]),
+            ProxyDecision::Proxy(ep) => panic!("expected direct dial, got proxy {ep:?}"),
+        }
+    }
+
+    #[test]
+    fn no_proxy_ipv6_cidr_honors_port_qualifier() {
+        let cfg = no_proxy_cfg("fd00::/8:6443");
+        assert!(bypasses_port(&cfg, "fd00::7", 6443));
+        assert!(!bypasses_port(&cfg, "fd00::7", 443));
+        match cfg.decision("svc.internal", 6443, &[sock("fd00::42", 6443)]) {
+            ProxyDecision::Direct(addrs) => assert_eq!(addrs, vec![sock("fd00::42", 6443)]),
+            ProxyDecision::Proxy(ep) => panic!("expected direct dial, got proxy {ep:?}"),
+        }
+        assert!(matches!(
+            cfg.decision("svc.internal", 443, &[sock("fd00::42", 443)]),
+            ProxyDecision::Proxy(_)
+        ));
+    }
+
+    #[test]
     fn no_proxy_hostname_match_authorizes_all_resolved_addresses() {
         let cfg = no_proxy_cfg("internal.corp");
         let addrs = [sock("10.0.0.5", 443), sock("93.184.216.34", 443)];
