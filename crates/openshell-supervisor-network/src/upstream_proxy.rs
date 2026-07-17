@@ -5,10 +5,12 @@
 //!
 //! In proxy-required enterprise networks (issue #1792) the supervisor cannot
 //! dial policy-approved destinations directly: all outbound traffic must go
-//! through a corporate forward proxy. This module reads the operator-owned
-//! reserved `OPENSHELL_UPSTREAM_HTTPS_PROXY` / `OPENSHELL_UPSTREAM_NO_PROXY`
-//! variables from the supervisor's **own** environment and chains approved
-//! TLS tunnels through the corporate proxy with HTTP CONNECT.
+//! through a corporate forward proxy. The operator-owned proxy configuration
+//! reaches the supervisor as command-line arguments ([`UpstreamProxyArgs`])
+//! that the compute driver sets when it launches the supervisor — never
+//! through the environment, which sandbox images could bake `ENV` values
+//! into — and this module chains approved TLS tunnels through the corporate
+//! proxy with HTTP CONNECT.
 //!
 //! Only TLS (CONNECT) egress is chained: plain-HTTP requests always dial the
 //! destination directly. Forwarding plain HTTP through a corporate proxy
@@ -19,9 +21,7 @@
 //! variables are intentionally ignored: those are controlled by the sandbox
 //! creator and are rewritten separately to point the workload child at the
 //! local policy proxy, so honoring them would let a sandbox pick an arbitrary
-//! upstream proxy or disable proxying with `NO_PROXY=*`. The compute driver
-//! writes the reserved names in its required-variable tier, which sandbox and
-//! template environment cannot override.
+//! upstream proxy or disable proxying with `NO_PROXY=*`.
 //!
 //! Scope and invariants:
 //! - Only `http://` proxy URLs are supported. Configuration is fail-closed:
@@ -39,8 +39,8 @@
 //! - CONNECT requests target a validated resolved address by default, so the
 //!   proxy performs no DNS resolution and the tunnel stays bound to the
 //!   answer that passed SSRF/`allowed_ips` validation. The reserved
-//!   `OPENSHELL_UPSTREAM_PROXY_CONNECT_BY_HOSTNAME` opt-in sends the
-//!   hostname instead, for proxies whose ACLs filter on hostnames.
+//!   `--upstream-proxy-connect-by-hostname` opt-in sends the hostname
+//!   instead, for proxies whose ACLs filter on hostnames.
 //! - The reserved `NO_PROXY` list decides which destinations bypass the
 //!   corporate proxy and keep dialing directly (cluster-internal services,
 //!   host gateway, etc.). Loopback destinations always bypass the proxy.
@@ -271,12 +271,13 @@ pub enum ConnectTarget {
     /// travels inside the tunnel (TLS SNI, application `Host`).
     Ip(IpAddr),
     /// CONNECT by hostname; the proxy resolves the name itself. Operator
-    /// opt-in for hostname-filtering proxy ACLs — see
-    /// [`UPSTREAM_PROXY_CONNECT_BY_HOSTNAME`](openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME).
+    /// opt-in for hostname-filtering proxy ACLs
+    /// (`--upstream-proxy-connect-by-hostname`).
     Hostname,
 }
 
-/// Corporate proxy configuration read from the supervisor's environment.
+/// Corporate proxy configuration built from the driver-supplied
+/// command-line arguments ([`UpstreamProxyArgs`]).
 #[derive(Debug, Clone)]
 pub struct UpstreamProxyConfig {
     https: ProxyEndpoint,
@@ -284,75 +285,110 @@ pub struct UpstreamProxyConfig {
     connect_by_hostname: bool,
 }
 
+/// Operator-owned corporate proxy settings passed to the supervisor as
+/// command-line arguments by the compute driver.
+///
+/// Argv is set by the driver when it creates the container/VM and cannot be
+/// influenced by sandbox environment or image `ENV`, so a field left `None`
+/// / `false` genuinely means "not configured by the operator".
+#[derive(Debug, Clone, Default)]
+pub struct UpstreamProxyArgs {
+    /// `http://host:port` corporate proxy URL, or `None` for direct egress.
+    pub https_proxy: Option<String>,
+    /// Comma-separated `NO_PROXY` list.
+    pub no_proxy: Option<String>,
+    /// Path to the root-only credential mount (`user:pass`).
+    pub proxy_auth_file: Option<String>,
+    /// Operator acknowledgement that credentials travel as cleartext Basic
+    /// auth over the plain-TCP proxy connection.
+    pub proxy_auth_allow_insecure: bool,
+    /// Send the destination hostname in CONNECT instead of a validated IP.
+    pub proxy_connect_by_hostname: bool,
+}
+
+// Supervisor CLI flag names for the corporate-proxy settings, used as the
+// dispatch keys in `from_lookup` and in operator-facing error messages.
+const ARG_HTTPS_PROXY: &str = "--upstream-proxy";
+const ARG_NO_PROXY: &str = "--upstream-no-proxy";
+const ARG_PROXY_AUTH_FILE: &str = "--upstream-proxy-auth-file";
+const ARG_PROXY_AUTH_ALLOW_INSECURE: &str = "--upstream-proxy-auth-allow-insecure";
+const ARG_PROXY_CONNECT_BY_HOSTNAME: &str = "--upstream-proxy-connect-by-hostname";
+
 impl UpstreamProxyConfig {
-    /// Read the operator-owned corporate proxy configuration from the
-    /// supervisor's reserved environment variables
-    /// ([`UPSTREAM_HTTPS_PROXY`](openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY),
-    /// [`UPSTREAM_NO_PROXY`](openshell_core::sandbox_env::UPSTREAM_NO_PROXY),
-    /// [`UPSTREAM_PROXY_AUTH_FILE`](openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE)).
-    /// Returns `Ok(None)` when no proxy is configured (unset variables).
+    /// Build the corporate proxy configuration from the driver-supplied
+    /// command-line [`UpstreamProxyArgs`]. Returns `Ok(None)` when no proxy
+    /// is configured.
     ///
-    /// The conventional `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`
-    /// variables are intentionally ignored here: they are set by the sandbox
-    /// creator (and rewritten to point workload children at the local policy
-    /// proxy), so honoring them would let a sandbox choose an arbitrary
-    /// upstream proxy or disable proxying entirely. The compute driver writes
-    /// the reserved names in its required-variable tier, where sandbox and
-    /// template environment cannot override them.
+    /// The conventional `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` /
+    /// `NO_PROXY` environment variables are intentionally never consulted:
+    /// they are controlled by the sandbox creator (and rewritten to point
+    /// workload children at the local policy proxy), so honoring them would
+    /// let a sandbox choose an arbitrary upstream proxy or disable proxying
+    /// entirely.
     ///
     /// # Errors
     ///
-    /// These reserved variables are an operator-owned security boundary, so
-    /// any present-but-invalid value is fatal instead of being treated as
-    /// unset: a present-but-empty (or whitespace-only) reserved variable, an
-    /// invalid or unsupported proxy URL, an auth file that is set but
-    /// unreadable or holds a malformed credential, an auth file without the
-    /// explicit cleartext-credential acknowledgement
-    /// ([`UPSTREAM_PROXY_AUTH_ALLOW_INSECURE`](openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE)),
-    /// a CONNECT-target opt-in
-    /// ([`UPSTREAM_PROXY_CONNECT_BY_HOSTNAME`](openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME))
-    /// with any value other than `true`, or any auxiliary variable with no
-    /// proxy configured. Failing closed here prevents a misconfiguration
-    /// from silently degrading to direct dialing or unauthenticated proxy
-    /// access. Only fully unset variables mean "no proxy".
-    pub fn from_env() -> Result<Option<Self>, String> {
-        Self::from_lookup(|name| std::env::var(name).ok())
+    /// This is an operator-owned security boundary, so a present-but-invalid
+    /// value is fatal instead of being treated as unset: an empty (or
+    /// whitespace-only) argument, an invalid or unsupported proxy URL, an
+    /// auth file that is set but unreadable or holds a malformed credential,
+    /// an auth file without the cleartext-credential acknowledgement, or an
+    /// auth file / `NO_PROXY` list / acknowledgement / connect-by-hostname
+    /// flag with no proxy configured. Failing closed prevents a
+    /// misconfiguration from silently degrading to direct dialing or
+    /// unauthenticated proxy access.
+    pub fn from_args(args: &UpstreamProxyArgs) -> Result<Option<Self>, String> {
+        // Present the typed argv fields under their canonical identifiers so
+        // the shared validation runs once. Booleans map to Some("true") /
+        // None, so every pairing rule (auth file needs the acknowledgement,
+        // no auxiliary setting without a proxy) applies unchanged.
+        Self::from_lookup(|name| {
+            if name == ARG_HTTPS_PROXY {
+                args.https_proxy.clone()
+            } else if name == ARG_NO_PROXY {
+                args.no_proxy.clone()
+            } else if name == ARG_PROXY_AUTH_FILE {
+                args.proxy_auth_file.clone()
+            } else if name == ARG_PROXY_AUTH_ALLOW_INSECURE {
+                args.proxy_auth_allow_insecure.then(|| "true".to_string())
+            } else if name == ARG_PROXY_CONNECT_BY_HOSTNAME {
+                args.proxy_connect_by_hostname.then(|| "true".to_string())
+            } else {
+                None
+            }
+        })
     }
 
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
-        use openshell_core::sandbox_env::{
-            UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY, UPSTREAM_PROXY_AUTH_ALLOW_INSECURE,
-            UPSTREAM_PROXY_AUTH_FILE, UPSTREAM_PROXY_CONNECT_BY_HOSTNAME,
-        };
-        // Only a fully unset reserved variable means "not configured". A
-        // present-but-empty value is a misconfiguration (the compute driver
-        // never writes one), so it is fatal rather than silently downgrading
-        // the boundary to direct dialing or unauthenticated proxy access.
+        // A missing setting means "not configured". A present-but-empty value
+        // is a misconfiguration (the driver never emits one), so it is fatal
+        // rather than silently downgrading the boundary to direct dialing or
+        // unauthenticated proxy access.
         let var = |name: &str| -> Result<Option<String>, String> {
             match lookup(name) {
                 None => Ok(None),
-                Some(value) if value.trim().is_empty() => Err(format!(
-                    "{name} is set but empty; unset it to disable the upstream proxy"
-                )),
+                Some(value) if value.trim().is_empty() => {
+                    Err(format!("{name} must not be empty when set"))
+                }
                 Some(value) => Ok(Some(value)),
             }
         };
-        let https = var(UPSTREAM_HTTPS_PROXY)?
-            .map(|url| parse_proxy_url(&url, UPSTREAM_HTTPS_PROXY))
+        let https = var(ARG_HTTPS_PROXY)?
+            .map(|url| parse_proxy_url(&url, ARG_HTTPS_PROXY))
             .transpose()?;
-        let auth_file = var(UPSTREAM_PROXY_AUTH_FILE)?;
-        let auth_allow_insecure = var(UPSTREAM_PROXY_AUTH_ALLOW_INSECURE)?;
-        let connect_by_hostname_raw = var(UPSTREAM_PROXY_CONNECT_BY_HOSTNAME)?;
-        let no_proxy_list = var(UPSTREAM_NO_PROXY)?;
+        let auth_file = var(ARG_PROXY_AUTH_FILE)?;
+        let auth_allow_insecure = var(ARG_PROXY_AUTH_ALLOW_INSECURE)?;
+        let connect_by_hostname_raw = var(ARG_PROXY_CONNECT_BY_HOSTNAME)?;
+        let no_proxy_list = var(ARG_NO_PROXY)?;
         let Some(mut https) = https else {
             // Auxiliary proxy settings without a proxy mean the operator
             // believed a proxy boundary was in effect; refuse rather than
             // silently running with direct egress.
             for (name, value) in [
-                (UPSTREAM_PROXY_AUTH_FILE, &auth_file),
-                (UPSTREAM_PROXY_AUTH_ALLOW_INSECURE, &auth_allow_insecure),
-                (UPSTREAM_PROXY_CONNECT_BY_HOSTNAME, &connect_by_hostname_raw),
-                (UPSTREAM_NO_PROXY, &no_proxy_list),
+                (ARG_PROXY_AUTH_FILE, &auth_file),
+                (ARG_PROXY_AUTH_ALLOW_INSECURE, &auth_allow_insecure),
+                (ARG_PROXY_CONNECT_BY_HOSTNAME, &connect_by_hostname_raw),
+                (ARG_NO_PROXY, &no_proxy_list),
             ] {
                 if value.is_some() {
                     return Err(format!("{name} is set but no upstream proxy is configured"));
@@ -369,7 +405,7 @@ impl UpstreamProxyConfig {
             Some("true") => true,
             Some(_) => {
                 return Err(format!(
-                    "{UPSTREAM_PROXY_CONNECT_BY_HOSTNAME} must be 'true' when set"
+                    "{ARG_PROXY_CONNECT_BY_HOSTNAME} must be 'true' when set"
                 ));
             }
         };
@@ -385,21 +421,20 @@ impl UpstreamProxyConfig {
             Some("true") => true,
             Some(_) => {
                 return Err(format!(
-                    "{UPSTREAM_PROXY_AUTH_ALLOW_INSECURE} must be 'true' when set"
+                    "{ARG_PROXY_AUTH_ALLOW_INSECURE} must be 'true' when set"
                 ));
             }
         };
         if auth_file.is_none() && auth_allow_insecure.is_some() {
             return Err(format!(
-                "{UPSTREAM_PROXY_AUTH_ALLOW_INSECURE} is set but no \
-                 {UPSTREAM_PROXY_AUTH_FILE} is configured"
+                "{ARG_PROXY_AUTH_ALLOW_INSECURE} is set but no {ARG_PROXY_AUTH_FILE} is configured"
             ));
         }
         if auth_file.is_some() && !allow_insecure {
             return Err(format!(
-                "{UPSTREAM_PROXY_AUTH_FILE} sends the credential as cleartext Basic auth \
+                "{ARG_PROXY_AUTH_FILE} sends the credential as cleartext Basic auth \
                  over the plain-TCP proxy connection; refusing without \
-                 {UPSTREAM_PROXY_AUTH_ALLOW_INSECURE}=true"
+                 {ARG_PROXY_AUTH_ALLOW_INSECURE}"
             ));
         }
 
@@ -471,8 +506,8 @@ impl UpstreamProxyConfig {
 /// ([`parse_upstream_proxy_url`](openshell_core::driver_utils::parse_upstream_proxy_url)).
 ///
 /// Credentials are never taken from the URL: they are delivered out of band
-/// through [`UPSTREAM_PROXY_AUTH_FILE`](openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE)
-/// so they never appear in config or container metadata.
+/// through the root-only auth-file mount (`--upstream-proxy-auth-file`) so
+/// they never appear in config or container metadata.
 ///
 /// # Errors
 ///
@@ -825,11 +860,11 @@ async fn connect_via_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openshell_core::sandbox_env::{
-        UPSTREAM_HTTPS_PROXY as HTTPS_PROXY, UPSTREAM_NO_PROXY as NO_PROXY,
-        UPSTREAM_PROXY_AUTH_ALLOW_INSECURE as PROXY_AUTH_ALLOW_INSECURE,
-        UPSTREAM_PROXY_AUTH_FILE as PROXY_AUTH_FILE,
-        UPSTREAM_PROXY_CONNECT_BY_HOSTNAME as PROXY_CONNECT_BY_HOSTNAME,
+    use super::{
+        ARG_HTTPS_PROXY as HTTPS_PROXY, ARG_NO_PROXY as NO_PROXY,
+        ARG_PROXY_AUTH_ALLOW_INSECURE as PROXY_AUTH_ALLOW_INSECURE,
+        ARG_PROXY_AUTH_FILE as PROXY_AUTH_FILE,
+        ARG_PROXY_CONNECT_BY_HOSTNAME as PROXY_CONNECT_BY_HOSTNAME,
     };
 
     fn config_from(pairs: &[(&str, &str)]) -> Result<Option<UpstreamProxyConfig>, String> {
@@ -849,6 +884,49 @@ mod tests {
     #[test]
     fn no_env_yields_none() {
         assert!(config_from(&[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn from_args_maps_cli_arguments_to_config() {
+        // The driver-supplied argv is the authoritative source; the shared
+        // validation applies exactly as for the reserved-name lookup.
+        let args = UpstreamProxyArgs {
+            https_proxy: Some("http://proxy.corp.com:8080".to_string()),
+            no_proxy: Some("*.svc.cluster.local".to_string()),
+            proxy_connect_by_hostname: true,
+            ..UpstreamProxyArgs::default()
+        };
+        let cfg = UpstreamProxyConfig::from_args(&args).unwrap().unwrap();
+        assert!(cfg.connect_by_hostname());
+        assert!(bypasses(&cfg, "kubernetes.default.svc.cluster.local"));
+
+        // No proxy URL means no configuration.
+        assert!(
+            UpstreamProxyConfig::from_args(&UpstreamProxyArgs::default())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn from_args_enforces_the_auth_file_acknowledgement_pairing() {
+        // An auth file without the acknowledgement is fatal, exactly as when
+        // the same pairing arrives via the reserved names.
+        let args = UpstreamProxyArgs {
+            https_proxy: Some("http://proxy.corp.com:8080".to_string()),
+            proxy_auth_file: Some("/etc/openshell/auth/upstream-proxy".to_string()),
+            ..UpstreamProxyArgs::default()
+        };
+        let err = UpstreamProxyConfig::from_args(&args).unwrap_err();
+        assert!(err.contains(PROXY_AUTH_ALLOW_INSECURE), "{err}");
+
+        // Auxiliary settings without a proxy are fatal.
+        let args = UpstreamProxyArgs {
+            proxy_connect_by_hostname: true,
+            ..UpstreamProxyArgs::default()
+        };
+        let err = UpstreamProxyConfig::from_args(&args).unwrap_err();
+        assert!(err.contains("no upstream proxy"), "{err}");
     }
 
     #[test]

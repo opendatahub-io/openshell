@@ -106,6 +106,7 @@ pub async fn run_sandbox(
     ocsf_enabled: Arc<std::sync::atomic::AtomicBool>,
     network_enabled: bool,
     process_enabled: bool,
+    upstream_proxy_args: openshell_supervisor_network::upstream_proxy::UpstreamProxyArgs,
 ) -> Result<i32> {
     let (program, args) = command
         .split_first()
@@ -390,6 +391,7 @@ pub async fn run_sandbox(
                 denial_tx,
                 activity_tx,
                 workspace_rx.clone(),
+                &upstream_proxy_args,
             )
             .await?,
         )

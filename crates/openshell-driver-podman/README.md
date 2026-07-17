@@ -356,12 +356,12 @@ Through the gateway, the same settings are the `https_proxy`, `no_proxy`,
 `proxy_connect_by_hostname` keys under `[openshell.drivers.podman]`; see
 `docs/reference/gateway-config.mdx`.
 
-This is an operator-owned egress boundary: the supervisor reads it from reserved
-`OPENSHELL_UPSTREAM_*` variables written at highest priority, so sandbox and
-template environment cannot override it, and the conventional
-`HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` variables a sandbox controls do not steer
-it. Credentials must be supplied through `proxy_auth_file`; an inline
-`user:pass@` in the URL is rejected at startup.
+This is an operator-owned egress boundary: the driver passes the settings on
+the supervisor's command line, so sandbox and template environment — and any
+`ENV` baked into the sandbox image — cannot override them, and the
+conventional `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` variables a sandbox
+controls do not steer it. Credentials must be supplied through
+`proxy_auth_file`; an inline `user:pass@` in the URL is rejected at startup.
 
 Basic auth over an `http://` proxy is cleartext on the wire: anyone on the
 network path between the sandbox host and the proxy can recover the

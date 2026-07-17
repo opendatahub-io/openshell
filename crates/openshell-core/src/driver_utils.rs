@@ -87,9 +87,9 @@ pub const UPSTREAM_PROXY_AUTH_MOUNT_PATH: &str = "/etc/openshell/auth/upstream-p
 /// Produced by [`parse_upstream_proxy_url`], which is the single source of
 /// truth for what counts as a valid upstream proxy URL. Compute drivers use
 /// it to reject bad operator config at sandbox-create time, and the
-/// in-container supervisor applies the same rules to the reserved
-/// `OPENSHELL_UPSTREAM_*` variables so a value one side accepts is never
-/// rejected (or silently ignored) by the other.
+/// in-container supervisor applies the same rules to its driver-supplied
+/// arguments so a value one side accepts is never rejected (or silently
+/// ignored) by the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpstreamProxyAddr {
     /// Proxy hostname, IPv4, or IPv6 address (IPv6 without brackets).

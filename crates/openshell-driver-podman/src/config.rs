@@ -133,20 +133,18 @@ pub struct PodmanComputeConfig {
     /// Set to `0` to disable health checks entirely.
     /// Defaults to [`DEFAULT_HEALTH_CHECK_INTERVAL_SECS`] (10 seconds).
     pub health_check_interval_secs: u64,
-    /// Corporate forward proxy URL injected into sandbox containers as the
-    /// reserved `OPENSHELL_UPSTREAM_HTTPS_PROXY` supervisor variable
+    /// Corporate forward proxy URL passed to the in-container supervisor
     /// (e.g. `http://proxy.corp.com:8080`).
     ///
-    /// The in-container supervisor chains policy-approved TLS tunnels
-    /// through this proxy with HTTP CONNECT instead of dialing upstream
-    /// destinations directly. Only `http://` proxy URLs in explicit
-    /// `http://host:port` form (scheme and port required) are supported.
-    /// This is an operator-owned egress boundary: it is written in the
-    /// required-variable tier so sandbox/template environment cannot override
-    /// it, and the conventional `HTTPS_PROXY` variables are not used.
+    /// The supervisor chains policy-approved TLS tunnels through this proxy
+    /// with HTTP CONNECT instead of dialing upstream destinations directly.
+    /// Only `http://` proxy URLs in explicit `http://host:port` form (scheme
+    /// and port required) are supported. This is an operator-owned egress
+    /// boundary delivered on the supervisor's command line, so
+    /// sandbox/template environment cannot override it, and the conventional
+    /// `HTTPS_PROXY` variables are not used.
     pub https_proxy: Option<String>,
-    /// Comma-separated `NO_PROXY` list injected as the reserved
-    /// `OPENSHELL_UPSTREAM_NO_PROXY` variable (e.g.
+    /// Comma-separated `NO_PROXY` list passed alongside the proxy URL (e.g.
     /// `*.svc.cluster.local,10.0.0.0/8`). Destinations matching an entry are
     /// dialed directly instead of through the corporate proxy. Entries take
     /// an optional `:port` qualifier that limits them to that destination

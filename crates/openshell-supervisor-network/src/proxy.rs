@@ -201,6 +201,7 @@ impl ProxyHandle {
         denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
         activity_tx: Option<ActivitySender>,
         engine_ready: tokio::sync::watch::Receiver<bool>,
+        upstream_proxy_args: &upstream_proxy::UpstreamProxyArgs,
     ) -> Result<Self> {
         // Use override bind_addr, fall back to policy http_addr, then default
         // to loopback:3128.  The default allows the proxy to function when no
@@ -241,19 +242,18 @@ impl ProxyHandle {
             );
         }
 
-        // Corporate egress proxy configured on the supervisor's own
-        // environment via the operator-owned reserved OPENSHELL_UPSTREAM_*
-        // variables. Read once at startup; the workload cannot influence the
-        // supervisor's environment, and the conventional HTTPS_PROXY/NO_PROXY
-        // variables it does control are ignored on this path.
+        // Corporate egress proxy configured by the operator and delivered on
+        // the supervisor's command line by the compute driver; the
+        // conventional HTTPS_PROXY/NO_PROXY variables the sandbox controls
+        // are ignored here.
         //
         // This is an operator-owned security boundary, so a present-but-invalid
         // value (bad proxy URL, unreadable auth file, malformed credential) is
         // fatal to proxy startup: failing closed prevents a misconfiguration
         // from silently degrading to direct dialing or unauthenticated proxy
         // access.
-        let upstream_proxy: Arc<Option<UpstreamProxyConfig>> =
-            Arc::new(UpstreamProxyConfig::from_env().map_err(|err| {
+        let upstream_proxy: Arc<Option<UpstreamProxyConfig>> = Arc::new(
+            UpstreamProxyConfig::from_args(upstream_proxy_args).map_err(|err| {
                 let event =
                     openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                         .severity(SeverityId::High)
@@ -266,7 +266,8 @@ impl ProxyHandle {
                         .build();
                 ocsf_emit!(event);
                 miette::miette!("invalid upstream corporate proxy configuration: {err}")
-            })?);
+            })?,
+        );
         if let Some(cfg) = upstream_proxy.as_ref() {
             let event = openshell_ocsf::ConfigStateChangeBuilder::new(openshell_ocsf::ctx::ctx())
                 .severity(SeverityId::Informational)

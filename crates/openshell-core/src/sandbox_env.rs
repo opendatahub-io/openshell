@@ -115,56 +115,7 @@ pub const SANDBOX_UID: &str = "OPENSHELL_SANDBOX_UID";
 /// supervisor drops privileges to a group other than the UID's primary group.
 pub const SANDBOX_GID: &str = "OPENSHELL_SANDBOX_GID";
 
-/// Corporate forward-proxy URL the supervisor chains TLS (CONNECT) egress
-/// through, e.g. `http://proxy.corp.com:8080`.
-///
-/// This is an operator-owned egress boundary. Compute drivers set it from
-/// gateway configuration in the supervisor's required-variable tier so that
-/// sandbox spec/template environment cannot override it. The supervisor reads
-/// *only* this reserved name — never the conventional `HTTPS_PROXY` /
-/// `ALL_PROXY` variables, which the sandbox creator controls and which are
-/// reserved for pointing the workload child at the local policy proxy.
-pub const UPSTREAM_HTTPS_PROXY: &str = "OPENSHELL_UPSTREAM_HTTPS_PROXY";
-
-/// Comma-separated `NO_PROXY`-style list of destinations the supervisor dials
-/// directly instead of chaining through the corporate proxy.
-///
-/// Operator-owned counterpart to [`UPSTREAM_HTTPS_PROXY`]; see that constant
-/// for the trust-boundary rationale.
-pub const UPSTREAM_NO_PROXY: &str = "OPENSHELL_UPSTREAM_NO_PROXY";
-
-/// Filesystem path (inside the sandbox) to the corporate proxy credentials.
-///
-/// The file holds `user:pass` userinfo the supervisor turns into a
-/// `Proxy-Authorization: Basic` header. Credentials are delivered through this
-/// root-only file rather than embedded in the proxy URL, so they never appear
-/// in container environment or metadata. Compute drivers write this in the
-/// required-variable tier; the value is a path, not a secret.
-pub const UPSTREAM_PROXY_AUTH_FILE: &str = "OPENSHELL_UPSTREAM_PROXY_AUTH_FILE";
-
-/// Explicit operator acknowledgement (`true`) that the proxy credential is
-/// sent as a cleartext `Proxy-Authorization: Basic` header over the plain-TCP
-/// connection to the `http://` corporate proxy.
-///
-/// Basic auth is base64, not encryption, so anyone on the network path
-/// between the sandbox host and the proxy can recover the credential. The
-/// supervisor refuses to send credentials without this acknowledgement:
-/// [`UPSTREAM_PROXY_AUTH_FILE`] set without this variable equal to `true` is
-/// a fatal startup error, as is this variable set without an auth file.
-/// Compute drivers write it in the required-variable tier from the driver's
-/// `proxy_auth_allow_insecure` setting.
-pub const UPSTREAM_PROXY_AUTH_ALLOW_INSECURE: &str = "OPENSHELL_UPSTREAM_PROXY_AUTH_ALLOW_INSECURE";
-
-/// Explicit operator opt-out (`true`) that sends the destination *hostname*
-/// in the CONNECT request to the corporate proxy instead of a validated IP.
-///
-/// By default the supervisor CONNECTs to an address that already passed
-/// SSRF and `allowed_ips` validation, so the proxy performs no DNS
-/// resolution and the connection is bound to the validated answer. With
-/// this opt-out the proxy resolves the name itself: hostname-filtering
-/// proxy ACLs keep working, but a name whose resolution differs at the
-/// proxy (split-horizon DNS, rebinding) can reach destinations the sandbox
-/// policy never approved — the proxy's own ACLs become the effective
-/// egress control. Compute drivers write it in the required-variable tier
-/// from the driver's `proxy_connect_by_hostname` setting.
-pub const UPSTREAM_PROXY_CONNECT_BY_HOSTNAME: &str = "OPENSHELL_UPSTREAM_PROXY_CONNECT_BY_HOSTNAME";
+// The corporate upstream-proxy configuration deliberately has no reserved
+// environment variables: it travels on the supervisor's argv
+// (`--upstream-proxy` and friends), which a sandbox image cannot forge the
+// way it could bake `ENV` values.

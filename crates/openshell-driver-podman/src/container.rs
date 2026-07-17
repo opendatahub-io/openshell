@@ -358,6 +358,41 @@ pub fn resolve_image<'a>(sandbox: &'a DriverSandbox, config: &'a PodmanComputeCo
 /// User-supplied vars are inserted first so that the required driver
 /// vars always win -- preventing spec/template overrides of security-
 /// critical values like `OPENSHELL_ENDPOINT` or `OPENSHELL_SANDBOX_ID`.
+/// Build the corporate upstream-proxy command-line arguments passed to the
+/// supervisor.
+///
+/// This operator-owned egress boundary travels on argv, which sandbox
+/// spec/template environment and image `ENV` cannot influence. Credentials
+/// are never on argv — only the root-only mount path is passed; the
+/// supervisor reads the secret from the mount.
+fn upstream_proxy_cli_args(config: &PodmanComputeConfig) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(url) = &config.https_proxy {
+        args.push("--upstream-proxy".to_string());
+        args.push(url.clone());
+    }
+    if let Some(list) = &config.no_proxy {
+        args.push("--upstream-no-proxy".to_string());
+        args.push(list.clone());
+    }
+    if config.proxy_auth_file.is_some() {
+        args.push("--upstream-proxy-auth-file".to_string());
+        args.push(UPSTREAM_PROXY_AUTH_MOUNT_PATH.to_string());
+    }
+    // Config validation guarantees the acknowledgement is `true` whenever an
+    // auth file is configured; the supervisor independently refuses
+    // credentials without it.
+    if config.proxy_auth_allow_insecure == Some(true) {
+        args.push("--upstream-proxy-auth-allow-insecure".to_string());
+    }
+    // Absent means the default validated-IP CONNECT binding; only the
+    // explicit hostname opt-in is passed through.
+    if config.proxy_connect_by_hostname == Some(true) {
+        args.push("--upstream-proxy-connect-by-hostname".to_string());
+    }
+    args
+}
+
 fn build_env(
     sandbox: &DriverSandbox,
     config: &PodmanComputeConfig,
@@ -396,66 +431,10 @@ fn build_env(
 
     // 2. Required driver vars (highest priority -- always overwrite).
 
-    // Operator-configured corporate egress proxy. This is a security boundary,
-    // so it is written in the required-variable tier under reserved
-    // supervisor-only names. The conventional `HTTPS_PROXY`/`NO_PROXY` variants
-    // are deliberately NOT used here: those belong to the sandbox creator and
-    // are separately rewritten to point the workload child at the local policy
-    // proxy, so letting them steer the supervisor would let a sandbox pick an
-    // arbitrary proxy or disable proxying with `NO_PROXY=*`.
-    //
-    // Any sandbox/template-supplied value under a reserved name is first
-    // stripped, then replaced with the operator value (if configured), so the
-    // supervisor can never observe a reserved proxy variable the operator did
-    // not set.
-    //
-    // Proxy credentials are never passed through the environment: when
-    // `proxy_auth_file` is configured the supervisor reads them from a
-    // root-only secret mount, and only the mount *path* is exported.
-    let proxy_auth_mount = config
-        .proxy_auth_file
-        .as_ref()
-        .map(|_| UPSTREAM_PROXY_AUTH_MOUNT_PATH.to_string());
-    // Config validation guarantees the acknowledgement is `true` whenever an
-    // auth file is configured; the supervisor independently refuses
-    // credentials without it.
-    let proxy_auth_allow_insecure = config
-        .proxy_auth_allow_insecure
-        .filter(|allowed| *allowed)
-        .map(|_| "true".to_string());
-    // Absent means the default validated-IP CONNECT binding; only the
-    // explicit hostname opt-in is written through.
-    let proxy_connect_by_hostname = config
-        .proxy_connect_by_hostname
-        .filter(|by_hostname| *by_hostname)
-        .map(|_| "true".to_string());
-    for (name, value) in [
-        (
-            openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
-            &config.https_proxy,
-        ),
-        (
-            openshell_core::sandbox_env::UPSTREAM_NO_PROXY,
-            &config.no_proxy,
-        ),
-        (
-            openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE,
-            &proxy_auth_mount,
-        ),
-        (
-            openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE,
-            &proxy_auth_allow_insecure,
-        ),
-        (
-            openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME,
-            &proxy_connect_by_hostname,
-        ),
-    ] {
-        env.remove(name);
-        if let Some(value) = value {
-            env.insert(name.into(), value.clone());
-        }
-    }
+    // The operator's corporate egress proxy settings are not environment
+    // variables: they travel on the supervisor's argv (see
+    // `upstream_proxy_cli_args`), which sandbox spec/template environment
+    // and image ENV cannot influence.
 
     env.insert(
         openshell_core::sandbox_env::SANDBOX.into(),
@@ -971,7 +950,10 @@ pub fn build_container_spec_with_token_and_gpu_devices(
         // Without this, the container would run the entrypoint binary with
         // the supervisor path as an argument instead of executing it directly.
         entrypoint: vec![SUPERVISOR_BINARY_PATH.into()],
-        command: vec![],
+        // Operator-owned corporate proxy flags. The workload command is not
+        // part of argv (the supervisor takes it from the reserved command
+        // env var), so these flags are the whole command list.
+        command: upstream_proxy_cli_args(config),
         // Force the supervisor to run as root (UID 0). Sandbox images may
         // set a non-root USER directive (e.g. `USER sandbox`), but the
         // supervisor needs root to create network namespaces, set up the
@@ -1738,31 +1720,53 @@ mod tests {
         );
     }
 
-    #[test]
-    fn container_spec_injects_operator_proxy_env() {
-        use openshell_core::sandbox_env::{UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY};
+    /// Extract the container spec's supervisor argv (`command`) as strings.
+    fn spec_command(spec: &Value) -> Vec<String> {
+        spec["command"]
+            .as_array()
+            .expect("command should be an array")
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .expect("command arg should be a string")
+                    .to_string()
+            })
+            .collect()
+    }
 
+    #[test]
+    fn container_spec_passes_operator_proxy_on_supervisor_argv() {
         let sandbox = test_sandbox("test-id", "test-name");
         let mut config = test_config();
         config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
         config.no_proxy = Some("*.svc.cluster.local,10.0.0.0/8".to_string());
 
         let spec = build_container_spec(&sandbox, &config);
+        let command = spec_command(&spec);
+
+        // Config travels on argv (the image cannot forge process arguments),
+        // as flag/value pairs.
+        let idx = command
+            .iter()
+            .position(|a| a == "--upstream-proxy")
+            .expect("proxy URL flag present");
+        assert_eq!(
+            command.get(idx + 1).map(String::as_str),
+            Some("http://proxy.corp.com:8080")
+        );
+        let idx = command
+            .iter()
+            .position(|a| a == "--upstream-no-proxy")
+            .expect("no_proxy flag present");
+        assert_eq!(
+            command.get(idx + 1).map(String::as_str),
+            Some("*.svc.cluster.local,10.0.0.0/8")
+        );
+
+        // The proxy settings are argv-only; nothing about them lands in the
+        // environment, and the conventional proxy variables (which belong to
+        // the sandbox creator) are not touched by operator config.
         let env_map = spec["env"].as_object().expect("env should be an object");
-
-        assert_eq!(
-            env_map.get(UPSTREAM_HTTPS_PROXY).and_then(|v| v.as_str()),
-            Some("http://proxy.corp.com:8080"),
-            "reserved upstream HTTPS var should carry the operator proxy URL"
-        );
-        assert_eq!(
-            env_map.get(UPSTREAM_NO_PROXY).and_then(|v| v.as_str()),
-            Some("*.svc.cluster.local,10.0.0.0/8"),
-            "reserved upstream NO_PROXY var should carry the operator list"
-        );
-
-        // The conventional proxy variables must NOT be set from operator
-        // config: they belong to the sandbox creator, not the supervisor.
         for key in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
             assert!(
                 !env_map.contains_key(key),
@@ -1772,28 +1776,26 @@ mod tests {
     }
 
     #[test]
-    fn container_spec_omits_proxy_env_when_unconfigured() {
-        use openshell_core::sandbox_env::{UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY};
-
+    fn container_spec_omits_proxy_argv_when_unconfigured() {
         let sandbox = test_sandbox("test-id", "test-name");
         let spec = build_container_spec(&sandbox, &test_config());
-        let env_map = spec["env"].as_object().expect("env should be an object");
+        let command = spec_command(&spec);
 
-        for key in [UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY] {
-            assert!(
-                !env_map.contains_key(key),
-                "{key} should be absent without operator proxy config"
-            );
-        }
+        assert!(
+            !command.iter().any(|a| a.starts_with("--upstream-proxy")),
+            "no proxy flags without operator proxy config: {command:?}"
+        );
     }
 
     #[test]
-    fn container_spec_user_env_cannot_override_operator_proxy() {
+    fn container_spec_sandbox_env_cannot_influence_proxy_argv() {
         use openshell_core::proto::compute::v1::{DriverSandboxSpec, DriverSandboxTemplate};
-        use openshell_core::sandbox_env::{UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY};
 
-        // A sandbox creator tries to redirect egress at an attacker proxy and
-        // disable proxying with `NO_PROXY=*` through both spec and template env.
+        // A sandbox creator tries to steer the egress boundary through spec
+        // and template environment (image-baked ENV behaves the same at the
+        // runtime layer). The supervisor takes proxy config only from the
+        // argv the driver builds out of operator config, so none of it has
+        // any effect.
         let mut sandbox = test_sandbox("test-id", "test-name");
         sandbox.spec = Some(DriverSandboxSpec {
             environment: std::collections::HashMap::from([
@@ -1801,15 +1803,11 @@ mod tests {
                     "HTTPS_PROXY".to_string(),
                     "http://attacker:9999".to_string(),
                 ),
-                (
-                    UPSTREAM_HTTPS_PROXY.to_string(),
-                    "http://attacker:9999".to_string(),
-                ),
-                (UPSTREAM_NO_PROXY.to_string(), "*".to_string()),
+                ("NO_PROXY".to_string(), "*".to_string()),
             ]),
             template: Some(DriverSandboxTemplate {
                 environment: std::collections::HashMap::from([(
-                    UPSTREAM_NO_PROXY.to_string(),
+                    "NO_PROXY".to_string(),
                     "*".to_string(),
                 )]),
                 ..Default::default()
@@ -1820,16 +1818,24 @@ mod tests {
         config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
 
         let spec = build_container_spec(&sandbox, &config);
-        let env_map = spec["env"].as_object().expect("env should be an object");
+        let command = spec_command(&spec);
 
+        // Only the operator's proxy is delivered, and only on argv.
+        let idx = command
+            .iter()
+            .position(|a| a == "--upstream-proxy")
+            .expect("operator proxy flag present");
         assert_eq!(
-            env_map.get(UPSTREAM_HTTPS_PROXY).and_then(|v| v.as_str()),
-            Some("http://proxy.corp.com:8080"),
-            "operator proxy must win over any sandbox-supplied reserved value"
+            command.get(idx + 1).map(String::as_str),
+            Some("http://proxy.corp.com:8080")
         );
         assert!(
-            !env_map.contains_key(UPSTREAM_NO_PROXY),
-            "sandbox must not be able to inject a reserved NO_PROXY bypass"
+            !command.iter().any(|a| a == "--upstream-no-proxy"),
+            "sandbox environment must not add a NO_PROXY bypass: {command:?}"
+        );
+        assert!(
+            !command.iter().any(|a| a.contains("attacker")),
+            "attacker proxy must not reach argv: {command:?}"
         );
     }
 
@@ -2582,29 +2588,33 @@ mod tests {
         config.proxy_auth_allow_insecure = Some(true);
 
         let spec = build_container_spec(&sandbox, &config);
-        let env_map = spec["env"].as_object().expect("env should be an object");
+        let command = spec_command(&spec);
 
-        // The supervisor gets only the mount *path*, never the credential.
+        // The supervisor gets only the mount *path* on argv, never the
+        // credential itself.
+        let idx = command
+            .iter()
+            .position(|a| a == "--upstream-proxy-auth-file")
+            .expect("auth-file flag present");
         assert_eq!(
-            env_map
-                .get(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE)
-                .and_then(|v| v.as_str()),
+            command.get(idx + 1).map(String::as_str),
             Some(UPSTREAM_PROXY_AUTH_MOUNT_PATH)
         );
         // The cleartext-credential acknowledgement travels with the auth
         // file so the supervisor's fail-closed pairing check passes.
-        assert_eq!(
-            env_map
-                .get(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE)
-                .and_then(|v| v.as_str()),
-            Some("true")
+        assert!(
+            command
+                .iter()
+                .any(|a| a == "--upstream-proxy-auth-allow-insecure"),
+            "acknowledgement flag present: {command:?}"
         );
-        // The URL carried in the environment must remain credential-free.
-        assert_eq!(
-            env_map
-                .get(openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY)
-                .and_then(|v| v.as_str()),
-            Some("http://proxy.corp.com:8080")
+        // The raw credential path from config never appears anywhere in the
+        // spec (only the fixed mount path does).
+        assert!(
+            !command
+                .iter()
+                .any(|a| a == "/etc/openshell/secrets/proxy-auth"),
+            "host-side credential path must not reach the container: {command:?}"
         );
 
         let secrets = spec["secrets"]
@@ -2627,40 +2637,43 @@ mod tests {
         config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
 
         let spec = build_container_spec(&sandbox, &config);
-        let env_map = spec["env"].as_object().expect("env should be an object");
+        let command = spec_command(&spec);
         assert!(
-            !env_map.contains_key(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE),
-            "auth-file path must be absent when no proxy_auth_file is configured"
+            !command.iter().any(|a| a == "--upstream-proxy-auth-file"),
+            "auth-file flag must be absent when no proxy_auth_file is configured: {command:?}"
         );
         assert!(
-            !env_map.contains_key(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE),
-            "acknowledgement must be absent when no proxy_auth_file is configured"
+            !command
+                .iter()
+                .any(|a| a == "--upstream-proxy-auth-allow-insecure"),
+            "acknowledgement flag must be absent when no proxy_auth_file is configured: {command:?}"
         );
     }
 
     #[test]
-    fn container_spec_connect_by_hostname_written_only_on_opt_in() {
+    fn container_spec_connect_by_hostname_passed_only_on_opt_in() {
         let sandbox = test_sandbox("proxy-id", "proxy-name");
         let mut config = test_config();
         config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
 
-        // Default: no reserved variable, the supervisor uses validated-IP
-        // CONNECT binding.
+        // Default: no flag, the supervisor uses validated-IP CONNECT binding.
         let spec = build_container_spec(&sandbox, &config);
-        let env_map = spec["env"].as_object().expect("env should be an object");
+        let command = spec_command(&spec);
         assert!(
-            !env_map.contains_key(openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME),
-            "hostname CONNECT must be absent without the operator opt-in"
+            !command
+                .iter()
+                .any(|a| a == "--upstream-proxy-connect-by-hostname"),
+            "hostname CONNECT must be absent without the operator opt-in: {command:?}"
         );
 
         config.proxy_connect_by_hostname = Some(true);
         let spec = build_container_spec(&sandbox, &config);
-        let env_map = spec["env"].as_object().expect("env should be an object");
-        assert_eq!(
-            env_map
-                .get(openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME)
-                .and_then(|v| v.as_str()),
-            Some("true")
+        let command = spec_command(&spec);
+        assert!(
+            command
+                .iter()
+                .any(|a| a == "--upstream-proxy-connect-by-hostname"),
+            "hostname CONNECT flag present on opt-in: {command:?}"
         );
     }
 

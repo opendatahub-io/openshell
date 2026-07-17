@@ -109,13 +109,14 @@ once policy and SSRF checks pass. Only TLS (CONNECT) egress is chained:
 plain-HTTP requests always dial the destination directly, because forwarding
 plain HTTP through a proxy requires absolute-form request forwarding rather
 than CONNECT tunneling and is out of scope. The proxy configuration is an
-operator-owned boundary read from reserved `OPENSHELL_UPSTREAM_HTTPS_PROXY` /
-`OPENSHELL_UPSTREAM_NO_PROXY` variables that compute drivers write in their
-required-variable tier; sandbox and template environment cannot override them.
-The conventional `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` variables a sandbox
-controls are ignored on this path. Reserved `NO_PROXY` destinations and
+operator-owned boundary delivered on the supervisor's command line
+(`--upstream-proxy` and friends) by the compute driver; sandbox and template
+environment — and `ENV` values baked into the sandbox image — cannot
+influence it, since none of these can alter the argv the driver sets. The
+conventional `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` variables a sandbox
+controls are ignored on this path. Operator `NO_PROXY` destinations and
 loopback always dial directly; add driver-injected host aliases (e.g.
-`host.containers.internal`) to the reserved `NO_PROXY` list when the corporate
+`host.containers.internal`) to the operator `NO_PROXY` list when the corporate
 proxy cannot reach the container host. `NO_PROXY` matching is port-aware and
 resolution-aware: an entry with a `:port` qualifier only bypasses that port,
 and IP/CIDR entries also match hostnames through their validated resolved
@@ -129,7 +130,7 @@ the answer that passed SSRF and `allowed_ips` validation. The hostname still
 travels inside the tunnel (TLS SNI, application `Host`). In split-horizon
 networks, point the gateway host at the corporate resolver so internal names
 validate to their internal addresses; the `proxy_connect_by_hostname`
-opt-in (reserved `OPENSHELL_UPSTREAM_PROXY_CONNECT_BY_HOSTNAME`) exists as a
+opt-in exists as a
 last resort for proxies whose ACLs filter on hostnames and reject IP CONNECT
 targets — with it, the proxy resolves the name itself and its ACLs become
 the effective egress control for proxied TLS. (Resolving through the proxy's
@@ -137,32 +138,30 @@ own DNS view, e.g. DoH tunneled via CONNECT, is a possible future
 enhancement and out of scope.) The workload child's proxy variables are
 unaffected — they are always rewritten to point at the local policy proxy.
 
-The configuration is fail-closed: a reserved variable that is present but
-invalid — a present-but-empty value, an unsupported or malformed proxy URL, an
-unreadable auth file, a malformed credential, or an auth file or `NO_PROXY`
-list set while no proxy URL is configured — is fatal to supervisor startup
-instead of being treated as unset, so a misconfiguration can never silently
-degrade to direct dialing or unauthenticated proxy access. Only a fully unset
-variable means "no proxy". The driver validates the same rules at
-sandbox-create time through validators shared with the supervisor
+The configuration is fail-closed: a setting that is present but invalid — an
+empty value, an unsupported or malformed proxy URL, an unreadable auth file,
+a malformed credential, or an auth file or `NO_PROXY` list set while no proxy
+URL is configured — is fatal to supervisor startup instead of being treated
+as unset, so a misconfiguration can never silently degrade to direct dialing
+or unauthenticated proxy access. Only an omitted argument means "no proxy".
+The driver validates the same rules at sandbox-create time through
+validators shared with the supervisor
 (`openshell_core::driver_utils::parse_upstream_proxy_url` and
 `parse_upstream_proxy_credential`).
 
 Proxy credentials are never embedded in the URL: an inline `user:pass@` is
 rejected because it would be stored in `gateway.toml` and exposed in container
 metadata. Operators supply credentials via `proxy_auth_file`; the driver
-stages them as a root-only secret mounted at a fixed path and exports only
-that path in `OPENSHELL_UPSTREAM_PROXY_AUTH_FILE`. The supervisor reads the
+stages them as a root-only secret mounted at a fixed path and passes only
+that path on the supervisor's command line. The supervisor reads the
 file and builds the `Proxy-Authorization: Basic` header; a credential that is
 empty, contains control characters, or is not in `user:pass` form is fatal on
-both sides. The reserved proxy variables —
-including the auth-file path — are stripped from workload child processes.
+both sides.
 
 The Basic header travels over the plain-TCP connection to the `http://` proxy,
 so it is readable on the network path between sandbox host and proxy.
 Configuring `proxy_auth_file` therefore requires the explicit opt-in
-`proxy_auth_allow_insecure = true`, delivered to the supervisor as the
-reserved `OPENSHELL_UPSTREAM_PROXY_AUTH_ALLOW_INSECURE` variable. Both the
+`proxy_auth_allow_insecure = true`. Both the
 driver (at sandbox-create time) and the supervisor (at startup) reject an
 auth file without the acknowledgement, and the acknowledgement without an
 auth file, so credentials are never sent in cleartext without an explicit
