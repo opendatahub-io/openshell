@@ -154,3 +154,17 @@ pub const UPSTREAM_PROXY_AUTH_FILE: &str = "OPENSHELL_UPSTREAM_PROXY_AUTH_FILE";
 /// Compute drivers write it in the required-variable tier from the driver's
 /// `proxy_auth_allow_insecure` setting.
 pub const UPSTREAM_PROXY_AUTH_ALLOW_INSECURE: &str = "OPENSHELL_UPSTREAM_PROXY_AUTH_ALLOW_INSECURE";
+
+/// Explicit operator opt-out (`true`) that sends the destination *hostname*
+/// in the CONNECT request to the corporate proxy instead of a validated IP.
+///
+/// By default the supervisor CONNECTs to an address that already passed
+/// SSRF and `allowed_ips` validation, so the proxy performs no DNS
+/// resolution and the connection is bound to the validated answer. With
+/// this opt-out the proxy resolves the name itself: hostname-filtering
+/// proxy ACLs keep working, but a name whose resolution differs at the
+/// proxy (split-horizon DNS, rebinding) can reach destinations the sandbox
+/// policy never approved — the proxy's own ACLs become the effective
+/// egress control. Compute drivers write it in the required-variable tier
+/// from the driver's `proxy_connect_by_hostname` setting.
+pub const UPSTREAM_PROXY_CONNECT_BY_HOSTNAME: &str = "OPENSHELL_UPSTREAM_PROXY_CONNECT_BY_HOSTNAME";

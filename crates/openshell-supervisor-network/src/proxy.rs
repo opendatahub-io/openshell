@@ -2961,9 +2961,13 @@ fn validate_declared_endpoint_resolved_addrs(
 /// and an IP/CIDR entry that matches through resolution limits the direct
 /// dial to the addresses it contains.
 ///
-/// The CONNECT target sent to the corporate proxy is the client-requested
-/// hostname, so hostname-filtering proxies and split-horizon DNS at the
-/// proxy keep working.
+/// The CONNECT target sent to the corporate proxy is a validated resolved
+/// address, so the proxy performs no DNS resolution of its own and the
+/// tunnel stays bound to the answer that passed SSRF and `allowed_ips`
+/// validation; the hostname still travels inside the tunnel (TLS SNI,
+/// application `Host`). The operator opt-in `proxy_connect_by_hostname`
+/// sends the client-requested hostname instead, for proxies whose ACLs
+/// filter on hostnames, at the cost of re-opening proxy-side resolution.
 ///
 /// Both paths return a [`upstream_proxy::PrefixedStream`]: for proxied
 /// dials it replays any tunneled bytes that arrived in the same read as the
@@ -2977,7 +2981,20 @@ async fn dial_upstream(
     if let Some(cfg) = upstream_proxy.as_ref() {
         return match cfg.decision(host_lc, port, addrs) {
             upstream_proxy::ProxyDecision::Proxy(endpoint) => {
-                upstream_proxy::connect_via(endpoint, host_lc, port).await
+                let target = if cfg.connect_by_hostname() {
+                    upstream_proxy::ConnectTarget::Hostname
+                } else {
+                    // First validated address, matching the order-of-attempt
+                    // the direct path's `TcpStream::connect` uses.
+                    let ip = addrs.first().map(SocketAddr::ip).ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("no validated addresses to CONNECT to for {host_lc}"),
+                        )
+                    })?;
+                    upstream_proxy::ConnectTarget::Ip(ip)
+                };
+                upstream_proxy::connect_via(endpoint, host_lc, port, target).await
             }
             upstream_proxy::ProxyDecision::Direct(direct_addrs) => {
                 Ok(upstream_proxy::PrefixedStream::without_prefix(

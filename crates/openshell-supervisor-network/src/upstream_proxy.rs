@@ -36,6 +36,11 @@
 //!   [`openshell_core::driver_utils::parse_upstream_proxy_credential`].
 //! - Policy evaluation, DNS resolution, and SSRF checks run exactly as in the
 //!   direct-dial path; the corporate proxy only replaces the final TCP dial.
+//! - CONNECT requests target a validated resolved address by default, so the
+//!   proxy performs no DNS resolution and the tunnel stays bound to the
+//!   answer that passed SSRF/`allowed_ips` validation. The reserved
+//!   `OPENSHELL_UPSTREAM_PROXY_CONNECT_BY_HOSTNAME` opt-in sends the
+//!   hostname instead, for proxies whose ACLs filter on hostnames.
 //! - The reserved `NO_PROXY` list decides which destinations bypass the
 //!   corporate proxy and keep dialing directly (cluster-internal services,
 //!   host gateway, etc.). Loopback destinations always bypass the proxy.
@@ -256,11 +261,27 @@ pub enum ProxyDecision<'a> {
     Direct(Vec<SocketAddr>),
 }
 
+/// What the supervisor puts in the CONNECT request line sent to the
+/// corporate proxy.
+#[derive(Debug, Clone, Copy)]
+pub enum ConnectTarget {
+    /// CONNECT to this validated address; the proxy performs no DNS
+    /// resolution, so the tunnel is bound to the answer that already passed
+    /// SSRF and `allowed_ips` validation. The destination hostname still
+    /// travels inside the tunnel (TLS SNI, application `Host`).
+    Ip(IpAddr),
+    /// CONNECT by hostname; the proxy resolves the name itself. Operator
+    /// opt-in for hostname-filtering proxy ACLs — see
+    /// [`UPSTREAM_PROXY_CONNECT_BY_HOSTNAME`](openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME).
+    Hostname,
+}
+
 /// Corporate proxy configuration read from the supervisor's environment.
 #[derive(Debug, Clone)]
 pub struct UpstreamProxyConfig {
     https: ProxyEndpoint,
     no_proxy: NoProxy,
+    connect_by_hostname: bool,
 }
 
 impl UpstreamProxyConfig {
@@ -288,9 +309,10 @@ impl UpstreamProxyConfig {
     /// unreadable or holds a malformed credential, an auth file without the
     /// explicit cleartext-credential acknowledgement
     /// ([`UPSTREAM_PROXY_AUTH_ALLOW_INSECURE`](openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE)),
-    /// or an auth file or `NO_PROXY` list with no proxy configured. Failing
-    /// closed here
-    /// prevents a misconfiguration
+    /// a CONNECT-target opt-in
+    /// ([`UPSTREAM_PROXY_CONNECT_BY_HOSTNAME`](openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME))
+    /// with any value other than `true`, or any auxiliary variable with no
+    /// proxy configured. Failing closed here prevents a misconfiguration
     /// from silently degrading to direct dialing or unauthenticated proxy
     /// access. Only fully unset variables mean "no proxy".
     pub fn from_env() -> Result<Option<Self>, String> {
@@ -300,7 +322,7 @@ impl UpstreamProxyConfig {
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         use openshell_core::sandbox_env::{
             UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY, UPSTREAM_PROXY_AUTH_ALLOW_INSECURE,
-            UPSTREAM_PROXY_AUTH_FILE,
+            UPSTREAM_PROXY_AUTH_FILE, UPSTREAM_PROXY_CONNECT_BY_HOSTNAME,
         };
         // Only a fully unset reserved variable means "not configured". A
         // present-but-empty value is a misconfiguration (the compute driver
@@ -320,6 +342,7 @@ impl UpstreamProxyConfig {
             .transpose()?;
         let auth_file = var(UPSTREAM_PROXY_AUTH_FILE)?;
         let auth_allow_insecure = var(UPSTREAM_PROXY_AUTH_ALLOW_INSECURE)?;
+        let connect_by_hostname_raw = var(UPSTREAM_PROXY_CONNECT_BY_HOSTNAME)?;
         let no_proxy_list = var(UPSTREAM_NO_PROXY)?;
         let Some(mut https) = https else {
             // Auxiliary proxy settings without a proxy mean the operator
@@ -328,6 +351,7 @@ impl UpstreamProxyConfig {
             for (name, value) in [
                 (UPSTREAM_PROXY_AUTH_FILE, &auth_file),
                 (UPSTREAM_PROXY_AUTH_ALLOW_INSECURE, &auth_allow_insecure),
+                (UPSTREAM_PROXY_CONNECT_BY_HOSTNAME, &connect_by_hostname_raw),
                 (UPSTREAM_NO_PROXY, &no_proxy_list),
             ] {
                 if value.is_some() {
@@ -335,6 +359,19 @@ impl UpstreamProxyConfig {
                 }
             }
             return Ok(None);
+        };
+
+        // CONNECT-target mode. The default binds the tunnel to a validated
+        // address; hostname CONNECT re-opens proxy-side DNS resolution and
+        // is only honored as the exact opt-in value the driver writes.
+        let connect_by_hostname = match connect_by_hostname_raw.as_deref().map(str::trim) {
+            None => false,
+            Some("true") => true,
+            Some(_) => {
+                return Err(format!(
+                    "{UPSTREAM_PROXY_CONNECT_BY_HOSTNAME} must be 'true' when set"
+                ));
+            }
         };
 
         // Cleartext-credential acknowledgement. `Proxy-Authorization: Basic`
@@ -382,7 +419,15 @@ impl UpstreamProxyConfig {
         Ok(Some(Self {
             https,
             no_proxy: NoProxy::parse(&no_proxy_list.unwrap_or_default()),
+            connect_by_hostname,
         }))
+    }
+
+    /// Whether CONNECT requests carry the destination hostname instead of a
+    /// validated IP (operator opt-in for hostname-filtering proxy ACLs).
+    #[must_use]
+    pub fn connect_by_hostname(&self) -> bool {
+        self.connect_by_hostname
     }
 
     /// How to dial the validated destination `(host, port, resolved)`,
@@ -409,9 +454,14 @@ impl UpstreamProxyConfig {
     #[must_use]
     pub fn summary(&self) -> String {
         format!(
-            "https_proxy={} no_proxy_entries={}",
+            "https_proxy={} no_proxy_entries={} connect_target={}",
             self.https.display_addr(),
-            self.no_proxy.entries.len()
+            self.no_proxy.entries.len(),
+            if self.connect_by_hostname {
+                "hostname"
+            } else {
+                "validated-ip"
+            }
         )
     }
 }
@@ -552,17 +602,23 @@ impl AsyncWrite for PrefixedStream {
     }
 }
 
-/// Open a tunnel to `host:port` through the corporate proxy with HTTP CONNECT.
+/// Open a tunnel to the destination through the corporate proxy with HTTP
+/// CONNECT.
 ///
 /// Returns the connected stream once the proxy answers 200; after that the
 /// stream is a transparent byte pipe to the destination. Any tunneled bytes
 /// received in the same read as the CONNECT response are preserved and
 /// replayed by the returned [`PrefixedStream`].
 ///
-/// The destination hostname (not a locally resolved IP) is sent in the
-/// CONNECT target so hostname-filtering proxies keep working; local DNS
-/// resolution and SSRF validation must already have happened at the call
-/// site.
+/// `target` selects the CONNECT request target. The default mode sends a
+/// validated IP ([`ConnectTarget::Ip`]) so the proxy performs no DNS
+/// resolution and the tunnel is bound to an address that already passed
+/// SSRF and `allowed_ips` validation; `host` then only labels logs and is
+/// used by the caller for TLS SNI inside the tunnel. With the operator
+/// opt-in ([`ConnectTarget::Hostname`]) the hostname is sent instead so
+/// hostname-filtering proxy ACLs keep working, at the cost of proxy-side
+/// resolution. Local DNS resolution and SSRF validation must already have
+/// happened at the call site in both modes.
 ///
 /// # Errors
 ///
@@ -572,10 +628,11 @@ pub async fn connect_via(
     endpoint: &ProxyEndpoint,
     host: &str,
     port: u16,
+    target: ConnectTarget,
 ) -> std::io::Result<PrefixedStream> {
     tokio::time::timeout(
         CONNECT_HANDSHAKE_TIMEOUT,
-        connect_via_inner(endpoint, host, port),
+        connect_via_inner(endpoint, host, port, target),
     )
     .await
     .map_err(|_| {
@@ -593,13 +650,15 @@ async fn connect_via_inner(
     endpoint: &ProxyEndpoint,
     host: &str,
     port: u16,
+    target: ConnectTarget,
 ) -> std::io::Result<PrefixedStream> {
     let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port)).await?;
 
-    let target = if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
+    let target = match target {
+        ConnectTarget::Ip(IpAddr::V6(ip)) => format!("[{ip}]:{port}"),
+        ConnectTarget::Ip(ip) => format!("{ip}:{port}"),
+        ConnectTarget::Hostname if host.contains(':') => format!("[{host}]:{port}"),
+        ConnectTarget::Hostname => format!("{host}:{port}"),
     };
     let mut request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
     if let Some(auth) = &endpoint.proxy_authorization {
@@ -676,6 +735,7 @@ mod tests {
         UPSTREAM_HTTPS_PROXY as HTTPS_PROXY, UPSTREAM_NO_PROXY as NO_PROXY,
         UPSTREAM_PROXY_AUTH_ALLOW_INSECURE as PROXY_AUTH_ALLOW_INSECURE,
         UPSTREAM_PROXY_AUTH_FILE as PROXY_AUTH_FILE,
+        UPSTREAM_PROXY_CONNECT_BY_HOSTNAME as PROXY_CONNECT_BY_HOSTNAME,
     };
 
     fn config_from(pairs: &[(&str, &str)]) -> Result<Option<UpstreamProxyConfig>, String> {
@@ -1128,17 +1188,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_via_success_sends_connect_and_auth() {
+    async fn connect_via_targets_validated_ip_by_default() {
+        // The default CONNECT target is a validated address, so the proxy
+        // performs no DNS resolution; the hostname only travels inside the
+        // tunnel (TLS SNI, application Host).
         let (addr, handle) = fake_proxy("HTTP/1.1 200 Connection established\r\n\r\n").await;
         let endpoint = endpoint_for(addr, Some("Basic dXNlcjpwYXNz"));
-        let stream = connect_via(&endpoint, "api.example.com", 443)
+        let stream = connect_via(
+            &endpoint,
+            "api.example.com",
+            443,
+            ConnectTarget::Ip("93.184.216.34".parse().unwrap()),
+        )
+        .await
+        .unwrap();
+        drop(stream);
+        let request = handle.await.unwrap();
+        assert!(request.starts_with("CONNECT 93.184.216.34:443 HTTP/1.1\r\n"));
+        assert!(request.contains("Host: 93.184.216.34:443\r\n"));
+        assert!(
+            !request.contains("api.example.com"),
+            "hostname must not leak into the CONNECT request in IP mode: {request}"
+        );
+        assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
+    }
+
+    #[tokio::test]
+    async fn connect_via_sends_hostname_on_operator_opt_in() {
+        let (addr, handle) = fake_proxy("HTTP/1.1 200 Connection established\r\n\r\n").await;
+        let endpoint = endpoint_for(addr, None);
+        let stream = connect_via(&endpoint, "api.example.com", 443, ConnectTarget::Hostname)
             .await
             .unwrap();
         drop(stream);
         let request = handle.await.unwrap();
         assert!(request.starts_with("CONNECT api.example.com:443 HTTP/1.1\r\n"));
         assert!(request.contains("Host: api.example.com:443\r\n"));
-        assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
     }
 
     #[tokio::test]
@@ -1149,7 +1234,7 @@ mod tests {
         let (addr, _handle) =
             fake_proxy("HTTP/1.1 200 Connection established\r\n\r\nserver-first-payload").await;
         let endpoint = endpoint_for(addr, None);
-        let mut stream = connect_via(&endpoint, "api.example.com", 443)
+        let mut stream = connect_via(&endpoint, "api.example.com", 443, ConnectTarget::Hostname)
             .await
             .unwrap();
         let mut payload = vec![0u8; "server-first-payload".len()];
@@ -1183,7 +1268,7 @@ mod tests {
         let (addr, _handle) =
             fake_proxy("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n").await;
         let endpoint = endpoint_for(addr, None);
-        let err = connect_via(&endpoint, "api.example.com", 443)
+        let err = connect_via(&endpoint, "api.example.com", 443, ConnectTarget::Hostname)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("407"), "{err}");
@@ -1193,7 +1278,7 @@ mod tests {
     async fn connect_via_rejects_malformed_response() {
         let (addr, _handle) = fake_proxy("garbage without status\r\n\r\n").await;
         let endpoint = endpoint_for(addr, None);
-        let err = connect_via(&endpoint, "api.example.com", 443)
+        let err = connect_via(&endpoint, "api.example.com", 443, ConnectTarget::Hostname)
             .await
             .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::InvalidData);
@@ -1201,10 +1286,57 @@ mod tests {
 
     #[tokio::test]
     async fn connect_via_ipv6_target_is_bracketed() {
+        // Both modes must bracket IPv6 authorities in the request line.
         let (addr, handle) = fake_proxy("HTTP/1.1 200 OK\r\n\r\n").await;
         let endpoint = endpoint_for(addr, None);
-        let _ = connect_via(&endpoint, "2001:db8::1", 443).await.unwrap();
+        let _ = connect_via(
+            &endpoint,
+            "v6.example.com",
+            443,
+            ConnectTarget::Ip("2001:db8::1".parse().unwrap()),
+        )
+        .await
+        .unwrap();
         let request = handle.await.unwrap();
         assert!(request.starts_with("CONNECT [2001:db8::1]:443 HTTP/1.1\r\n"));
+
+        let (addr, handle) = fake_proxy("HTTP/1.1 200 OK\r\n\r\n").await;
+        let endpoint = endpoint_for(addr, None);
+        let _ = connect_via(&endpoint, "2001:db8::1", 443, ConnectTarget::Hostname)
+            .await
+            .unwrap();
+        let request = handle.await.unwrap();
+        assert!(request.starts_with("CONNECT [2001:db8::1]:443 HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn connect_by_hostname_requires_exact_true() {
+        // Default is the validated-IP binding.
+        let cfg = config_ok(&[(HTTPS_PROXY, "http://proxy:8080")]);
+        assert!(!cfg.connect_by_hostname());
+
+        let cfg = config_ok(&[
+            (HTTPS_PROXY, "http://proxy:8080"),
+            (PROXY_CONNECT_BY_HOSTNAME, "true"),
+        ]);
+        assert!(cfg.connect_by_hostname());
+
+        // Anything other than the exact opt-in value the driver writes is a
+        // misconfiguration, not a silent fallback to either mode.
+        for value in ["false", "yes", "1", "TRUE"] {
+            let err = config_from(&[
+                (HTTPS_PROXY, "http://proxy:8080"),
+                (PROXY_CONNECT_BY_HOSTNAME, value),
+            ])
+            .unwrap_err();
+            assert!(err.contains(PROXY_CONNECT_BY_HOSTNAME), "{value}: {err}");
+        }
+    }
+
+    #[test]
+    fn connect_by_hostname_without_proxy_is_fatal() {
+        let err = config_from(&[(PROXY_CONNECT_BY_HOSTNAME, "true")]).unwrap_err();
+        assert!(err.contains(PROXY_CONNECT_BY_HOSTNAME), "{err}");
+        assert!(err.contains("no upstream proxy"), "{err}");
     }
 }

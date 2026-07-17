@@ -393,6 +393,18 @@ EOF
           ;;
       esac
     fi
+    if [[ -n "${OPENSHELL_SANDBOX_PROXY_CONNECT_BY_HOSTNAME+x}" ]]; then
+      case "${OPENSHELL_SANDBOX_PROXY_CONNECT_BY_HOSTNAME}" in
+        true|false)
+          printf 'proxy_connect_by_hostname = %s\n' "${OPENSHELL_SANDBOX_PROXY_CONNECT_BY_HOSTNAME}" >>"${CONFIG_PATH}"
+          ;;
+        *)
+          # Not a TOML boolean: write it as a quoted string so the gateway's
+          # config parser rejects it at startup (fail closed, no injection).
+          printf 'proxy_connect_by_hostname = "%s"\n' "$(toml_escape "${OPENSHELL_SANDBOX_PROXY_CONNECT_BY_HOSTNAME}")" >>"${CONFIG_PATH}"
+          ;;
+      esac
+    fi
     ;;
 esac
 

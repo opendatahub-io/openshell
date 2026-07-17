@@ -126,6 +126,13 @@ struct Args {
     /// proxy. Required when `--sandbox-proxy-auth-file` is set.
     #[arg(long, env = "OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE")]
     sandbox_proxy_auth_allow_insecure: Option<bool>,
+
+    /// Send the destination hostname in CONNECT requests to the corporate
+    /// proxy instead of a validated IP. Only for proxies whose ACLs filter
+    /// on hostnames: the proxy then resolves the name itself, so sandbox
+    /// SSRF/`allowed_ips` validation no longer binds the connection.
+    #[arg(long, env = "OPENSHELL_SANDBOX_PROXY_CONNECT_BY_HOSTNAME")]
+    sandbox_proxy_connect_by_hostname: Option<bool>,
 }
 
 #[tokio::main]
@@ -160,6 +167,7 @@ async fn main() -> Result<()> {
         no_proxy: args.sandbox_no_proxy,
         proxy_auth_file: args.sandbox_proxy_auth_file,
         proxy_auth_allow_insecure: args.sandbox_proxy_auth_allow_insecure,
+        proxy_connect_by_hostname: args.sandbox_proxy_connect_by_hostname,
         ..PodmanComputeConfig::default()
     })
     .await

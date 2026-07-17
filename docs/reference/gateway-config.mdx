@@ -407,12 +407,26 @@ health_check_interval_secs = 10
 # sandbox and template environment cannot override it, and the conventional
 # HTTPS_PROXY/HTTP_PROXY/NO_PROXY variables a sandbox sets do not affect it.
 #
+# The CONNECT request sent to the proxy targets a validated resolved IP,
+# not the hostname, so the proxy performs no DNS resolution of its own and
+# the tunnel stays bound to the address that passed the sandbox's SSRF and
+# allowed_ips validation. The hostname still travels inside the tunnel (TLS
+# SNI, application Host), so destination servers behave normally. In
+# split-horizon networks, point the gateway host at the corporate resolver
+# so internal names validate to their internal addresses. If the proxy's
+# ACLs filter on hostnames and reject IP CONNECT targets, set
+# proxy_connect_by_hostname = true as a last resort: the proxy then
+# resolves the name itself, so a name that resolves differently at the
+# proxy (split-horizon DNS, rebinding) can reach destinations the sandbox
+# policy never approved, and the proxy's own ACLs become the effective
+# egress control for proxied TLS.
+#
 # Configuration is fail-closed: an invalid proxy URL is rejected at gateway
-# startup, setting no_proxy or proxy_auth_file without a proxy URL is
-# rejected as well, and a set-but-invalid value reaching a sandbox (for
-# example an unreadable or malformed auth file) is fatal to that sandbox's
-# supervisor instead of silently falling back to direct or unauthenticated
-# egress.
+# startup, setting no_proxy, proxy_auth_file, or proxy_connect_by_hostname
+# without a proxy URL is rejected as well, and a set-but-invalid value
+# reaching a sandbox (for example an unreadable or malformed auth file) is
+# fatal to that sandbox's supervisor instead of silently falling back to
+# direct or unauthenticated egress.
 #
 # Credentials must NOT be embedded in the URL (an inline user:pass@ is
 # rejected at startup, since it would be stored here and exposed in container
@@ -435,6 +449,8 @@ health_check_interval_secs = 10
 # no_proxy                  = "*.svc.cluster.local,10.0.0.0/8"
 # proxy_auth_file           = "/etc/openshell/secrets/proxy-auth"
 # proxy_auth_allow_insecure = true
+# Last resort for hostname-filtering proxy ACLs; see the warning above.
+# proxy_connect_by_hostname = true
 ```
 
 ### MicroVM

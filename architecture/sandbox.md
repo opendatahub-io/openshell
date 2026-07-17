@@ -121,10 +121,21 @@ resolution-aware: an entry with a `:port` qualifier only bypasses that port,
 and IP/CIDR entries also match hostnames through their validated resolved
 addresses, with the direct dial limited to the addresses the entry contains. Only `http://` proxy URLs in explicit
 `http://host:port` form are supported — the scheme and port are both
-required, and a path, query, or fragment is rejected. Local DNS resolution and SSRF validation still run before the
-proxied dial; the CONNECT target sent to the corporate proxy is the requested
-hostname. The workload child's proxy variables are unaffected — they are
-always rewritten to point at the local policy proxy.
+required, and a path, query, or fragment is rejected. Local DNS resolution
+and SSRF validation still run before the proxied dial, and the CONNECT
+target sent to the corporate proxy is a validated resolved address, so the
+proxy performs no DNS resolution of its own and the tunnel stays bound to
+the answer that passed SSRF and `allowed_ips` validation. The hostname still
+travels inside the tunnel (TLS SNI, application `Host`). In split-horizon
+networks, point the gateway host at the corporate resolver so internal names
+validate to their internal addresses; the `proxy_connect_by_hostname`
+opt-in (reserved `OPENSHELL_UPSTREAM_PROXY_CONNECT_BY_HOSTNAME`) exists as a
+last resort for proxies whose ACLs filter on hostnames and reject IP CONNECT
+targets — with it, the proxy resolves the name itself and its ACLs become
+the effective egress control for proxied TLS. (Resolving through the proxy's
+own DNS view, e.g. DoH tunneled via CONNECT, is a possible future
+enhancement and out of scope.) The workload child's proxy variables are
+unaffected — they are always rewritten to point at the local policy proxy.
 
 The configuration is fail-closed: a reserved variable that is present but
 invalid — a present-but-empty value, an unsupported or malformed proxy URL, an

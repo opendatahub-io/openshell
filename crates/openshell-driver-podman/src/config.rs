@@ -172,6 +172,20 @@ pub struct PodmanComputeConfig {
     /// rejected at startup. Set it only when the path to the proxy is a
     /// trusted network segment.
     pub proxy_auth_allow_insecure: Option<bool>,
+    /// Send the destination *hostname* in CONNECT requests to the corporate
+    /// proxy instead of a validated IP.
+    ///
+    /// By default the supervisor CONNECTs to an address that already passed
+    /// SSRF and `allowed_ips` validation, so the proxy performs no DNS
+    /// resolution and the tunnel stays bound to the validated answer. Set
+    /// this to `true` only when the proxy's ACLs filter on hostnames and
+    /// reject IP CONNECT targets: the proxy then resolves the name itself,
+    /// so a name that resolves differently at the proxy (split-horizon DNS,
+    /// rebinding) can reach destinations the sandbox policy never approved,
+    /// and the proxy's own ACLs become the effective egress control. Prefer
+    /// pointing the gateway host at the corporate resolver so validated-IP
+    /// CONNECT works in split-horizon networks.
+    pub proxy_connect_by_hostname: Option<bool>,
 }
 
 pub const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 10;
@@ -304,6 +318,14 @@ impl PodmanComputeConfig {
                 "proxy_auth_allow_insecure is set but no proxy_auth_file is configured".to_string(),
             ));
         }
+
+        // The CONNECT-target mode only means something relative to a proxy
+        // boundary the operator believed was in effect.
+        if self.proxy_connect_by_hostname.is_some() && self.https_proxy.is_none() {
+            return Err(crate::client::PodmanApiError::InvalidInput(
+                "proxy_connect_by_hostname is set but no https_proxy is configured".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -358,6 +380,7 @@ impl Default for PodmanComputeConfig {
             no_proxy: None,
             proxy_auth_file: None,
             proxy_auth_allow_insecure: None,
+            proxy_connect_by_hostname: None,
         }
     }
 }
@@ -389,6 +412,7 @@ impl std::fmt::Debug for PodmanComputeConfig {
             .field("no_proxy", &self.no_proxy)
             .field("proxy_auth_file", &self.proxy_auth_file.is_some())
             .field("proxy_auth_allow_insecure", &self.proxy_auth_allow_insecure)
+            .field("proxy_connect_by_hostname", &self.proxy_connect_by_hostname)
             .finish()
     }
 }
@@ -594,6 +618,28 @@ mod tests {
             );
             assert!(err.to_string().contains("cleartext"), "{allow:?}: {err}");
         }
+    }
+
+    #[test]
+    fn validate_proxy_config_accepts_connect_by_hostname_with_proxy() {
+        for by_hostname in [Some(true), Some(false)] {
+            let cfg = PodmanComputeConfig {
+                https_proxy: Some("http://proxy.corp.com:8080".to_string()),
+                proxy_connect_by_hostname: by_hostname,
+                ..PodmanComputeConfig::default()
+            };
+            assert!(cfg.validate_proxy_config().is_ok(), "{by_hostname:?}");
+        }
+    }
+
+    #[test]
+    fn validate_proxy_config_rejects_connect_by_hostname_without_proxy() {
+        let cfg = PodmanComputeConfig {
+            proxy_connect_by_hostname: Some(true),
+            ..PodmanComputeConfig::default()
+        };
+        let err = cfg.validate_proxy_config().unwrap_err();
+        assert!(err.to_string().contains("no https_proxy"), "{err}");
     }
 
     #[test]

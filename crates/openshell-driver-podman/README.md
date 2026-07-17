@@ -349,6 +349,7 @@ Podman resources after out-of-band container removal or label drift.
 | `OPENSHELL_SANDBOX_NO_PROXY` | `--sandbox-no-proxy` | unset | Comma-separated `NO_PROXY` list (hostnames, domain suffixes, IPs, CIDRs, each with an optional `:port` qualifier) dialed directly instead of through the corporate proxy. IP/CIDR entries also match hostnames through their validated DNS resolution. |
 | `OPENSHELL_SANDBOX_PROXY_AUTH_FILE` | `--sandbox-proxy-auth-file` | unset | Path to a file containing the proxy credentials as `user:pass`. Staged as a root-only Podman secret so credentials never appear in config or container metadata. Requires the insecure-auth acknowledgement below. |
 | `OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE` | `--sandbox-proxy-auth-allow-insecure` | unset | Explicit acknowledgement (`true`) that the credential is sent as cleartext Basic auth over the plain-TCP connection to the `http://` proxy. Required when the auth file is set; rejected when it is not. |
+| `OPENSHELL_SANDBOX_PROXY_CONNECT_BY_HOSTNAME` | `--sandbox-proxy-connect-by-hostname` | unset | Send the destination hostname in CONNECT requests instead of a validated IP. Last resort for proxies whose ACLs filter on hostnames: the proxy then resolves the name itself, so sandbox SSRF/`allowed_ips` validation no longer binds the connection. |
 
 Through the gateway, the same settings are the `https_proxy`, `no_proxy`, and
 `proxy_auth_file` keys under `[openshell.drivers.podman]`; see
@@ -366,6 +367,15 @@ network path between the sandbox host and the proxy can recover the
 credential. Setting `proxy_auth_file` therefore requires
 `proxy_auth_allow_insecure = true`; both the driver and the in-container
 supervisor reject credentials without that explicit acknowledgement.
+
+CONNECT requests target a validated resolved IP by default, so the proxy
+performs no DNS resolution and the tunnel stays bound to the address that
+passed the sandbox's SSRF and `allowed_ips` checks; the hostname still
+travels inside the tunnel (TLS SNI, application `Host`). In split-horizon
+networks, point the gateway host at the corporate resolver. Set
+`proxy_connect_by_hostname = true` only when the proxy's ACLs filter on
+hostnames and reject IP CONNECT targets — it re-opens proxy-side DNS
+resolution, making the proxy's ACLs the effective egress control.
 
 ## Rootless-Specific Adaptations
 

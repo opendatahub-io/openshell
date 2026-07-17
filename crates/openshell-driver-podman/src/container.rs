@@ -423,6 +423,12 @@ fn build_env(
         .proxy_auth_allow_insecure
         .filter(|allowed| *allowed)
         .map(|_| "true".to_string());
+    // Absent means the default validated-IP CONNECT binding; only the
+    // explicit hostname opt-in is written through.
+    let proxy_connect_by_hostname = config
+        .proxy_connect_by_hostname
+        .filter(|by_hostname| *by_hostname)
+        .map(|_| "true".to_string());
     for (name, value) in [
         (
             openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
@@ -439,6 +445,10 @@ fn build_env(
         (
             openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE,
             &proxy_auth_allow_insecure,
+        ),
+        (
+            openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME,
+            &proxy_connect_by_hostname,
         ),
     ] {
         env.remove(name);
@@ -2625,6 +2635,32 @@ mod tests {
         assert!(
             !env_map.contains_key(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE),
             "acknowledgement must be absent when no proxy_auth_file is configured"
+        );
+    }
+
+    #[test]
+    fn container_spec_connect_by_hostname_written_only_on_opt_in() {
+        let sandbox = test_sandbox("proxy-id", "proxy-name");
+        let mut config = test_config();
+        config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
+
+        // Default: no reserved variable, the supervisor uses validated-IP
+        // CONNECT binding.
+        let spec = build_container_spec(&sandbox, &config);
+        let env_map = spec["env"].as_object().expect("env should be an object");
+        assert!(
+            !env_map.contains_key(openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME),
+            "hostname CONNECT must be absent without the operator opt-in"
+        );
+
+        config.proxy_connect_by_hostname = Some(true);
+        let spec = build_container_spec(&sandbox, &config);
+        let env_map = spec["env"].as_object().expect("env should be an object");
+        assert_eq!(
+            env_map
+                .get(openshell_core::sandbox_env::UPSTREAM_PROXY_CONNECT_BY_HOSTNAME)
+                .and_then(|v| v.as_str()),
+            Some("true")
         );
     }
 
