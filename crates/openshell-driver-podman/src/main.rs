@@ -120,6 +120,12 @@ struct Args {
     /// mount so the credentials never appear in config or container metadata.
     #[arg(long, env = "OPENSHELL_SANDBOX_PROXY_AUTH_FILE")]
     sandbox_proxy_auth_file: Option<String>,
+
+    /// Explicit acknowledgement (`true`) that the proxy credential is sent
+    /// as cleartext Basic auth over the plain-TCP connection to the http://
+    /// proxy. Required when `--sandbox-proxy-auth-file` is set.
+    #[arg(long, env = "OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE")]
+    sandbox_proxy_auth_allow_insecure: Option<bool>,
 }
 
 #[tokio::main]
@@ -153,6 +159,7 @@ async fn main() -> Result<()> {
         https_proxy: args.sandbox_https_proxy,
         no_proxy: args.sandbox_no_proxy,
         proxy_auth_file: args.sandbox_proxy_auth_file,
+        proxy_auth_allow_insecure: args.sandbox_proxy_auth_allow_insecure,
         ..PodmanComputeConfig::default()
     })
     .await

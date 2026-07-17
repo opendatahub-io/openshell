@@ -416,6 +416,13 @@ fn build_env(
         .proxy_auth_file
         .as_ref()
         .map(|_| UPSTREAM_PROXY_AUTH_MOUNT_PATH.to_string());
+    // Config validation guarantees the acknowledgement is `true` whenever an
+    // auth file is configured; the supervisor independently refuses
+    // credentials without it.
+    let proxy_auth_allow_insecure = config
+        .proxy_auth_allow_insecure
+        .filter(|allowed| *allowed)
+        .map(|_| "true".to_string());
     for (name, value) in [
         (
             openshell_core::sandbox_env::UPSTREAM_HTTPS_PROXY,
@@ -428,6 +435,10 @@ fn build_env(
         (
             openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE,
             &proxy_auth_mount,
+        ),
+        (
+            openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE,
+            &proxy_auth_allow_insecure,
         ),
     ] {
         env.remove(name);
@@ -2558,6 +2569,7 @@ mod tests {
         let mut config = test_config();
         config.https_proxy = Some("http://proxy.corp.com:8080".to_string());
         config.proxy_auth_file = Some("/etc/openshell/secrets/proxy-auth".to_string());
+        config.proxy_auth_allow_insecure = Some(true);
 
         let spec = build_container_spec(&sandbox, &config);
         let env_map = spec["env"].as_object().expect("env should be an object");
@@ -2568,6 +2580,14 @@ mod tests {
                 .get(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE)
                 .and_then(|v| v.as_str()),
             Some(UPSTREAM_PROXY_AUTH_MOUNT_PATH)
+        );
+        // The cleartext-credential acknowledgement travels with the auth
+        // file so the supervisor's fail-closed pairing check passes.
+        assert_eq!(
+            env_map
+                .get(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE)
+                .and_then(|v| v.as_str()),
+            Some("true")
         );
         // The URL carried in the environment must remain credential-free.
         assert_eq!(
@@ -2601,6 +2621,10 @@ mod tests {
         assert!(
             !env_map.contains_key(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_FILE),
             "auth-file path must be absent when no proxy_auth_file is configured"
+        );
+        assert!(
+            !env_map.contains_key(openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE),
+            "acknowledgement must be absent when no proxy_auth_file is configured"
         );
     }
 

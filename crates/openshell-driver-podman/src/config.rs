@@ -159,6 +159,16 @@ pub struct PodmanComputeConfig {
     /// container metadata. The gateway reads this file at sandbox-create time
     /// and delivers it to the supervisor through a root-only secret mount.
     pub proxy_auth_file: Option<String>,
+    /// Explicit acknowledgement that proxy credentials are sent in cleartext.
+    ///
+    /// `Proxy-Authorization: Basic` is base64, not encryption, and the
+    /// connection to an `http://` corporate proxy is plain TCP, so anyone on
+    /// the network path between the sandbox host and the proxy can recover
+    /// the credential. Setting `proxy_auth_file` therefore requires
+    /// `proxy_auth_allow_insecure = true`; without it the configuration is
+    /// rejected at startup. Set it only when the path to the proxy is a
+    /// trusted network segment.
+    pub proxy_auth_allow_insecure: Option<bool>,
 }
 
 pub const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 10;
@@ -272,6 +282,24 @@ impl PodmanComputeConfig {
                     "proxy_auth_file is set but no https_proxy is configured".to_string(),
                 ));
             }
+            // Basic auth over the plain-TCP proxy connection is readable by
+            // anyone on the network path; sending it requires an explicit
+            // operator acknowledgement rather than being an implicit side
+            // effect of configuring credentials.
+            if self.proxy_auth_allow_insecure != Some(true) {
+                return Err(crate::client::PodmanApiError::InvalidInput(
+                    "proxy_auth_file sends the credential as cleartext Basic auth over the \
+                     plain-TCP connection to the http:// proxy; set proxy_auth_allow_insecure \
+                     = true to accept that exposure, or remove proxy_auth_file"
+                        .to_string(),
+                ));
+            }
+        } else if self.proxy_auth_allow_insecure.is_some() {
+            // The acknowledgement without credentials means the operator
+            // believed an auth file was configured; surface the mismatch.
+            return Err(crate::client::PodmanApiError::InvalidInput(
+                "proxy_auth_allow_insecure is set but no proxy_auth_file is configured".to_string(),
+            ));
         }
         Ok(())
     }
@@ -326,6 +354,7 @@ impl Default for PodmanComputeConfig {
             https_proxy: None,
             no_proxy: None,
             proxy_auth_file: None,
+            proxy_auth_allow_insecure: None,
         }
     }
 }
@@ -356,6 +385,7 @@ impl std::fmt::Debug for PodmanComputeConfig {
             .field("https_proxy", &self.https_proxy.is_some())
             .field("no_proxy", &self.no_proxy)
             .field("proxy_auth_file", &self.proxy_auth_file.is_some())
+            .field("proxy_auth_allow_insecure", &self.proxy_auth_allow_insecure)
             .finish()
     }
 }
@@ -533,13 +563,50 @@ mod tests {
     }
 
     #[test]
-    fn validate_proxy_config_accepts_auth_file_with_proxy() {
+    fn validate_proxy_config_accepts_auth_file_with_proxy_and_acknowledgement() {
         let cfg = PodmanComputeConfig {
             https_proxy: Some("http://proxy.corp.com:8080".to_string()),
             proxy_auth_file: Some("/etc/openshell/secrets/proxy-auth".to_string()),
+            proxy_auth_allow_insecure: Some(true),
             ..PodmanComputeConfig::default()
         };
         assert!(cfg.validate_proxy_config().is_ok());
+    }
+
+    #[test]
+    fn validate_proxy_config_rejects_auth_file_without_insecure_acknowledgement() {
+        // Basic auth over the plain-TCP proxy connection is readable on the
+        // network path; sending it must be an explicit operator decision.
+        for allow in [None, Some(false)] {
+            let cfg = PodmanComputeConfig {
+                https_proxy: Some("http://proxy.corp.com:8080".to_string()),
+                proxy_auth_file: Some("/etc/openshell/secrets/proxy-auth".to_string()),
+                proxy_auth_allow_insecure: allow,
+                ..PodmanComputeConfig::default()
+            };
+            let err = cfg.validate_proxy_config().unwrap_err();
+            assert!(
+                err.to_string().contains("proxy_auth_allow_insecure"),
+                "{allow:?}: {err}"
+            );
+            assert!(err.to_string().contains("cleartext"), "{allow:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn validate_proxy_config_rejects_acknowledgement_without_auth_file() {
+        for allow in [Some(true), Some(false)] {
+            let cfg = PodmanComputeConfig {
+                https_proxy: Some("http://proxy.corp.com:8080".to_string()),
+                proxy_auth_allow_insecure: allow,
+                ..PodmanComputeConfig::default()
+            };
+            let err = cfg.validate_proxy_config().unwrap_err();
+            assert!(
+                err.to_string().contains("no proxy_auth_file"),
+                "{allow:?}: {err}"
+            );
+        }
     }
 
     #[test]

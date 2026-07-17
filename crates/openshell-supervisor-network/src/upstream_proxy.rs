@@ -27,7 +27,8 @@
 //! - Only `http://` proxy URLs are supported. Configuration is fail-closed:
 //!   any present-but-invalid reserved value — a present-but-empty variable,
 //!   an unsupported (`https://`, SOCKS) or malformed proxy URL, an unreadable
-//!   auth file, or a malformed credential — is a fatal startup error rather
+//!   auth file, a malformed credential, or an auth file without the explicit
+//!   cleartext-credential acknowledgement — is a fatal startup error rather
 //!   than being silently ignored, so a typo can never quietly downgrade the
 //!   operator's egress boundary to direct dialing or unauthenticated proxy
 //!   access. Validation semantics are shared with the compute driver via
@@ -196,8 +197,11 @@ impl UpstreamProxyConfig {
     /// any present-but-invalid value is fatal instead of being treated as
     /// unset: a present-but-empty (or whitespace-only) reserved variable, an
     /// invalid or unsupported proxy URL, an auth file that is set but
-    /// unreadable or holds a malformed credential, or an auth file or
-    /// `NO_PROXY` list with no proxy configured. Failing closed here
+    /// unreadable or holds a malformed credential, an auth file without the
+    /// explicit cleartext-credential acknowledgement
+    /// ([`UPSTREAM_PROXY_AUTH_ALLOW_INSECURE`](openshell_core::sandbox_env::UPSTREAM_PROXY_AUTH_ALLOW_INSECURE)),
+    /// or an auth file or `NO_PROXY` list with no proxy configured. Failing
+    /// closed here
     /// prevents a misconfiguration
     /// from silently degrading to direct dialing or unauthenticated proxy
     /// access. Only fully unset variables mean "no proxy".
@@ -207,7 +211,8 @@ impl UpstreamProxyConfig {
 
     fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         use openshell_core::sandbox_env::{
-            UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY, UPSTREAM_PROXY_AUTH_FILE,
+            UPSTREAM_HTTPS_PROXY, UPSTREAM_NO_PROXY, UPSTREAM_PROXY_AUTH_ALLOW_INSECURE,
+            UPSTREAM_PROXY_AUTH_FILE,
         };
         // Only a fully unset reserved variable means "not configured". A
         // present-but-empty value is a misconfiguration (the compute driver
@@ -226,6 +231,7 @@ impl UpstreamProxyConfig {
             .map(|url| parse_proxy_url(&url, UPSTREAM_HTTPS_PROXY))
             .transpose()?;
         let auth_file = var(UPSTREAM_PROXY_AUTH_FILE)?;
+        let auth_allow_insecure = var(UPSTREAM_PROXY_AUTH_ALLOW_INSECURE)?;
         let no_proxy_list = var(UPSTREAM_NO_PROXY)?;
         let Some(mut https) = https else {
             // Auxiliary proxy settings without a proxy mean the operator
@@ -233,6 +239,7 @@ impl UpstreamProxyConfig {
             // silently running with direct egress.
             for (name, value) in [
                 (UPSTREAM_PROXY_AUTH_FILE, &auth_file),
+                (UPSTREAM_PROXY_AUTH_ALLOW_INSECURE, &auth_allow_insecure),
                 (UPSTREAM_NO_PROXY, &no_proxy_list),
             ] {
                 if value.is_some() {
@@ -241,6 +248,35 @@ impl UpstreamProxyConfig {
             }
             return Ok(None);
         };
+
+        // Cleartext-credential acknowledgement. `Proxy-Authorization: Basic`
+        // travels over plain TCP to the http:// proxy, so credentials are
+        // only sent when the operator explicitly opted in. The compute driver
+        // enforces the same pairing at sandbox-create time; enforcing it here
+        // as well keeps the supervisor fail-closed against a bypassed or
+        // foreign driver.
+        let allow_insecure = match auth_allow_insecure.as_deref().map(str::trim) {
+            None => false,
+            Some("true") => true,
+            Some(_) => {
+                return Err(format!(
+                    "{UPSTREAM_PROXY_AUTH_ALLOW_INSECURE} must be 'true' when set"
+                ));
+            }
+        };
+        if auth_file.is_none() && auth_allow_insecure.is_some() {
+            return Err(format!(
+                "{UPSTREAM_PROXY_AUTH_ALLOW_INSECURE} is set but no \
+                 {UPSTREAM_PROXY_AUTH_FILE} is configured"
+            ));
+        }
+        if auth_file.is_some() && !allow_insecure {
+            return Err(format!(
+                "{UPSTREAM_PROXY_AUTH_FILE} sends the credential as cleartext Basic auth \
+                 over the plain-TCP proxy connection; refusing without \
+                 {UPSTREAM_PROXY_AUTH_ALLOW_INSECURE}=true"
+            ));
+        }
 
         // Load proxy credentials from the reserved auth file, if configured.
         // The file is delivered through a root-only secret mount so the
@@ -540,6 +576,7 @@ mod tests {
     use super::*;
     use openshell_core::sandbox_env::{
         UPSTREAM_HTTPS_PROXY as HTTPS_PROXY, UPSTREAM_NO_PROXY as NO_PROXY,
+        UPSTREAM_PROXY_AUTH_ALLOW_INSECURE as PROXY_AUTH_ALLOW_INSECURE,
         UPSTREAM_PROXY_AUTH_FILE as PROXY_AUTH_FILE,
     };
 
@@ -589,6 +626,7 @@ mod tests {
             (HTTPS_PROXY, "  "),
             (NO_PROXY, " "),
             (PROXY_AUTH_FILE, ""),
+            (PROXY_AUTH_ALLOW_INSECURE, ""),
         ] {
             let err = config_from(&[(name, value)]).unwrap_err();
             assert!(err.contains(name), "{err}");
@@ -668,9 +706,47 @@ mod tests {
         let err = config_from(&[
             (HTTPS_PROXY, "http://proxy.corp.com:8080"),
             (PROXY_AUTH_FILE, "/nonexistent/upstream-proxy-auth"),
+            (PROXY_AUTH_ALLOW_INSECURE, "true"),
         ])
         .unwrap_err();
         assert!(err.contains("auth file"), "{err}");
+    }
+
+    #[test]
+    fn auth_file_without_insecure_acknowledgement_is_fatal() {
+        // Basic auth over the plain-TCP proxy connection is readable on the
+        // network path; sending it requires the explicit opt-in.
+        let err = config_from(&[
+            (HTTPS_PROXY, "http://proxy.corp.com:8080"),
+            (PROXY_AUTH_FILE, "/etc/openshell/auth/upstream-proxy"),
+        ])
+        .unwrap_err();
+        assert!(err.contains(PROXY_AUTH_ALLOW_INSECURE), "{err}");
+        assert!(err.contains("cleartext"), "{err}");
+    }
+
+    #[test]
+    fn invalid_insecure_acknowledgement_value_is_fatal() {
+        for value in ["false", "yes", "1", "TRUE"] {
+            let err = config_from(&[
+                (HTTPS_PROXY, "http://proxy.corp.com:8080"),
+                (PROXY_AUTH_FILE, "/etc/openshell/auth/upstream-proxy"),
+                (PROXY_AUTH_ALLOW_INSECURE, value),
+            ])
+            .unwrap_err();
+            assert!(err.contains(PROXY_AUTH_ALLOW_INSECURE), "{value}: {err}");
+        }
+    }
+
+    #[test]
+    fn insecure_acknowledgement_without_auth_file_is_fatal() {
+        let err = config_from(&[
+            (HTTPS_PROXY, "http://proxy.corp.com:8080"),
+            (PROXY_AUTH_ALLOW_INSECURE, "true"),
+        ])
+        .unwrap_err();
+        assert!(err.contains(PROXY_AUTH_ALLOW_INSECURE), "{err}");
+        assert!(err.contains(PROXY_AUTH_FILE), "{err}");
     }
 
     #[test]
@@ -684,6 +760,7 @@ mod tests {
             let err = config_from(&[
                 (HTTPS_PROXY, "http://proxy.corp.com:8080"),
                 (PROXY_AUTH_FILE, &path),
+                (PROXY_AUTH_ALLOW_INSECURE, "true"),
             ])
             .unwrap_err();
             assert!(err.contains("auth file"), "{err}");
@@ -700,6 +777,7 @@ mod tests {
         // boundary the operator believed was in effect.
         for (name, value) in [
             (PROXY_AUTH_FILE, "/etc/openshell/auth/upstream-proxy"),
+            (PROXY_AUTH_ALLOW_INSECURE, "true"),
             (NO_PROXY, "*.svc.cluster.local"),
         ] {
             let err = config_from(&[(name, value)]).unwrap_err();
@@ -713,7 +791,11 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), "user:secret\n").unwrap();
         let path = file.path().to_str().unwrap().to_string();
-        let cfg = config_ok(&[(HTTPS_PROXY, "http://proxy:8080"), (PROXY_AUTH_FILE, &path)]);
+        let cfg = config_ok(&[
+            (HTTPS_PROXY, "http://proxy:8080"),
+            (PROXY_AUTH_FILE, &path),
+            (PROXY_AUTH_ALLOW_INSECURE, "true"),
+        ]);
         let expected = format!(
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode("user:secret")

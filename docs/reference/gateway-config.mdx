@@ -418,9 +418,19 @@ health_check_interval_secs = 10
 # characters); the same validation runs at sandbox-create time and in the
 # supervisor, so a credential accepted here is never rejected in-container.
 # Keep gateway.toml and the auth file owner-readable only (mode 0600).
-# https_proxy     = "http://proxy.corp.com:8080"
-# no_proxy        = "*.svc.cluster.local,10.0.0.0/8"
-# proxy_auth_file = "/etc/openshell/secrets/proxy-auth"
+#
+# WARNING: the supervisor sends the credential as a Proxy-Authorization:
+# Basic header over the plain-TCP connection to the http:// proxy. Basic
+# auth is base64, not encryption: anyone on the network path between the
+# sandbox host and the proxy can recover the credential. Because of that,
+# proxy_auth_file requires the explicit acknowledgement
+# proxy_auth_allow_insecure = true; without it the configuration is
+# rejected at gateway startup. Only opt in when the path to the proxy is a
+# trusted network segment.
+# https_proxy               = "http://proxy.corp.com:8080"
+# no_proxy                  = "*.svc.cluster.local,10.0.0.0/8"
+# proxy_auth_file           = "/etc/openshell/secrets/proxy-auth"
+# proxy_auth_allow_insecure = true
 ```
 
 ### MicroVM

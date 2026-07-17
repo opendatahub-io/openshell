@@ -141,3 +141,16 @@ pub const UPSTREAM_NO_PROXY: &str = "OPENSHELL_UPSTREAM_NO_PROXY";
 /// in container environment or metadata. Compute drivers write this in the
 /// required-variable tier; the value is a path, not a secret.
 pub const UPSTREAM_PROXY_AUTH_FILE: &str = "OPENSHELL_UPSTREAM_PROXY_AUTH_FILE";
+
+/// Explicit operator acknowledgement (`true`) that the proxy credential is
+/// sent as a cleartext `Proxy-Authorization: Basic` header over the plain-TCP
+/// connection to the `http://` corporate proxy.
+///
+/// Basic auth is base64, not encryption, so anyone on the network path
+/// between the sandbox host and the proxy can recover the credential. The
+/// supervisor refuses to send credentials without this acknowledgement:
+/// [`UPSTREAM_PROXY_AUTH_FILE`] set without this variable equal to `true` is
+/// a fatal startup error, as is this variable set without an auth file.
+/// Compute drivers write it in the required-variable tier from the driver's
+/// `proxy_auth_allow_insecure` setting.
+pub const UPSTREAM_PROXY_AUTH_ALLOW_INSECURE: &str = "OPENSHELL_UPSTREAM_PROXY_AUTH_ALLOW_INSECURE";

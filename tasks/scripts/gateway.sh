@@ -381,6 +381,18 @@ EOF
     if [[ -n "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE+x}" ]]; then
       printf 'proxy_auth_file = "%s"\n' "$(toml_escape "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE}")" >>"${CONFIG_PATH}"
     fi
+    if [[ -n "${OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE+x}" ]]; then
+      case "${OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE}" in
+        true|false)
+          printf 'proxy_auth_allow_insecure = %s\n' "${OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE}" >>"${CONFIG_PATH}"
+          ;;
+        *)
+          # Not a TOML boolean: write it as a quoted string so the gateway's
+          # config parser rejects it at startup (fail closed, no injection).
+          printf 'proxy_auth_allow_insecure = "%s"\n' "$(toml_escape "${OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE}")" >>"${CONFIG_PATH}"
+          ;;
+      esac
+    fi
     ;;
 esac
 

@@ -144,6 +144,16 @@ empty, contains control characters, or is not in `user:pass` form is fatal on
 both sides. The reserved proxy variables —
 including the auth-file path — are stripped from workload child processes.
 
+The Basic header travels over the plain-TCP connection to the `http://` proxy,
+so it is readable on the network path between sandbox host and proxy.
+Configuring `proxy_auth_file` therefore requires the explicit opt-in
+`proxy_auth_allow_insecure = true`, delivered to the supervisor as the
+reserved `OPENSHELL_UPSTREAM_PROXY_AUTH_ALLOW_INSECURE` variable. Both the
+driver (at sandbox-create time) and the supervisor (at startup) reject an
+auth file without the acknowledgement, and the acknowledgement without an
+auth file, so credentials are never sent in cleartext without an explicit
+operator decision.
+
 ## Credentials
 
 Provider credentials are stored at the gateway and fetched by the supervisor at

@@ -347,7 +347,8 @@ Podman resources after out-of-band container removal or label drift.
 | `OPENSHELL_PODMAN_TLS_KEY` | `--podman-tls-key` | unset | Host path to the client private key mounted for sandbox mTLS. |
 | `OPENSHELL_SANDBOX_HTTPS_PROXY` | `--sandbox-https-proxy` | unset | Corporate forward proxy URL for the supervisor's upstream TLS dials, chained with HTTP CONNECT. Only credential-free `http://host:port` URLs are supported (scheme and port required). Plain-HTTP requests always dial directly. |
 | `OPENSHELL_SANDBOX_NO_PROXY` | `--sandbox-no-proxy` | unset | Comma-separated `NO_PROXY` list (hostnames, domain suffixes, IPs, CIDRs) dialed directly instead of through the corporate proxy. |
-| `OPENSHELL_SANDBOX_PROXY_AUTH_FILE` | `--sandbox-proxy-auth-file` | unset | Path to a file containing the proxy credentials as `user:pass`. Staged as a root-only Podman secret so credentials never appear in config or container metadata. |
+| `OPENSHELL_SANDBOX_PROXY_AUTH_FILE` | `--sandbox-proxy-auth-file` | unset | Path to a file containing the proxy credentials as `user:pass`. Staged as a root-only Podman secret so credentials never appear in config or container metadata. Requires the insecure-auth acknowledgement below. |
+| `OPENSHELL_SANDBOX_PROXY_AUTH_ALLOW_INSECURE` | `--sandbox-proxy-auth-allow-insecure` | unset | Explicit acknowledgement (`true`) that the credential is sent as cleartext Basic auth over the plain-TCP connection to the `http://` proxy. Required when the auth file is set; rejected when it is not. |
 
 Through the gateway, the same settings are the `https_proxy`, `no_proxy`, and
 `proxy_auth_file` keys under `[openshell.drivers.podman]`; see
@@ -359,6 +360,12 @@ template environment cannot override it, and the conventional
 `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` variables a sandbox controls do not steer
 it. Credentials must be supplied through `proxy_auth_file`; an inline
 `user:pass@` in the URL is rejected at startup.
+
+Basic auth over an `http://` proxy is cleartext on the wire: anyone on the
+network path between the sandbox host and the proxy can recover the
+credential. Setting `proxy_auth_file` therefore requires
+`proxy_auth_allow_insecure = true`; both the driver and the in-container
+supervisor reject credentials without that explicit acknowledgement.
 
 ## Rootless-Specific Adaptations
 
