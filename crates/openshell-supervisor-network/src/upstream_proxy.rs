@@ -654,18 +654,34 @@ pub async fn connect_via(
 /// dual-stack destination whose first validated address is unreachable
 /// through the corporate proxy still connects via a later one. All attempts
 /// share one aggregate handshake budget ([`CONNECT_HANDSHAKE_TIMEOUT`]),
-/// matching the single-attempt paths.
+/// matching the single-attempt paths; within it, each attempt is capped at
+/// its fair share of the remaining time (`remaining / attempts_left`) so a
+/// proxy that accepts a CONNECT but never answers cannot starve the
+/// remaining validated addresses. Time an attempt fails without using
+/// rolls over to later attempts.
 ///
 /// # Errors
 ///
-/// Returns an error when `addrs` is empty, when every attempt fails (the
-/// last attempt's error, annotated with the attempt count when there were
-/// several), or when the aggregate budget expires.
+/// Returns an error when `addrs` is empty, or when every attempt fails or
+/// times out (the last attempt's error, annotated with the attempt count
+/// when there were several).
 pub async fn connect_via_validated(
     endpoint: &ProxyEndpoint,
     host: &str,
     port: u16,
     addrs: &[SocketAddr],
+) -> std::io::Result<PrefixedStream> {
+    connect_via_validated_with_budget(endpoint, host, port, addrs, CONNECT_HANDSHAKE_TIMEOUT).await
+}
+
+/// [`connect_via_validated`] with an explicit aggregate budget, split out so
+/// tests can exercise the hang-fallback behavior without real 30s waits.
+async fn connect_via_validated_with_budget(
+    endpoint: &ProxyEndpoint,
+    host: &str,
+    port: u16,
+    addrs: &[SocketAddr],
+    budget: Duration,
 ) -> std::io::Result<PrefixedStream> {
     if addrs.is_empty() {
         return Err(IoError::new(
@@ -673,38 +689,55 @@ pub async fn connect_via_validated(
             format!("no validated addresses to CONNECT to for {host}"),
         ));
     }
-    tokio::time::timeout(CONNECT_HANDSHAKE_TIMEOUT, async {
-        let mut last_err = None;
-        for addr in addrs {
-            match connect_via_inner(endpoint, host, port, ConnectTarget::Ip(addr.ip())).await {
-                Ok(stream) => return Ok(stream),
-                Err(err) => last_err = Some(err),
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut last_err = None;
+    let mut attempted = 0usize;
+    for (index, addr) in addrs.iter().enumerate() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let attempts_left = u32::try_from(addrs.len() - index).unwrap_or(u32::MAX);
+        let attempt_budget = remaining / attempts_left;
+        attempted += 1;
+        match tokio::time::timeout(
+            attempt_budget,
+            connect_via_inner(endpoint, host, port, ConnectTarget::Ip(addr.ip())),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) => last_err = Some(err),
+            Err(_) => {
+                last_err = Some(IoError::new(
+                    ErrorKind::TimedOut,
+                    format!(
+                        "upstream proxy {} CONNECT to {} timed out",
+                        endpoint.display_addr(),
+                        addr.ip(),
+                    ),
+                ));
             }
         }
-        // `addrs` is non-empty, so at least one attempt recorded an error.
-        let last = last_err.expect("at least one CONNECT attempt");
-        if addrs.len() > 1 {
-            Err(IoError::new(
-                last.kind(),
-                format!(
-                    "CONNECT failed for all {} validated addresses of {host}; last: {last}",
-                    addrs.len()
-                ),
-            ))
-        } else {
-            Err(last)
-        }
-    })
-    .await
-    .map_err(|_| {
-        IoError::new(
-            ErrorKind::TimedOut,
-            format!(
-                "upstream proxy {} CONNECT handshake timed out",
-                endpoint.display_addr()
-            ),
+    }
+    // The first iteration always runs (`remaining` starts at the full
+    // budget), so at least one attempt recorded an error.
+    let last = last_err.expect("at least one CONNECT attempt");
+    if addrs.len() == 1 {
+        return Err(last);
+    }
+    let scope = if attempted == addrs.len() {
+        format!("all {} validated addresses", addrs.len())
+    } else {
+        format!(
+            "{attempted} of {} validated addresses (handshake budget exhausted)",
+            addrs.len()
         )
-    })?
+    };
+    Err(IoError::new(
+        last.kind(),
+        format!("CONNECT failed for {scope} of {host}; last: {last}"),
+    ))
 }
 
 async fn connect_via_inner(
@@ -1359,6 +1392,54 @@ mod tests {
         let stream = connect_via_validated(&endpoint, "api.example.com", 443, &addrs)
             .await
             .unwrap();
+        let (first, second, _accepted) = handle.await.unwrap();
+        drop(stream);
+        assert!(
+            first.starts_with("CONNECT 192.0.2.1:443 HTTP/1.1\r\n"),
+            "{first}"
+        );
+        assert!(
+            second.starts_with("CONNECT 192.0.2.2:443 HTTP/1.1\r\n"),
+            "{second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_via_validated_survives_a_hanging_first_attempt() {
+        // A proxy that accepts the CONNECT but never answers must not
+        // consume the whole aggregate budget: the per-address cap moves on
+        // to the next validated address.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            // First attempt: read the CONNECT, then hang with the socket
+            // held open until the client times the attempt out.
+            let (mut hung, _) = listener.accept().await.unwrap();
+            let first = read_request(&mut hung).await;
+            // Second attempt: establish the tunnel.
+            let (mut accepted, _) = listener.accept().await.unwrap();
+            let second = read_request(&mut accepted).await;
+            accepted
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await
+                .unwrap();
+            drop(hung);
+            (first, second, accepted)
+        });
+
+        let endpoint = endpoint_for(addr, None);
+        let addrs = [sock("192.0.2.1", 443), sock("192.0.2.2", 443)];
+        // Small real-time budget: the first attempt hangs for its fair
+        // share (half), then the second succeeds within the remainder.
+        let stream = connect_via_validated_with_budget(
+            &endpoint,
+            "api.example.com",
+            443,
+            &addrs,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
         let (first, second, _accepted) = handle.await.unwrap();
         drop(stream);
         assert!(
