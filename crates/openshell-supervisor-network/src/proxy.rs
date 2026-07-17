@@ -2959,19 +2959,25 @@ fn validate_declared_endpoint_resolved_addrs(
 /// The CONNECT target sent to the corporate proxy is the client-requested
 /// hostname, so hostname-filtering proxies and split-horizon DNS at the
 /// proxy keep working.
+///
+/// Both paths return a [`upstream_proxy::PrefixedStream`]: for proxied
+/// dials it replays any tunneled bytes that arrived in the same read as the
+/// CONNECT response; for direct dials it is a plain passthrough.
 async fn dial_upstream(
     upstream_proxy: &Option<UpstreamProxyConfig>,
     host_lc: &str,
     port: u16,
     addrs: &[SocketAddr],
-) -> std::io::Result<TcpStream> {
+) -> std::io::Result<upstream_proxy::PrefixedStream> {
     if let Some(endpoint) = upstream_proxy
         .as_ref()
         .and_then(|cfg| cfg.proxy_for(host_lc))
     {
         return upstream_proxy::connect_via(endpoint, host_lc, port).await;
     }
-    TcpStream::connect(addrs).await
+    Ok(upstream_proxy::PrefixedStream::without_prefix(
+        TcpStream::connect(addrs).await?,
+    ))
 }
 
 /// Resolve a host:port using sandbox `/etc/hosts` first (when available), then

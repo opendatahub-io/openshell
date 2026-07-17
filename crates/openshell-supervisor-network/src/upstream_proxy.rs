@@ -41,10 +41,12 @@
 
 use std::io::{Error as IoError, ErrorKind};
 use std::net::IpAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine as _;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tracing::debug;
 
@@ -327,10 +329,101 @@ fn basic_auth_header(credential: &str) -> Result<String, String> {
     ))
 }
 
+/// A `TcpStream` that first replays bytes already read from the socket.
+///
+/// The CONNECT handshake reads from the proxy socket in chunks, so the read
+/// that completes the response header block may also contain the first
+/// tunneled payload bytes (a server-speaks-first destination, or a proxy
+/// that coalesces writes). Those bytes belong to the destination byte
+/// stream and must reach the caller rather than being discarded; this
+/// wrapper yields them before reading from the socket again. Writes pass
+/// straight through.
+#[derive(Debug)]
+pub struct PrefixedStream {
+    inner: TcpStream,
+    /// Bytes read past the CONNECT header terminator, replayed first.
+    prefix: Vec<u8>,
+    /// Read offset into `prefix`.
+    pos: usize,
+}
+
+impl PrefixedStream {
+    /// Wrap `inner`, replaying `prefix` before socket reads.
+    #[must_use]
+    pub fn new(inner: TcpStream, prefix: Vec<u8>) -> Self {
+        Self {
+            inner,
+            prefix,
+            pos: 0,
+        }
+    }
+
+    /// Wrap a directly dialed stream with nothing to replay.
+    #[must_use]
+    pub fn without_prefix(inner: TcpStream) -> Self {
+        Self::new(inner, Vec::new())
+    }
+}
+
+impl AsyncRead for PrefixedStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if this.pos < this.prefix.len() {
+            let n = buf.remaining().min(this.prefix.len() - this.pos);
+            buf.put_slice(&this.prefix[this.pos..this.pos + n]);
+            this.pos += n;
+            if this.pos == this.prefix.len() {
+                // Drained: release the buffer instead of holding it for the
+                // tunnel's lifetime.
+                this.prefix = Vec::new();
+                this.pos = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for PrefixedStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
+
 /// Open a tunnel to `host:port` through the corporate proxy with HTTP CONNECT.
 ///
 /// Returns the connected stream once the proxy answers 200; after that the
-/// stream is a transparent byte pipe to the destination.
+/// stream is a transparent byte pipe to the destination. Any tunneled bytes
+/// received in the same read as the CONNECT response are preserved and
+/// replayed by the returned [`PrefixedStream`].
 ///
 /// The destination hostname (not a locally resolved IP) is sent in the
 /// CONNECT target so hostname-filtering proxies keep working; local DNS
@@ -345,7 +438,7 @@ pub async fn connect_via(
     endpoint: &ProxyEndpoint,
     host: &str,
     port: u16,
-) -> std::io::Result<TcpStream> {
+) -> std::io::Result<PrefixedStream> {
     tokio::time::timeout(
         CONNECT_HANDSHAKE_TIMEOUT,
         connect_via_inner(endpoint, host, port),
@@ -366,7 +459,7 @@ async fn connect_via_inner(
     endpoint: &ProxyEndpoint,
     host: &str,
     port: u16,
-) -> std::io::Result<TcpStream> {
+) -> std::io::Result<PrefixedStream> {
     let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port)).await?;
 
     let target = if host.contains(':') {
@@ -383,10 +476,12 @@ async fn connect_via_inner(
     request.push_str("\r\n");
     stream.write_all(request.as_bytes()).await?;
 
-    // Read the proxy's response header block.
+    // Read the proxy's response header block. A read may run past the
+    // `\r\n\r\n` terminator into tunneled payload; those bytes are preserved
+    // below, never discarded.
     let mut buf = vec![0u8; MAX_CONNECT_RESPONSE_BYTES];
     let mut used = 0;
-    loop {
+    let header_end = loop {
         if used == buf.len() {
             return Err(IoError::other(format!(
                 "upstream proxy {} CONNECT response headers exceed {MAX_CONNECT_RESPONSE_BYTES} bytes",
@@ -404,12 +499,12 @@ async fn connect_via_inner(
             ));
         }
         used += n;
-        if buf[..used].windows(4).any(|win| win == b"\r\n\r\n") {
-            break;
+        if let Some(pos) = buf[..used].windows(4).position(|win| win == b"\r\n\r\n") {
+            break pos + 4;
         }
-    }
+    };
 
-    let response = String::from_utf8_lossy(&buf[..used]);
+    let response = String::from_utf8_lossy(&buf[..header_end]);
     let status_line = response.lines().next().unwrap_or_default();
     let status_code = status_line
         .split_whitespace()
@@ -422,7 +517,9 @@ async fn connect_via_inner(
                 target = %target,
                 "upstream proxy CONNECT tunnel established"
             );
-            Ok(stream)
+            buf.truncate(used);
+            let overflow = buf.split_off(header_end);
+            Ok(PrefixedStream::new(stream, overflow))
         }
         Some(code) => Err(IoError::other(format!(
             "upstream proxy {} refused CONNECT to {target}: HTTP {code}",
@@ -771,6 +868,43 @@ mod tests {
         assert!(request.starts_with("CONNECT api.example.com:443 HTTP/1.1\r\n"));
         assert!(request.contains("Host: api.example.com:443\r\n"));
         assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
+    }
+
+    #[tokio::test]
+    async fn connect_via_preserves_payload_after_connect_response() {
+        // The proxy's 200 response and the first tunneled bytes can arrive
+        // in a single read; the suffix belongs to the destination stream and
+        // must be replayed, not discarded.
+        let (addr, _handle) =
+            fake_proxy("HTTP/1.1 200 Connection established\r\n\r\nserver-first-payload").await;
+        let endpoint = endpoint_for(addr, None);
+        let mut stream = connect_via(&endpoint, "api.example.com", 443)
+            .await
+            .unwrap();
+        let mut payload = vec![0u8; "server-first-payload".len()];
+        stream.read_exact(&mut payload).await.unwrap();
+        assert_eq!(payload, b"server-first-payload");
+    }
+
+    #[tokio::test]
+    async fn prefixed_stream_replays_prefix_before_socket_bytes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (mut accepted, _) = listener.accept().await.unwrap();
+        let dialed = connect.await.unwrap();
+
+        accepted.write_all(b" from-socket").await.unwrap();
+        let mut stream = PrefixedStream::new(dialed, b"from-prefix".to_vec());
+        let mut out = vec![0u8; "from-prefix from-socket".len()];
+        stream.read_exact(&mut out).await.unwrap();
+        assert_eq!(out, b"from-prefix from-socket");
+
+        // Writes pass through to the socket untouched by the prefix.
+        stream.write_all(b"reply").await.unwrap();
+        let mut reply = vec![0u8; 5];
+        accepted.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, b"reply");
     }
 
     #[tokio::test]
