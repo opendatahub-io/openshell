@@ -2981,20 +2981,19 @@ async fn dial_upstream(
     if let Some(cfg) = upstream_proxy.as_ref() {
         return match cfg.decision(host_lc, port, addrs) {
             upstream_proxy::ProxyDecision::Proxy(endpoint) => {
-                let target = if cfg.connect_by_hostname() {
-                    upstream_proxy::ConnectTarget::Hostname
+                if cfg.connect_by_hostname() {
+                    upstream_proxy::connect_via(
+                        endpoint,
+                        host_lc,
+                        port,
+                        upstream_proxy::ConnectTarget::Hostname,
+                    )
+                    .await
                 } else {
-                    // First validated address, matching the order-of-attempt
-                    // the direct path's `TcpStream::connect` uses.
-                    let ip = addrs.first().map(SocketAddr::ip).ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            format!("no validated addresses to CONNECT to for {host_lc}"),
-                        )
-                    })?;
-                    upstream_proxy::ConnectTarget::Ip(ip)
-                };
-                upstream_proxy::connect_via(endpoint, host_lc, port, target).await
+                    // Try every validated address in order, matching the
+                    // fallback the direct path's `TcpStream::connect` does.
+                    upstream_proxy::connect_via_validated(endpoint, host_lc, port, addrs).await
+                }
             }
             upstream_proxy::ProxyDecision::Direct(direct_addrs) => {
                 Ok(upstream_proxy::PrefixedStream::without_prefix(

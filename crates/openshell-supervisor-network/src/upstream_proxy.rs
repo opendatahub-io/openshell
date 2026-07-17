@@ -646,6 +646,67 @@ pub async fn connect_via(
     })?
 }
 
+/// Open a validated-IP CONNECT tunnel, trying each validated address in
+/// order until one succeeds.
+///
+/// The direct-dial path hands `TcpStream::connect` the whole validated list
+/// and it falls back across addresses; this is the proxied equivalent, so a
+/// dual-stack destination whose first validated address is unreachable
+/// through the corporate proxy still connects via a later one. All attempts
+/// share one aggregate handshake budget ([`CONNECT_HANDSHAKE_TIMEOUT`]),
+/// matching the single-attempt paths.
+///
+/// # Errors
+///
+/// Returns an error when `addrs` is empty, when every attempt fails (the
+/// last attempt's error, annotated with the attempt count when there were
+/// several), or when the aggregate budget expires.
+pub async fn connect_via_validated(
+    endpoint: &ProxyEndpoint,
+    host: &str,
+    port: u16,
+    addrs: &[SocketAddr],
+) -> std::io::Result<PrefixedStream> {
+    if addrs.is_empty() {
+        return Err(IoError::new(
+            ErrorKind::InvalidInput,
+            format!("no validated addresses to CONNECT to for {host}"),
+        ));
+    }
+    tokio::time::timeout(CONNECT_HANDSHAKE_TIMEOUT, async {
+        let mut last_err = None;
+        for addr in addrs {
+            match connect_via_inner(endpoint, host, port, ConnectTarget::Ip(addr.ip())).await {
+                Ok(stream) => return Ok(stream),
+                Err(err) => last_err = Some(err),
+            }
+        }
+        // `addrs` is non-empty, so at least one attempt recorded an error.
+        let last = last_err.expect("at least one CONNECT attempt");
+        if addrs.len() > 1 {
+            Err(IoError::new(
+                last.kind(),
+                format!(
+                    "CONNECT failed for all {} validated addresses of {host}; last: {last}",
+                    addrs.len()
+                ),
+            ))
+        } else {
+            Err(last)
+        }
+    })
+    .await
+    .map_err(|_| {
+        IoError::new(
+            ErrorKind::TimedOut,
+            format!(
+                "upstream proxy {} CONNECT handshake timed out",
+                endpoint.display_addr()
+            ),
+        )
+    })?
+}
+
 async fn connect_via_inner(
     endpoint: &ProxyEndpoint,
     host: &str,
@@ -1164,17 +1225,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let mut used = 0;
-            loop {
-                let n = socket.read(&mut buf[used..]).await.unwrap();
-                used += n;
-                if n == 0 || buf[..used].windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            let request = read_request(&mut socket).await;
             socket.write_all(response.as_bytes()).await.unwrap();
-            String::from_utf8_lossy(&buf[..used]).into_owned()
+            request
         });
         (addr, handle)
     }
@@ -1211,6 +1264,88 @@ mod tests {
             "hostname must not leak into the CONNECT request in IP mode: {request}"
         );
         assert!(request.contains("Proxy-Authorization: Basic dXNlcjpwYXNz\r\n"));
+    }
+
+    /// Read one request's header block from a fake-proxy socket.
+    async fn read_request(socket: &mut TcpStream) -> String {
+        let mut buf = vec![0u8; 4096];
+        let mut used = 0;
+        loop {
+            let n = socket.read(&mut buf[used..]).await.unwrap();
+            used += n;
+            if n == 0 || buf[..used].windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf[..used]).into_owned()
+    }
+
+    #[tokio::test]
+    async fn connect_via_validated_falls_back_across_validated_addresses() {
+        // The direct path tries every validated address; the proxied path
+        // must too, or a dual-stack destination whose first address is
+        // unreachable through the proxy fails needlessly.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            // First attempt: refuse the tunnel.
+            let (mut refused, _) = listener.accept().await.unwrap();
+            let first = read_request(&mut refused).await;
+            refused
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                .await
+                .unwrap();
+            drop(refused);
+            // Second attempt: establish it.
+            let (mut accepted, _) = listener.accept().await.unwrap();
+            let second = read_request(&mut accepted).await;
+            accepted
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await
+                .unwrap();
+            (first, second, accepted)
+        });
+
+        let endpoint = endpoint_for(addr, None);
+        let addrs = [sock("192.0.2.1", 443), sock("192.0.2.2", 443)];
+        let stream = connect_via_validated(&endpoint, "api.example.com", 443, &addrs)
+            .await
+            .unwrap();
+        let (first, second, _accepted) = handle.await.unwrap();
+        drop(stream);
+        assert!(
+            first.starts_with("CONNECT 192.0.2.1:443 HTTP/1.1\r\n"),
+            "{first}"
+        );
+        assert!(
+            second.starts_with("CONNECT 192.0.2.2:443 HTTP/1.1\r\n"),
+            "{second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_via_validated_reports_failure_across_all_addresses() {
+        let (addr, _handle) = fake_proxy("HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+        let endpoint = endpoint_for(addr, None);
+        // Only the first attempt gets a response; the second finds the
+        // listener gone, and the aggregate error must say both were tried.
+        let addrs = [sock("192.0.2.1", 443), sock("192.0.2.2", 443)];
+        let err = connect_via_validated(&endpoint, "api.example.com", 443, &addrs)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("all 2 validated addresses"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_via_validated_rejects_empty_address_list() {
+        let endpoint = endpoint_for(sock("127.0.0.1", 3128), None);
+        let err = connect_via_validated(&endpoint, "api.example.com", 443, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
     }
 
     #[tokio::test]
