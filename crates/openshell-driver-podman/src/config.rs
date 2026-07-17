@@ -139,7 +139,8 @@ pub struct PodmanComputeConfig {
     ///
     /// The in-container supervisor chains policy-approved TLS tunnels
     /// through this proxy with HTTP CONNECT instead of dialing upstream
-    /// destinations directly. Only `http://` proxy URLs are supported.
+    /// destinations directly. Only `http://` proxy URLs in explicit
+    /// `http://host:port` form (scheme and port required) are supported.
     /// This is an operator-owned egress boundary: it is written in the
     /// required-variable tier so sandbox/template environment cannot override
     /// it, and the conventional `HTTPS_PROXY` variables are not used.
@@ -468,6 +469,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_proxy_config_rejects_missing_scheme_or_port() {
+        // A scheme-less value (previously normalized to http://) and a
+        // port-less value (previously defaulted to 80) are both rejected so
+        // gateway.toml matches the documented http://host:port grammar.
+        for url in ["proxy.corp.com:8080", "http://proxy.corp.com"] {
+            let cfg = PodmanComputeConfig {
+                https_proxy: Some(url.to_string()),
+                ..PodmanComputeConfig::default()
+            };
+            let err = cfg.validate_proxy_config().unwrap_err();
+            assert!(err.to_string().contains("explicit"), "{url}: {err}");
+        }
+    }
+
+    #[test]
     fn validate_proxy_config_rejects_empty_value() {
         let cfg = PodmanComputeConfig {
             https_proxy: Some("  ".to_string()),
@@ -503,7 +519,6 @@ mod tests {
         for url in [
             "http://user:pass@proxy.corp.com:8080",
             "http://user@proxy.corp.com:8080",
-            "user:pass@proxy.corp.com:8080",
         ] {
             let cfg = PodmanComputeConfig {
                 https_proxy: Some(url.to_string()),

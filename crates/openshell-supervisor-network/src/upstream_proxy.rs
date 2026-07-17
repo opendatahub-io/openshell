@@ -280,7 +280,7 @@ impl UpstreamProxyConfig {
     }
 }
 
-/// Parse an `http://host[:port]` proxy URL with the same validation rules the
+/// Parse an `http://host:port` proxy URL with the same validation rules the
 /// compute driver applies at sandbox-create time
 /// ([`parse_upstream_proxy_url`](openshell_core::driver_utils::parse_upstream_proxy_url)).
 ///
@@ -508,10 +508,18 @@ mod tests {
     }
 
     #[test]
-    fn scheme_defaults_to_http_and_port_defaults_to_80() {
-        let cfg = config_ok(&[(HTTPS_PROXY, "proxy.corp.com")]);
-        let ep = cfg.proxy_for("example.com").unwrap();
-        assert_eq!(ep.display_addr(), "proxy.corp.com:80");
+    fn scheme_less_or_port_less_proxy_url_is_fatal() {
+        // The accepted grammar is exactly `http://host:port`; lenient
+        // defaulting would let a typo silently target the wrong proxy.
+        for url in [
+            "proxy.corp.com",
+            "proxy.corp.com:3128",
+            "http://proxy.corp.com",
+        ] {
+            let err = config_from(&[(HTTPS_PROXY, url)]).unwrap_err();
+            assert!(err.contains(HTTPS_PROXY), "{url}: {err}");
+            assert!(err.contains("explicit"), "{url}: {err}");
+        }
     }
 
     // -- Fail-closed configuration validation --

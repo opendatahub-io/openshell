@@ -116,9 +116,9 @@ The conventional `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` variables a sandbox
 controls are ignored on this path. Reserved `NO_PROXY` destinations and
 loopback always dial directly; add driver-injected host aliases (e.g.
 `host.containers.internal`) to the reserved `NO_PROXY` list when the corporate
-proxy cannot reach the container host. Only `http://` proxy URLs in
-`scheme://host:port` form are supported; a path, query, or fragment is
-rejected. Local DNS resolution and SSRF validation still run before the
+proxy cannot reach the container host. Only `http://` proxy URLs in explicit
+`http://host:port` form are supported — the scheme and port are both
+required, and a path, query, or fragment is rejected. Local DNS resolution and SSRF validation still run before the
 proxied dial; the CONNECT target sent to the corporate proxy is the requested
 hostname. The workload child's proxy variables are unaffected — they are
 always rewritten to point at the local policy proxy.

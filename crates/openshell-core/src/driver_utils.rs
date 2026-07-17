@@ -94,7 +94,7 @@ pub const UPSTREAM_PROXY_AUTH_MOUNT_PATH: &str = "/etc/openshell/auth/upstream-p
 pub struct UpstreamProxyAddr {
     /// Proxy hostname, IPv4, or IPv6 address (IPv6 without brackets).
     pub host: String,
-    /// Proxy TCP port (defaults to 80 when the URL has none).
+    /// Proxy TCP port (always explicit in the accepted URL grammar).
     pub port: u16,
 }
 
@@ -111,6 +111,11 @@ pub enum UpstreamProxyUrlError {
     /// The value does not parse as a URL.
     #[error("not a valid proxy URL: {0}")]
     Invalid(url::ParseError),
+    /// The value has no `scheme://` prefix. Bare `host[:port]` forms are
+    /// rejected so the accepted grammar matches the documented
+    /// `http://host:port` contract exactly.
+    #[error("proxy URL must include an explicit scheme, e.g. http://proxy.corp.com:3128")]
+    MissingScheme,
     /// The URL uses a scheme other than `http` (TLS and SOCKS proxies are
     /// not supported by the sandbox supervisor).
     #[error(
@@ -118,6 +123,11 @@ pub enum UpstreamProxyUrlError {
          supported by the sandbox supervisor"
     )]
     UnsupportedScheme(String),
+    /// The URL has no explicit port. Corporate proxies rarely listen on the
+    /// scheme default (80), so a forgotten port is rejected instead of
+    /// silently dialing port 80.
+    #[error("proxy URL must include an explicit proxy port, e.g. http://proxy.corp.com:3128")]
+    MissingPort,
     /// The URL embeds `user:pass@` credentials, which would leak into config
     /// and container metadata. Credentials must come from the proxy auth file.
     #[error("proxy URL must not embed credentials; supply them via the proxy auth file")]
@@ -135,11 +145,11 @@ pub enum UpstreamProxyUrlError {
 
 /// Parse and validate a corporate upstream-proxy URL.
 ///
-/// A bare `host:port` (no `://`) is normalized to `http://host:port`. Only
-/// `http://` proxies are accepted, inline userinfo is rejected, and the port
-/// defaults to 80. The URL must address the proxy only: a path (other than
-/// a bare trailing `/`), query, or fragment is rejected rather than silently
-/// discarded.
+/// The accepted grammar is exactly `http://host:port`: the scheme and the
+/// port must both be explicit, only `http://` proxies are accepted, and
+/// inline userinfo is rejected. The URL must address the proxy only: a path
+/// (other than a bare trailing `/`), query, or fragment is rejected rather
+/// than silently discarded.
 ///
 /// # Errors
 ///
@@ -150,12 +160,10 @@ pub fn parse_upstream_proxy_url(raw: &str) -> Result<UpstreamProxyAddr, Upstream
     if trimmed.is_empty() {
         return Err(UpstreamProxyUrlError::Empty);
     }
-    let parsed = if trimmed.contains("://") {
-        url::Url::parse(trimmed)
-    } else {
-        url::Url::parse(&format!("http://{trimmed}"))
+    if !trimmed.contains("://") {
+        return Err(UpstreamProxyUrlError::MissingScheme);
     }
-    .map_err(UpstreamProxyUrlError::Invalid)?;
+    let parsed = url::Url::parse(trimmed).map_err(UpstreamProxyUrlError::Invalid)?;
 
     if !parsed.scheme().eq_ignore_ascii_case("http") {
         return Err(UpstreamProxyUrlError::UnsupportedScheme(
@@ -186,10 +194,41 @@ pub fn parse_upstream_proxy_url(raw: &str) -> Result<UpstreamProxyAddr, Upstream
     if parsed.fragment().is_some() {
         return Err(UpstreamProxyUrlError::UnexpectedComponent("fragment"));
     }
+    if !authority_has_explicit_port(trimmed) {
+        return Err(UpstreamProxyUrlError::MissingPort);
+    }
     Ok(UpstreamProxyAddr {
         host,
+        // Explicit-port presence was verified above; `port()` is `None` only
+        // when the URL spells out the scheme default (`:80`), which the url
+        // crate normalizes away.
         port: parsed.port().unwrap_or(80),
     })
+}
+
+/// Return `true` when the raw URL's authority carries an explicit `:port`.
+///
+/// The `url` crate normalizes a scheme-default port (`:80` for http) to
+/// `None`, making it indistinguishable from an absent port in the parsed
+/// form, so the raw authority must be inspected instead.
+fn authority_has_explicit_port(raw: &str) -> bool {
+    let after_scheme = raw.split_once("://").map_or(raw, |(_, rest)| rest);
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    // Userinfo is rejected by the caller, but strip it anyway so this check
+    // never misreads a `user:pass@` colon as a port.
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    host_port.rfind(']').map_or_else(
+        || {
+            host_port
+                .rsplit_once(':')
+                .is_some_and(|(_, port)| !port.is_empty())
+        },
+        // Bracketed IPv6 literal: a port can only follow the bracket.
+        |end| host_port[end + 1..].starts_with(':'),
+    )
 }
 
 /// Why an upstream proxy credential was rejected by
@@ -347,12 +386,38 @@ mod tests {
     }
 
     #[test]
-    fn upstream_proxy_url_defaults_scheme_and_port() {
-        let addr = parse_upstream_proxy_url("proxy.corp.com").unwrap();
-        assert_eq!(addr.host, "proxy.corp.com");
+    fn upstream_proxy_url_rejects_missing_scheme() {
+        for url in [
+            "proxy.corp.com",
+            "proxy.corp.com:3128",
+            "user:pass@proxy.corp.com:8080",
+        ] {
+            assert_eq!(
+                parse_upstream_proxy_url(url),
+                Err(UpstreamProxyUrlError::MissingScheme),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_proxy_url_rejects_missing_port() {
+        for url in [
+            "http://proxy.corp.com",
+            "http://proxy.corp.com/",
+            "http://proxy.corp.com:",
+            "http://[fd00::1]",
+        ] {
+            assert_eq!(
+                parse_upstream_proxy_url(url),
+                Err(UpstreamProxyUrlError::MissingPort),
+                "{url}"
+            );
+        }
+        // An explicit scheme-default port is accepted even though the url
+        // crate normalizes it away in the parsed form.
+        let addr = parse_upstream_proxy_url("http://proxy.corp.com:80").unwrap();
         assert_eq!(addr.port, 80);
-        let addr = parse_upstream_proxy_url("proxy.corp.com:3128").unwrap();
-        assert_eq!(addr.port, 3128);
     }
 
     #[test]
@@ -399,7 +464,6 @@ mod tests {
     fn upstream_proxy_url_rejects_path_query_and_fragment() {
         for (url, component) in [
             ("http://proxy.corp.com:8080/some/path", "path"),
-            ("proxy.corp.com:8080/some/path", "path"),
             ("http://proxy.corp.com:8080?x=1", "query"),
             ("http://proxy.corp.com:8080/?x=1", "query"),
             ("http://proxy.corp.com:8080#frag", "fragment"),

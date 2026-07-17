@@ -110,6 +110,19 @@ detect_driver() {
   exit 2
 }
 
+# Escape a value for embedding in a double-quoted TOML basic string, so
+# quotes, backslashes, or control characters in an environment value cannot
+# corrupt gateway.toml or inject extra configuration keys.
+toml_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "${s}"
+}
+
 port_is_in_use() {
   local port=$1
   if command_available lsof; then
@@ -360,13 +373,13 @@ EOF
     # gateway's fail-closed proxy validation rejects it at startup instead of
     # this script silently dropping it.
     if [[ -n "${OPENSHELL_SANDBOX_HTTPS_PROXY+x}" ]]; then
-      printf 'https_proxy = "%s"\n' "${OPENSHELL_SANDBOX_HTTPS_PROXY}" >>"${CONFIG_PATH}"
+      printf 'https_proxy = "%s"\n' "$(toml_escape "${OPENSHELL_SANDBOX_HTTPS_PROXY}")" >>"${CONFIG_PATH}"
     fi
     if [[ -n "${OPENSHELL_SANDBOX_NO_PROXY+x}" ]]; then
-      printf 'no_proxy = "%s"\n' "${OPENSHELL_SANDBOX_NO_PROXY}" >>"${CONFIG_PATH}"
+      printf 'no_proxy = "%s"\n' "$(toml_escape "${OPENSHELL_SANDBOX_NO_PROXY}")" >>"${CONFIG_PATH}"
     fi
     if [[ -n "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE+x}" ]]; then
-      printf 'proxy_auth_file = "%s"\n' "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE}" >>"${CONFIG_PATH}"
+      printf 'proxy_auth_file = "%s"\n' "$(toml_escape "${OPENSHELL_SANDBOX_PROXY_AUTH_FILE}")" >>"${CONFIG_PATH}"
     fi
     ;;
 esac

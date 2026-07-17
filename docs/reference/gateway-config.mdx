@@ -395,8 +395,9 @@ health_check_interval_secs = 10
 # supervisor chains policy-approved TLS tunnels through this proxy with HTTP
 # CONNECT instead of dialing destinations directly. Plain-HTTP requests are
 # not proxied and always dial the destination directly. Only http:// proxy
-# URLs are supported, in scheme://host:port form: a URL carrying a path,
-# query, or fragment is rejected rather than silently truncated.
+# URLs in explicit http://host:port form are supported: the scheme and port
+# are both required, and a URL carrying a path, query, or fragment is
+# rejected rather than silently truncated.
 # NO_PROXY entries (hostnames, domain suffixes, IPs, CIDRs) are dialed
 # directly. This is an operator-owned egress boundary:
 # sandbox and template environment cannot override it, and the conventional

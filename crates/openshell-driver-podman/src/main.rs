@@ -104,8 +104,9 @@ struct Args {
     #[arg(long, env = "OPENSHELL_PODMAN_TLS_KEY")]
     podman_tls_key: Option<PathBuf>,
 
-    /// Corporate forward proxy URL for the supervisor's upstream TLS dials
-    /// (http:// only). Credentials must not be embedded in the URL; use
+    /// Corporate forward proxy URL for the supervisor's upstream TLS dials,
+    /// in explicit `http://host:port` form (scheme and port required).
+    /// Credentials must not be embedded in the URL; use
     /// `--sandbox-proxy-auth-file` instead.
     #[arg(long, env = "OPENSHELL_SANDBOX_HTTPS_PROXY")]
     sandbox_https_proxy: Option<String>,
