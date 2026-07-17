@@ -398,8 +398,12 @@ health_check_interval_secs = 10
 # URLs in explicit http://host:port form are supported: the scheme and port
 # are both required, and a URL carrying a path, query, or fragment is
 # rejected rather than silently truncated.
-# NO_PROXY entries (hostnames, domain suffixes, IPs, CIDRs) are dialed
-# directly. This is an operator-owned egress boundary:
+# NO_PROXY entries (hostnames, domain suffixes, IPs, CIDRs, each with an
+# optional :port qualifier) are dialed directly. A port-qualified entry only
+# bypasses that destination port. IP and CIDR entries also match hostnames
+# through their validated DNS resolution; such a match dials directly only
+# the resolved addresses inside the entry. This is an operator-owned egress
+# boundary:
 # sandbox and template environment cannot override it, and the conventional
 # HTTPS_PROXY/HTTP_PROXY/NO_PROXY variables a sandbox sets do not affect it.
 #

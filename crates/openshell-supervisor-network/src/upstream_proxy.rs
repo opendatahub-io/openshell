@@ -41,7 +41,7 @@
 //!   host gateway, etc.). Loopback destinations always bypass the proxy.
 
 use std::io::{Error as IoError, ErrorKind};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -86,17 +86,26 @@ impl std::fmt::Debug for ProxyEndpoint {
     }
 }
 
-/// One parsed `NO_PROXY` entry.
+/// The pattern half of one parsed `NO_PROXY` entry.
 #[derive(Debug, Clone)]
-enum NoProxyEntry {
+enum NoProxyPattern {
     /// `*` — bypass the proxy for every destination.
     Wildcard,
     /// Domain suffix match: `corp.com` matches `corp.com` and `x.corp.com`.
     Domain(String),
-    /// Exact IP literal match.
+    /// Exact IP match, against an IP-literal host or its resolved addresses.
     Ip(IpAddr),
-    /// CIDR match against IP-literal destination hosts.
+    /// CIDR match, against an IP-literal host or its resolved addresses.
     Cidr(ipnet::IpNet),
+}
+
+/// One parsed `NO_PROXY` entry.
+#[derive(Debug, Clone)]
+struct NoProxyEntry {
+    pattern: NoProxyPattern,
+    /// When set (`internal.corp:8443`), the entry only applies to this
+    /// destination port instead of every port.
+    port: Option<u16>,
 }
 
 /// Parsed `NO_PROXY` list.
@@ -114,58 +123,137 @@ impl NoProxy {
                 continue;
             }
             if item == "*" {
-                entries.push(NoProxyEntry::Wildcard);
+                entries.push(NoProxyEntry {
+                    pattern: NoProxyPattern::Wildcard,
+                    port: None,
+                });
                 continue;
             }
+            // Whole-item IP/CIDR forms first: a bare IPv6 literal contains
+            // colons that must never be misread as a port qualifier.
             if let Ok(net) = item.parse::<ipnet::IpNet>() {
-                entries.push(NoProxyEntry::Cidr(net));
+                entries.push(NoProxyEntry {
+                    pattern: NoProxyPattern::Cidr(net),
+                    port: None,
+                });
                 continue;
             }
             if let Ok(ip) = item.trim_matches(['[', ']']).parse::<IpAddr>() {
-                entries.push(NoProxyEntry::Ip(ip));
+                entries.push(NoProxyEntry {
+                    pattern: NoProxyPattern::Ip(ip),
+                    port: None,
+                });
                 continue;
             }
-            // Domain entry. Strip a `:port` qualifier (ports are ignored),
-            // then any leading `*.` or `.` so `.corp.com`, `*.corp.com`, and
-            // `corp.com` all behave identically.
-            let name = item.rsplit_once(':').map_or(item, |(name, port)| {
-                if port.chars().all(|c| c.is_ascii_digit()) {
-                    name
-                } else {
-                    item
+            // Optional `:port` qualifier: only a valid trailing u16 counts;
+            // anything else stays part of the pattern.
+            let (head, port) = item
+                .rsplit_once(':')
+                .map_or((item, None), |(head, port_str)| {
+                    port_str
+                        .parse::<u16>()
+                        .map_or((item, None), |port| (head, Some(port)))
+                });
+            let pattern = if let Ok(net) = head.parse::<ipnet::IpNet>() {
+                NoProxyPattern::Cidr(net)
+            } else if let Ok(ip) = head.trim_matches(['[', ']']).parse::<IpAddr>() {
+                NoProxyPattern::Ip(ip)
+            } else {
+                // Domain entry. Strip any leading `*.` or `.` so
+                // `.corp.com`, `*.corp.com`, and `corp.com` all behave
+                // identically.
+                let name = head
+                    .strip_prefix("*.")
+                    .or_else(|| head.strip_prefix('.'))
+                    .unwrap_or(head)
+                    .to_ascii_lowercase();
+                if name.is_empty() {
+                    continue;
                 }
-            });
-            let name = name
-                .strip_prefix("*.")
-                .or_else(|| name.strip_prefix('.'))
-                .unwrap_or(name)
-                .to_ascii_lowercase();
-            if !name.is_empty() {
-                entries.push(NoProxyEntry::Domain(name));
-            }
+                NoProxyPattern::Domain(name)
+            };
+            entries.push(NoProxyEntry { pattern, port });
         }
         Self { entries }
     }
 
-    /// Whether `host` (lowercase hostname or IP literal) must bypass the
-    /// corporate proxy. Loopback destinations always match.
-    fn matches(&self, host: &str) -> bool {
+    /// The validated addresses that may be dialed directly for
+    /// `(host, port)`, or `None` when no entry matches and the corporate
+    /// proxy must be used.
+    ///
+    /// Hostname-level matches — loopback, `*`, a domain entry, or an IP/CIDR
+    /// entry matching an IP-literal host — authorize every validated
+    /// address. IP/CIDR entries match hostnames through their *resolved*
+    /// addresses and authorize only the addresses they contain, so a bypass
+    /// scoped to an internal range can never widen into a direct dial of an
+    /// address outside that range.
+    fn direct_addrs(
+        &self,
+        host: &str,
+        port: u16,
+        resolved: &[SocketAddr],
+    ) -> Option<Vec<SocketAddr>> {
         let host_ip = host.trim_matches(['[', ']']).parse::<IpAddr>().ok();
         if host == "localhost" || host_ip.is_some_and(|ip| ip.is_loopback()) {
-            return true;
+            return Some(resolved.to_vec());
         }
-        self.entries.iter().any(|entry| match entry {
-            NoProxyEntry::Wildcard => true,
-            NoProxyEntry::Domain(suffix) => {
-                host == suffix
-                    || host
-                        .strip_suffix(suffix)
-                        .is_some_and(|prefix| prefix.ends_with('.'))
+        let mut subset: Vec<SocketAddr> = Vec::new();
+        for entry in &self.entries {
+            if entry.port.is_some_and(|entry_port| entry_port != port) {
+                continue;
             }
-            NoProxyEntry::Ip(ip) => host_ip == Some(*ip),
-            NoProxyEntry::Cidr(net) => host_ip.is_some_and(|ip| net.contains(&ip)),
-        })
+            match &entry.pattern {
+                NoProxyPattern::Wildcard => return Some(resolved.to_vec()),
+                NoProxyPattern::Domain(suffix) => {
+                    if host == suffix
+                        || host
+                            .strip_suffix(suffix)
+                            .is_some_and(|prefix| prefix.ends_with('.'))
+                    {
+                        return Some(resolved.to_vec());
+                    }
+                }
+                NoProxyPattern::Ip(ip) => {
+                    if host_ip == Some(*ip) {
+                        return Some(resolved.to_vec());
+                    }
+                    for addr in resolved {
+                        if addr.ip() == *ip && !subset.contains(addr) {
+                            subset.push(*addr);
+                        }
+                    }
+                }
+                NoProxyPattern::Cidr(net) => {
+                    if host_ip.is_some_and(|ip| net.contains(&ip)) {
+                        return Some(resolved.to_vec());
+                    }
+                    for addr in resolved {
+                        if net.contains(&addr.ip()) && !subset.contains(addr) {
+                            subset.push(*addr);
+                        }
+                    }
+                }
+            }
+        }
+        if subset.is_empty() {
+            None
+        } else {
+            Some(subset)
+        }
     }
+}
+
+/// How a validated destination must be dialed, per the reserved `NO_PROXY`
+/// contract. Produced by [`UpstreamProxyConfig::decision`].
+#[derive(Debug)]
+pub enum ProxyDecision<'a> {
+    /// Chain through the corporate proxy with HTTP CONNECT.
+    Proxy(&'a ProxyEndpoint),
+    /// Dial directly, restricted to this subset of the validated addresses:
+    /// all of them for hostname-level matches (loopback, `*`, domain
+    /// entries, IP-literal hosts), only the addresses contained in the
+    /// matching IP/CIDR entries otherwise.
+    Direct(Vec<SocketAddr>),
 }
 
 /// Corporate proxy configuration read from the supervisor's environment.
@@ -297,14 +385,24 @@ impl UpstreamProxyConfig {
         }))
     }
 
-    /// The corporate proxy to use for a TLS tunnel to `host`, or `None` when
-    /// the destination must be dialed directly.
+    /// How to dial the validated destination `(host, port, resolved)`,
+    /// honoring the reserved `NO_PROXY` list.
+    ///
+    /// Entries may carry a `:port` qualifier that limits them to that
+    /// destination port. IP/CIDR entries also match a hostname through its
+    /// already-validated resolved addresses; such a match authorizes a
+    /// direct dial of only the addresses inside the entry (see
+    /// [`ProxyDecision::Direct`]).
     #[must_use]
-    pub fn proxy_for(&self, host: &str) -> Option<&ProxyEndpoint> {
-        if self.no_proxy.matches(host) {
-            return None;
-        }
-        Some(&self.https)
+    pub fn decision<'a>(
+        &'a self,
+        host: &str,
+        port: u16,
+        resolved: &[SocketAddr],
+    ) -> ProxyDecision<'a> {
+        self.no_proxy
+            .direct_addrs(host, port, resolved)
+            .map_or(ProxyDecision::Proxy(&self.https), ProxyDecision::Direct)
     }
 
     /// Credential-free summary for startup logging.
@@ -634,10 +732,19 @@ mod tests {
         }
     }
 
+    /// Shorthand: the proxy endpoint chosen for `host:443` with no resolved
+    /// addresses in play, or `None` when the destination dials directly.
+    fn proxy_endpoint<'a>(cfg: &'a UpstreamProxyConfig, host: &str) -> Option<&'a ProxyEndpoint> {
+        match cfg.decision(host, 443, &[]) {
+            ProxyDecision::Proxy(ep) => Some(ep),
+            ProxyDecision::Direct(_) => None,
+        }
+    }
+
     #[test]
     fn https_proxy_parsed_with_port() {
         let cfg = config_ok(&[(HTTPS_PROXY, "http://proxy.corp.com:8080")]);
-        let ep = cfg.proxy_for("api.stripe.com").unwrap();
+        let ep = proxy_endpoint(&cfg, "api.stripe.com").unwrap();
         assert_eq!(ep.display_addr(), "proxy.corp.com:8080");
         assert!(ep.proxy_authorization.is_none());
     }
@@ -800,7 +907,7 @@ mod tests {
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode("user:secret")
         );
-        let ep = cfg.proxy_for("example.com").unwrap();
+        let ep = proxy_endpoint(&cfg, "example.com").unwrap();
         assert_eq!(ep.proxy_authorization.as_deref(), Some(expected.as_str()));
     }
 
@@ -832,7 +939,7 @@ mod tests {
     #[test]
     fn ipv6_proxy_address_parses() {
         let cfg = config_ok(&[(HTTPS_PROXY, "http://[fd00::1]:8080")]);
-        let ep = cfg.proxy_for("example.com").unwrap();
+        let ep = proxy_endpoint(&cfg, "example.com").unwrap();
         assert_eq!(ep.display_addr(), "fd00::1:8080");
     }
 
@@ -842,8 +949,18 @@ mod tests {
         config_ok(&[(HTTPS_PROXY, "http://proxy:8080"), (NO_PROXY, no_proxy)])
     }
 
+    /// Hostname-level bypass check at an arbitrary port with no resolved
+    /// addresses in play.
     fn bypasses(cfg: &UpstreamProxyConfig, host: &str) -> bool {
-        cfg.proxy_for(host).is_none()
+        bypasses_port(cfg, host, 443)
+    }
+
+    fn bypasses_port(cfg: &UpstreamProxyConfig, host: &str, port: u16) -> bool {
+        matches!(cfg.decision(host, port, &[]), ProxyDecision::Direct(_))
+    }
+
+    fn sock(ip: &str, port: u16) -> SocketAddr {
+        SocketAddr::new(ip.parse().unwrap(), port)
     }
 
     #[test]
@@ -890,10 +1007,84 @@ mod tests {
     }
 
     #[test]
-    fn no_proxy_ignores_port_qualifiers() {
+    fn no_proxy_port_qualifier_limits_bypass_to_that_port() {
+        // `internal.corp:8443` documents a bypass for one port; broadening
+        // it to every port would bypass the proxy for traffic the operator
+        // never excluded.
         let cfg = no_proxy_cfg("internal.corp:8443");
-        assert!(bypasses(&cfg, "internal.corp"));
-        assert!(bypasses(&cfg, "svc.internal.corp"));
+        assert!(bypasses_port(&cfg, "internal.corp", 8443));
+        assert!(bypasses_port(&cfg, "svc.internal.corp", 8443));
+        assert!(!bypasses_port(&cfg, "internal.corp", 443));
+        assert!(!bypasses_port(&cfg, "svc.internal.corp", 80));
+    }
+
+    #[test]
+    fn no_proxy_port_qualifier_applies_to_ip_and_cidr_entries() {
+        let cfg = no_proxy_cfg("192.168.1.5:8443,10.96.0.0/12:6443");
+        assert!(bypasses_port(&cfg, "192.168.1.5", 8443));
+        assert!(!bypasses_port(&cfg, "192.168.1.5", 443));
+        assert!(bypasses_port(&cfg, "10.96.0.1", 6443));
+        assert!(!bypasses_port(&cfg, "10.96.0.1", 443));
+    }
+
+    #[test]
+    fn no_proxy_invalid_port_qualifier_is_not_stripped() {
+        // A trailing qualifier that is not a valid port stays part of the
+        // pattern instead of silently widening the entry to every port.
+        let cfg = no_proxy_cfg("internal.corp:99999");
+        assert!(!bypasses(&cfg, "internal.corp"));
+    }
+
+    #[test]
+    fn no_proxy_cidr_matches_resolved_addresses_of_hostnames() {
+        // The operator's `10.96.0.0/12` bypass covers cluster-internal
+        // destinations however they are named; a hostname whose validated
+        // resolution lands in the range must dial directly.
+        let cfg = no_proxy_cfg("10.96.0.0/12");
+        let inside = sock("10.96.0.7", 443);
+        match cfg.decision("svc.internal", 443, &[inside]) {
+            ProxyDecision::Direct(addrs) => assert_eq!(addrs, vec![inside]),
+            ProxyDecision::Proxy(ep) => panic!("expected direct dial, got proxy {ep:?}"),
+        }
+        // Resolution outside the range keeps the proxy.
+        assert!(matches!(
+            cfg.decision("example.com", 443, &[sock("93.184.216.34", 443)]),
+            ProxyDecision::Proxy(_)
+        ));
+    }
+
+    #[test]
+    fn no_proxy_resolved_address_match_limits_direct_dial_to_matching_addrs() {
+        // Split resolution: only the addresses inside the bypassed range may
+        // be dialed directly; the others are not covered by the operator's
+        // exclusion and must not ride along.
+        let cfg = no_proxy_cfg("10.96.0.0/12");
+        let inside = sock("10.96.0.7", 443);
+        let outside = sock("93.184.216.34", 443);
+        match cfg.decision("svc.internal", 443, &[outside, inside]) {
+            ProxyDecision::Direct(addrs) => assert_eq!(addrs, vec![inside]),
+            ProxyDecision::Proxy(ep) => panic!("expected direct dial, got proxy {ep:?}"),
+        }
+    }
+
+    #[test]
+    fn no_proxy_ip_entry_matches_resolved_addresses() {
+        let cfg = no_proxy_cfg("10.0.0.5");
+        let matching = sock("10.0.0.5", 443);
+        match cfg.decision("db.internal", 443, &[matching, sock("10.0.0.6", 443)]) {
+            ProxyDecision::Direct(addrs) => assert_eq!(addrs, vec![matching]),
+            ProxyDecision::Proxy(ep) => panic!("expected direct dial, got proxy {ep:?}"),
+        }
+    }
+
+    #[test]
+    fn no_proxy_hostname_match_authorizes_all_resolved_addresses() {
+        let cfg = no_proxy_cfg("internal.corp");
+        let addrs = [sock("10.0.0.5", 443), sock("93.184.216.34", 443)];
+        match cfg.decision("internal.corp", 443, &addrs) {
+            ProxyDecision::Direct(direct) => assert_eq!(direct, addrs.to_vec()),
+            ProxyDecision::Proxy(ep) => panic!("expected direct dial, got proxy {ep:?}"),
+        }
     }
 
     #[test]
@@ -908,9 +1099,7 @@ mod tests {
 
     // -- CONNECT handshake --
 
-    async fn fake_proxy(
-        response: &'static str,
-    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<String>) {
+    async fn fake_proxy(response: &'static str) -> (SocketAddr, tokio::task::JoinHandle<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
@@ -930,7 +1119,7 @@ mod tests {
         (addr, handle)
     }
 
-    fn endpoint_for(addr: std::net::SocketAddr, auth: Option<&str>) -> ProxyEndpoint {
+    fn endpoint_for(addr: SocketAddr, auth: Option<&str>) -> ProxyEndpoint {
         ProxyEndpoint {
             host: addr.ip().to_string(),
             port: addr.port(),

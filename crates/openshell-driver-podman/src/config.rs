@@ -148,7 +148,10 @@ pub struct PodmanComputeConfig {
     /// Comma-separated `NO_PROXY` list injected as the reserved
     /// `OPENSHELL_UPSTREAM_NO_PROXY` variable (e.g.
     /// `*.svc.cluster.local,10.0.0.0/8`). Destinations matching an entry are
-    /// dialed directly instead of through the corporate proxy.
+    /// dialed directly instead of through the corporate proxy. Entries take
+    /// an optional `:port` qualifier that limits them to that destination
+    /// port, and IP/CIDR entries also match hostnames through their
+    /// validated DNS resolution.
     pub no_proxy: Option<String>,
     /// Path (on the gateway host) to a file containing the corporate proxy
     /// credentials as `user:pass`.

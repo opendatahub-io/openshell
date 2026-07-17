@@ -116,7 +116,10 @@ The conventional `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` variables a sandbox
 controls are ignored on this path. Reserved `NO_PROXY` destinations and
 loopback always dial directly; add driver-injected host aliases (e.g.
 `host.containers.internal`) to the reserved `NO_PROXY` list when the corporate
-proxy cannot reach the container host. Only `http://` proxy URLs in explicit
+proxy cannot reach the container host. `NO_PROXY` matching is port-aware and
+resolution-aware: an entry with a `:port` qualifier only bypasses that port,
+and IP/CIDR entries also match hostnames through their validated resolved
+addresses, with the direct dial limited to the addresses the entry contains. Only `http://` proxy URLs in explicit
 `http://host:port` form are supported — the scheme and port are both
 required, and a path, query, or fragment is rejected. Local DNS resolution and SSRF validation still run before the
 proxied dial; the CONNECT target sent to the corporate proxy is the requested

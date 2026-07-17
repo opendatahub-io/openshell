@@ -2956,6 +2956,11 @@ fn validate_declared_endpoint_resolved_addrs(
 /// changes. Plain-HTTP requests never take this path: they always dial the
 /// destination directly.
 ///
+/// `NO_PROXY` evaluation is port-aware and sees the validated resolved
+/// addresses: an entry with a `:port` qualifier only bypasses that port,
+/// and an IP/CIDR entry that matches through resolution limits the direct
+/// dial to the addresses it contains.
+///
 /// The CONNECT target sent to the corporate proxy is the client-requested
 /// hostname, so hostname-filtering proxies and split-horizon DNS at the
 /// proxy keep working.
@@ -2969,11 +2974,17 @@ async fn dial_upstream(
     port: u16,
     addrs: &[SocketAddr],
 ) -> std::io::Result<upstream_proxy::PrefixedStream> {
-    if let Some(endpoint) = upstream_proxy
-        .as_ref()
-        .and_then(|cfg| cfg.proxy_for(host_lc))
-    {
-        return upstream_proxy::connect_via(endpoint, host_lc, port).await;
+    if let Some(cfg) = upstream_proxy.as_ref() {
+        return match cfg.decision(host_lc, port, addrs) {
+            upstream_proxy::ProxyDecision::Proxy(endpoint) => {
+                upstream_proxy::connect_via(endpoint, host_lc, port).await
+            }
+            upstream_proxy::ProxyDecision::Direct(direct_addrs) => {
+                Ok(upstream_proxy::PrefixedStream::without_prefix(
+                    TcpStream::connect(&direct_addrs[..]).await?,
+                ))
+            }
+        };
     }
     Ok(upstream_proxy::PrefixedStream::without_prefix(
         TcpStream::connect(addrs).await?,
