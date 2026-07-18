@@ -4954,10 +4954,26 @@ async fn handle_forward_proxy(
     Ok(())
 }
 
+/// Parse a CONNECT authority into `(host, port)`.
+///
+/// IPv6 literals use the RFC 3986 bracketed form (`[::1]:443`); the returned
+/// host is bracket-free, matching what DNS resolution, SSRF validation, and
+/// `NO_PROXY` matching expect. Host content is otherwise passed through
+/// unvalidated — policy and resolution decide what it means.
 fn parse_target(target: &str) -> Result<(String, u16)> {
-    let (host, port_str) = target
-        .split_once(':')
-        .ok_or_else(|| miette::miette!("CONNECT target missing port: {target}"))?;
+    let (host, port_str) = if let Some(rest) = target.strip_prefix('[') {
+        let (host, after) = rest
+            .split_once(']')
+            .ok_or_else(|| miette::miette!("CONNECT target has unclosed '[': {target}"))?;
+        let port_str = after
+            .strip_prefix(':')
+            .ok_or_else(|| miette::miette!("CONNECT target missing port: {target}"))?;
+        (host, port_str)
+    } else {
+        target
+            .split_once(':')
+            .ok_or_else(|| miette::miette!("CONNECT target missing port: {target}"))?
+    };
     let port: u16 = port_str
         .parse()
         .map_err(|_| miette::miette!("Invalid port in CONNECT target: {target}"))?;
@@ -8343,11 +8359,30 @@ network_policies:
     }
 
     #[test]
-    fn test_parse_target_ipv6_bracket_notation_fails() {
-        assert!(
-            parse_target("[::1]:443").is_err(),
-            "split_once splits at first colon inside brackets — port parse fails"
-        );
+    fn test_parse_target_ipv6_bracket_notation() {
+        let (host, port) = parse_target("[::1]:443").unwrap();
+        assert_eq!(host, "::1", "brackets are stripped from the parsed host");
+        assert_eq!(port, 443);
+
+        let (host, port) = parse_target("[2001:db8::1]:8443").unwrap();
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 8443);
+    }
+
+    #[test]
+    fn test_parse_target_rejects_malformed_ipv6_brackets() {
+        for target in [
+            // Unclosed bracket.
+            "[::1:443",
+            // No port after the bracket.
+            "[::1]",
+            "[::1]443",
+            // Empty or non-numeric port.
+            "[::1]:",
+            "[::1]:notaport",
+        ] {
+            assert!(parse_target(target).is_err(), "{target} should be rejected");
+        }
     }
 
     // -- parse_proxy_uri: hostname parser regression tests --
