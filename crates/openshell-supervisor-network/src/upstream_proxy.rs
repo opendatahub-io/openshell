@@ -25,9 +25,9 @@
 //!
 //! Scope and invariants:
 //! - Only `http://` proxy URLs are supported. Configuration is fail-closed:
-//!   any present-but-invalid reserved value — a present-but-empty variable,
-//!   an unsupported (`https://`, SOCKS) or malformed proxy URL, an unreadable
-//!   auth file, a malformed credential, or an auth file without the explicit
+//!   any present-but-invalid driver-supplied setting — an empty argument
+//!   value, an unsupported (`https://`, SOCKS) or malformed proxy URL, an
+//!   unreadable auth file, a malformed credential, or an auth file without the explicit
 //!   cleartext-credential acknowledgement — is a fatal startup error rather
 //!   than being silently ignored, so a typo can never quietly downgrade the
 //!   operator's egress boundary to direct dialing or unauthenticated proxy
@@ -38,10 +38,10 @@
 //!   direct-dial path; the corporate proxy only replaces the final TCP dial.
 //! - CONNECT requests target a validated resolved address by default, so the
 //!   proxy performs no DNS resolution and the tunnel stays bound to the
-//!   answer that passed SSRF/`allowed_ips` validation. The reserved
+//!   answer that passed SSRF/`allowed_ips` validation. The
 //!   `--upstream-proxy-connect-by-hostname` opt-in sends the hostname
 //!   instead, for proxies whose ACLs filter on hostnames.
-//! - The reserved `NO_PROXY` list decides which destinations bypass the
+//! - The operator `NO_PROXY` list decides which destinations bypass the
 //!   corporate proxy and keep dialing directly (cluster-internal services,
 //!   host gateway, etc.). Loopback destinations always bypass the proxy.
 
@@ -248,7 +248,7 @@ impl NoProxy {
     }
 }
 
-/// How a validated destination must be dialed, per the reserved `NO_PROXY`
+/// How a validated destination must be dialed, per the operator `NO_PROXY`
 /// contract. Produced by [`UpstreamProxyConfig::decision`].
 #[derive(Debug)]
 pub enum ProxyDecision<'a> {
@@ -438,7 +438,7 @@ impl UpstreamProxyConfig {
             ));
         }
 
-        // Load proxy credentials from the reserved auth file, if configured.
+        // Load proxy credentials from the configured auth file, if any.
         // The file is delivered through a root-only secret mount so the
         // credentials never appear in the environment or container metadata.
         if let Some(path) = auth_file {
@@ -466,7 +466,7 @@ impl UpstreamProxyConfig {
     }
 
     /// How to dial the validated destination `(host, port, resolved)`,
-    /// honoring the reserved `NO_PROXY` list.
+    /// honoring the operator `NO_PROXY` list.
     ///
     /// Entries may carry a `:port` qualifier that limits them to that
     /// destination port. IP/CIDR entries also match a hostname through its
@@ -889,7 +889,7 @@ mod tests {
     #[test]
     fn from_args_maps_cli_arguments_to_config() {
         // The driver-supplied argv is the authoritative source; the shared
-        // validation applies exactly as for the reserved-name lookup.
+        // validation applies to it exactly as in the flag-keyed lookup.
         let args = UpstreamProxyArgs {
             https_proxy: Some("http://proxy.corp.com:8080".to_string()),
             no_proxy: Some("*.svc.cluster.local".to_string()),
@@ -910,8 +910,8 @@ mod tests {
 
     #[test]
     fn from_args_enforces_the_auth_file_acknowledgement_pairing() {
-        // An auth file without the acknowledgement is fatal, exactly as when
-        // the same pairing arrives via the reserved names.
+        // An auth file without the acknowledgement is fatal, exactly as in
+        // the flag-keyed lookup the driver validation mirrors.
         let args = UpstreamProxyArgs {
             https_proxy: Some("http://proxy.corp.com:8080".to_string()),
             proxy_auth_file: Some("/etc/openshell/auth/upstream-proxy".to_string()),
@@ -947,10 +947,10 @@ mod tests {
 
     #[test]
     fn present_but_empty_values_are_fatal() {
-        // A reserved variable the operator did not set is absent, never
-        // empty: the driver only writes configured values. A present-but
-        // -blank value is therefore a misconfiguration and must not silently
-        // mean "no proxy".
+        // A setting the operator did not configure is absent, never empty:
+        // the driver only passes configured values. A present-but-blank
+        // value is therefore a misconfiguration and must not silently mean
+        // "no proxy".
         for (name, value) in [
             (HTTPS_PROXY, ""),
             (HTTPS_PROXY, "  "),
@@ -998,9 +998,9 @@ mod tests {
 
     // -- Fail-closed configuration validation --
     //
-    // Present-but-invalid reserved values must be fatal, never silently
-    // treated as unset: a typo must not downgrade the operator's egress
-    // boundary to direct dialing or unauthenticated proxy access.
+    // Present-but-invalid settings must be fatal, never silently treated
+    // as unset: a typo must not downgrade the operator's egress boundary
+    // to direct dialing or unauthenticated proxy access.
 
     #[test]
     fn tls_and_socks_proxies_are_fatal() {

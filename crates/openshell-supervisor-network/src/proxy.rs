@@ -2951,8 +2951,8 @@ fn validate_declared_endpoint_resolved_addrs(
 ///
 /// Connects directly to the SSRF-checked resolved addresses, or chains
 /// through the corporate proxy (HTTP CONNECT) when one is configured for
-/// this destination via the supervisor's reserved upstream proxy variables
-/// and not excluded by the reserved `NO_PROXY` list. Policy evaluation and
+/// this destination via the driver-supplied upstream proxy arguments
+/// and not excluded by the operator `NO_PROXY` list. Policy evaluation and
 /// SSRF validation must have already succeeded; only the final TCP dial
 /// changes. Plain-HTTP requests never take this path: they always dial the
 /// destination directly.
