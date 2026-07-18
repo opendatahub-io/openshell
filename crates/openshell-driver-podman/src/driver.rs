@@ -931,7 +931,7 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     // ── socket resolution ───────────────────────────────────────────────
     //
@@ -1587,6 +1587,157 @@ mod tests {
                 "DELETE {}",
                 api_path(&format!("/libpod/volumes/{volume_name}"))
             )
+        );
+        let _ = fs::remove_file(socket_path);
+    }
+
+    /// Write a valid `user:pass` credential to a unique path for proxy-auth
+    /// secret tests. Caller removes it.
+    fn write_proxy_auth_file(test_name: &str) -> PathBuf {
+        let path = crate::test_utils::unique_socket_path(test_name).with_extension("auth");
+        fs::write(&path, "user:pass\n").expect("write proxy auth file");
+        path
+    }
+
+    fn proxy_auth_config(socket_path: PathBuf, auth_file: &Path) -> PodmanComputeConfig {
+        PodmanComputeConfig {
+            socket_path,
+            stop_timeout_secs: 10,
+            proxy_auth_file: Some(auth_file.to_string_lossy().into_owned()),
+            proxy_auth_allow_insecure: Some(true),
+            ..PodmanComputeConfig::default()
+        }
+    }
+
+    fn plain_sandbox(id: &str, name: &str) -> DriverSandbox {
+        DriverSandbox {
+            id: id.to_string(),
+            name: name.to_string(),
+            namespace: String::new(),
+            spec: None,
+            status: None,
+        }
+    }
+
+    fn secret_delete_request(sandbox_id: &str) -> String {
+        format!(
+            "DELETE {}",
+            api_path(&format!(
+                "/libpod/secrets/{}",
+                container::proxy_auth_secret_name(sandbox_id)
+            ))
+        )
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_removes_proxy_auth_secret_on_container_create_failure() {
+        // A credential secret is staged before the container is created, so a
+        // container-create failure must remove it — no credential residue.
+        let sandbox_id = "sandbox-cc";
+        let auth_file = write_proxy_auth_file("create-fail");
+        let (socket_path, request_log, handle) = spawn_podman_stub(
+            "create-container-fail",
+            vec![
+                StubResponse::new(StatusCode::OK, "{}"), // pull supervisor image
+                StubResponse::new(StatusCode::OK, "{}"), // pull sandbox image
+                StubResponse::new(StatusCode::CREATED, "{}"), // create volume
+                StubResponse::new(StatusCode::CREATED, "{}"), // create proxy-auth secret
+                StubResponse::new(StatusCode::INTERNAL_SERVER_ERROR, r#"{"message":"boom"}"#), // create container
+                StubResponse::new(StatusCode::NO_CONTENT, ""), // cleanup: remove volume
+                StubResponse::new(StatusCode::NO_CONTENT, ""), // cleanup: remove proxy-auth secret
+            ],
+        );
+        let driver = test_driver_with_config(proxy_auth_config(socket_path.clone(), &auth_file));
+
+        driver
+            .create_sandbox(&plain_sandbox(sandbox_id, "demo"))
+            .await
+            .expect_err("container create should fail");
+
+        handle.await.expect("stub task should finish");
+        let requests = request_log
+            .lock()
+            .expect("request log lock should not be poisoned")
+            .clone();
+        assert!(
+            requests.contains(&secret_delete_request(sandbox_id)),
+            "proxy-auth secret must be removed on container-create failure: {requests:?}"
+        );
+        let _ = fs::remove_file(&auth_file);
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_removes_proxy_auth_secret_on_start_failure() {
+        // The container is created but fails to start; the staged credential
+        // secret must still be removed.
+        let sandbox_id = "sandbox-sf";
+        let auth_file = write_proxy_auth_file("start-fail");
+        let (socket_path, request_log, handle) = spawn_podman_stub(
+            "create-start-fail",
+            vec![
+                StubResponse::new(StatusCode::OK, "{}"), // pull supervisor image
+                StubResponse::new(StatusCode::OK, "{}"), // pull sandbox image
+                StubResponse::new(StatusCode::CREATED, "{}"), // create volume
+                StubResponse::new(StatusCode::CREATED, "{}"), // create proxy-auth secret
+                StubResponse::new(StatusCode::CREATED, "{}"), // create container
+                StubResponse::new(StatusCode::INTERNAL_SERVER_ERROR, r#"{"message":"boom"}"#), // start container
+                StubResponse::new(StatusCode::NO_CONTENT, ""), // cleanup: remove container
+                StubResponse::new(StatusCode::NO_CONTENT, ""), // cleanup: remove volume
+                StubResponse::new(StatusCode::NO_CONTENT, ""), // cleanup: remove proxy-auth secret
+            ],
+        );
+        let driver = test_driver_with_config(proxy_auth_config(socket_path.clone(), &auth_file));
+
+        driver
+            .create_sandbox(&plain_sandbox(sandbox_id, "demo"))
+            .await
+            .expect_err("container start should fail");
+
+        handle.await.expect("stub task should finish");
+        let requests = request_log
+            .lock()
+            .expect("request log lock should not be poisoned")
+            .clone();
+        assert!(
+            requests.contains(&secret_delete_request(sandbox_id)),
+            "proxy-auth secret must be removed on start failure: {requests:?}"
+        );
+        let _ = fs::remove_file(&auth_file);
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[tokio::test]
+    async fn delete_sandbox_removes_proxy_auth_secret() {
+        // Deleting a sandbox (here already gone out of band) must remove the
+        // per-sandbox proxy-auth secret so credentials never outlive it.
+        let sandbox_id = "sandbox-del";
+        let (socket_path, request_log, handle) = spawn_podman_stub(
+            "delete-proxy-auth",
+            vec![
+                StubResponse::new(StatusCode::NOT_FOUND, r#"{"message":"gone"}"#), // inspect
+                StubResponse::new(StatusCode::NOT_FOUND, r#"{"message":"gone"}"#), // stop
+                StubResponse::new(StatusCode::NOT_FOUND, r#"{"message":"gone"}"#), // remove container
+                StubResponse::new(StatusCode::NO_CONTENT, ""),                     // remove volume
+                StubResponse::new(StatusCode::NO_CONTENT, ""), // remove token secret
+                StubResponse::new(StatusCode::NO_CONTENT, ""), // remove proxy-auth secret
+            ],
+        );
+        let driver = test_driver(socket_path.clone());
+
+        driver
+            .delete_sandbox(sandbox_id, "demo")
+            .await
+            .expect("delete should succeed");
+
+        handle.await.expect("stub task should finish");
+        let requests = request_log
+            .lock()
+            .expect("request log lock should not be poisoned")
+            .clone();
+        assert!(
+            requests.contains(&secret_delete_request(sandbox_id)),
+            "proxy-auth secret must be removed on delete: {requests:?}"
         );
         let _ = fs::remove_file(socket_path);
     }
