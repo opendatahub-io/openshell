@@ -442,9 +442,8 @@ impl UpstreamProxyConfig {
         // The file is delivered through a root-only secret mount so the
         // credentials never appear in the environment or container metadata.
         if let Some(path) = auth_file {
-            let credential = std::fs::read_to_string(&path).map_err(|err| {
-                format!("failed to read upstream proxy auth file '{path}': {err}")
-            })?;
+            let credential =
+                openshell_core::driver_utils::read_upstream_proxy_credential_file(&path)?;
             let header = basic_auth_header(&credential).map_err(|err| {
                 format!("invalid credential in upstream proxy auth file '{path}': {err}")
             })?;
@@ -1049,6 +1048,22 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("auth file"), "{err}");
+    }
+
+    #[test]
+    fn oversized_auth_file_is_fatal() {
+        // The supervisor uses the same bounded reader as the driver, so an
+        // oversized credential file is rejected rather than read unbounded.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), vec![b'a'; 8192]).unwrap();
+        let path = file.path().to_str().unwrap().to_string();
+        let err = config_from(&[
+            (HTTPS_PROXY, "http://proxy.corp.com:8080"),
+            (PROXY_AUTH_FILE, &path),
+            (PROXY_AUTH_ALLOW_INSECURE, "true"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("limit"), "{err}");
     }
 
     #[test]

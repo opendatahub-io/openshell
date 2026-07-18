@@ -268,8 +268,8 @@ impl PodmanComputeConfig {
             })?;
         }
 
-        // The supervisor treats a present-but-empty reserved variable as a
-        // fatal misconfiguration, so never accept (and later inject) one.
+        // The supervisor treats a present-but-empty driver-supplied argument
+        // as a fatal misconfiguration, so never accept (and later pass) one.
         if let Some(list) = self.no_proxy.as_deref() {
             if list.trim().is_empty() {
                 return Err(crate::client::PodmanApiError::InvalidInput(
@@ -521,6 +521,16 @@ mod tests {
                 "{url}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn validate_proxy_config_rejects_zero_port() {
+        let cfg = PodmanComputeConfig {
+            https_proxy: Some("http://proxy.corp.com:0".to_string()),
+            ..PodmanComputeConfig::default()
+        };
+        let err = cfg.validate_proxy_config().unwrap_err();
+        assert!(err.to_string().contains("port must not be 0"), "{err}");
     }
 
     #[test]

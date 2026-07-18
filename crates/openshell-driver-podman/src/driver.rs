@@ -132,9 +132,16 @@ async fn create_sandbox_proxy_auth_secret(
         return Ok(None);
     };
 
-    let raw = tokio::fs::read_to_string(path).await.map_err(|e| {
-        ComputeDriverError::Message(format!("failed to read proxy_auth_file '{path}': {e}"))
-    })?;
+    // Bounded, blocking read shared with the supervisor: rejects non-regular
+    // files (e.g. /dev/zero) and caps the size so a hostile path cannot
+    // exhaust gateway memory.
+    let path_owned = path.to_string();
+    let raw = tokio::task::spawn_blocking(move || {
+        openshell_core::driver_utils::read_upstream_proxy_credential_file(&path_owned)
+    })
+    .await
+    .map_err(|e| ComputeDriverError::Message(format!("proxy_auth_file read task failed: {e}")))?
+    .map_err(ComputeDriverError::Message)?;
     let credential =
         openshell_core::driver_utils::parse_upstream_proxy_credential(&raw).map_err(|err| {
             ComputeDriverError::InvalidArgument(format!("proxy_auth_file '{path}': {err}"))

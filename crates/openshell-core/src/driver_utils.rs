@@ -128,6 +128,11 @@ pub enum UpstreamProxyUrlError {
     /// silently dialing port 80.
     #[error("proxy URL must include an explicit proxy port, e.g. http://proxy.corp.com:3128")]
     MissingPort,
+    /// The URL specifies port `0`, which is not a connectable TCP port. It
+    /// would pass startup validation but fail every proxied dial, so it is
+    /// rejected up front.
+    #[error("proxy URL port must not be 0")]
+    ZeroPort,
     /// The URL embeds `user:pass@` credentials, which would leak into config
     /// and container metadata. Credentials must come from the proxy auth file.
     #[error("proxy URL must not embed credentials; supply them via the proxy auth file")]
@@ -197,13 +202,14 @@ pub fn parse_upstream_proxy_url(raw: &str) -> Result<UpstreamProxyAddr, Upstream
     if !authority_has_explicit_port(trimmed) {
         return Err(UpstreamProxyUrlError::MissingPort);
     }
-    Ok(UpstreamProxyAddr {
-        host,
-        // Explicit-port presence was verified above; `port()` is `None` only
-        // when the URL spells out the scheme default (`:80`), which the url
-        // crate normalizes away.
-        port: parsed.port().unwrap_or(80),
-    })
+    // Explicit-port presence was verified above; `port()` is `None` only
+    // when the URL spells out the scheme default (`:80`), which the url crate
+    // normalizes away.
+    let port = parsed.port().unwrap_or(80);
+    if port == 0 {
+        return Err(UpstreamProxyUrlError::ZeroPort);
+    }
+    Ok(UpstreamProxyAddr { host, port })
 }
 
 /// Return `true` when the raw URL's authority carries an explicit `:port`.
@@ -288,6 +294,59 @@ pub fn parse_upstream_proxy_credential(raw: &str) -> Result<&str, UpstreamProxyC
         Some(("", _)) => Err(UpstreamProxyCredentialError::EmptyUser),
         Some(_) => Ok(credential),
     }
+}
+
+/// Hard upper bound on the size of a proxy-auth credential file.
+///
+/// A `user:pass` credential is tiny; this cap only exists to stop a hostile
+/// or misconfigured path (a huge file, or a special file such as
+/// `/dev/zero`) from exhausting memory during a bounded read.
+pub const MAX_UPSTREAM_PROXY_CREDENTIAL_BYTES: u64 = 4096;
+
+/// Read a proxy-auth credential file with a hard size bound.
+///
+/// Rejects non-regular files (e.g. `/dev/zero`, directories, FIFOs) and
+/// files larger than [`MAX_UPSTREAM_PROXY_CREDENTIAL_BYTES`], and reads at
+/// most that many bytes, so a hostile or misconfigured path cannot exhaust
+/// gateway or supervisor memory. Returns the raw contents; callers pass the
+/// result to [`parse_upstream_proxy_credential`].
+///
+/// Shared by the compute driver (at sandbox-create time) and the in-container
+/// supervisor so both enforce the same bound. This is a blocking read; async
+/// callers should wrap it (e.g. `tokio::task::spawn_blocking`).
+///
+/// # Errors
+///
+/// Returns a descriptive error (never containing file contents) when the path
+/// cannot be opened or stat'd, is not a regular file, or exceeds the size
+/// bound.
+pub fn read_upstream_proxy_credential_file(path: &str) -> Result<String, String> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("failed to open proxy auth file '{path}': {e}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("failed to stat proxy auth file '{path}': {e}"))?;
+    if !metadata.is_file() {
+        return Err(format!("proxy auth file '{path}' is not a regular file"));
+    }
+    if metadata.len() > MAX_UPSTREAM_PROXY_CREDENTIAL_BYTES {
+        return Err(format!(
+            "proxy auth file '{path}' exceeds the {MAX_UPSTREAM_PROXY_CREDENTIAL_BYTES}-byte limit"
+        ));
+    }
+    // Bound the read even if the file grows between stat and read.
+    let mut buf = String::new();
+    file.take(MAX_UPSTREAM_PROXY_CREDENTIAL_BYTES + 1)
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("failed to read proxy auth file '{path}': {e}"))?;
+    if buf.len() as u64 > MAX_UPSTREAM_PROXY_CREDENTIAL_BYTES {
+        return Err(format!(
+            "proxy auth file '{path}' exceeds the {MAX_UPSTREAM_PROXY_CREDENTIAL_BYTES}-byte limit"
+        ));
+    }
+    Ok(buf)
 }
 
 /// Return the XDG state path for a driver's sandbox JWT token file.
@@ -427,6 +486,19 @@ mod tests {
     }
 
     #[test]
+    fn upstream_proxy_url_rejects_zero_port() {
+        // Port 0 parses as an explicit port but is not connectable; reject it
+        // up front instead of failing every proxied dial later.
+        for url in ["http://proxy.corp.com:0", "http://[fd00::1]:0"] {
+            assert_eq!(
+                parse_upstream_proxy_url(url),
+                Err(UpstreamProxyUrlError::ZeroPort),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
     fn upstream_proxy_url_ipv6_host_is_bracket_free() {
         let addr = parse_upstream_proxy_url("http://[fd00::1]:8080").unwrap();
         assert_eq!(addr.host, "fd00::1");
@@ -530,5 +602,42 @@ mod tests {
             parse_upstream_proxy_credential(":pass"),
             Err(UpstreamProxyCredentialError::EmptyUser)
         );
+    }
+
+    #[test]
+    fn credential_file_reads_within_the_size_bound() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "user:pass\n").unwrap();
+        let raw = read_upstream_proxy_credential_file(file.path().to_str().unwrap()).unwrap();
+        assert_eq!(parse_upstream_proxy_credential(&raw), Ok("user:pass"));
+    }
+
+    #[test]
+    fn credential_file_rejects_oversized_files() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let huge = vec![b'a'; usize::try_from(MAX_UPSTREAM_PROXY_CREDENTIAL_BYTES + 1).unwrap()];
+        std::fs::write(file.path(), &huge).unwrap();
+        let err = read_upstream_proxy_credential_file(file.path().to_str().unwrap()).unwrap_err();
+        assert!(err.contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn credential_file_rejects_non_regular_files() {
+        // A directory is a non-regular path; /dev/zero would be rejected the
+        // same way (not a regular file) without risking an unbounded read.
+        let dir = tempfile::tempdir().unwrap();
+        let err = read_upstream_proxy_credential_file(dir.path().to_str().unwrap()).unwrap_err();
+        assert!(err.contains("regular file"), "{err}");
+
+        if std::path::Path::new("/dev/zero").exists() {
+            let err = read_upstream_proxy_credential_file("/dev/zero").unwrap_err();
+            assert!(err.contains("regular file"), "{err}");
+        }
+    }
+
+    #[test]
+    fn credential_file_missing_path_is_an_error() {
+        let err = read_upstream_proxy_credential_file("/nonexistent/proxy-auth").unwrap_err();
+        assert!(err.contains("open proxy auth file"), "{err}");
     }
 }
