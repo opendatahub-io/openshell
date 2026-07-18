@@ -1556,6 +1556,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validated_ip_connect_tunnels_to_upstream_tls_verified_by_hostname() {
+        // End-to-end composition of the SSRF-to-TLS boundary: a validated
+        // address is CONNECTed to the corporate proxy (never the hostname),
+        // the proxy tunnels to the destination, and upstream TLS is verified
+        // against the original hostname carried in SNI. Covers both a
+        // matching-hostname success and a mismatched-certificate rejection.
+        use crate::l7::tls;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::copy_bidirectional;
+
+        const SERVER_HOSTNAME: &str = "upstream.example.test";
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Trusted CA; the client config trusts it, and the fake upstream
+        // server presents a leaf for SERVER_HOSTNAME signed by it.
+        let ca = tls::SandboxCa::generate().unwrap();
+        let client_config = tls::build_upstream_client_config(ca.cert_pem());
+        let tls_state = Arc::new(tls::ProxyTlsState::new(
+            tls::CertCache::new(ca),
+            tls::build_upstream_client_config(""),
+        ));
+
+        // Fake upstream TLS server: accepts tunneled connections and completes
+        // a TLS handshake presenting the SERVER_HOSTNAME cert.
+        let tls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tls_addr = tls_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((conn, _)) = tls_listener.accept().await {
+                let state = tls_state.clone();
+                tokio::spawn(async move {
+                    let _ = tls::tls_terminate_client(conn, &state, SERVER_HOSTNAME).await;
+                });
+            }
+        });
+
+        // Fake corporate proxy: records each CONNECT request line and splices
+        // the tunnel to the upstream TLS server.
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let connect_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let connect_lines = connect_lines.clone();
+            tokio::spawn(async move {
+                while let Ok((mut client, _)) = proxy_listener.accept().await {
+                    let connect_lines = connect_lines.clone();
+                    tokio::spawn(async move {
+                        let request = read_request(&mut client).await;
+                        connect_lines
+                            .lock()
+                            .unwrap()
+                            .push(request.lines().next().unwrap_or_default().to_string());
+                        client
+                            .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                            .await
+                            .unwrap();
+                        if let Ok(mut upstream) = TcpStream::connect(tls_addr).await {
+                            let _ = copy_bidirectional(&mut client, &mut upstream).await;
+                        }
+                    });
+                }
+            });
+        }
+
+        let endpoint = endpoint_for(proxy_addr, None);
+
+        // Success: CONNECT to the validated IP, TLS verified against the
+        // requested hostname.
+        let stream =
+            connect_via_validated(&endpoint, SERVER_HOSTNAME, tls_addr.port(), &[tls_addr])
+                .await
+                .unwrap();
+        tls::tls_connect_upstream(stream, SERVER_HOSTNAME, &client_config)
+            .await
+            .expect("TLS must verify for the requested hostname");
+
+        // The proxy saw the validated IP in the CONNECT authority, never the
+        // hostname — the tunnel is bound to the SSRF-validated address.
+        {
+            let lines = connect_lines.lock().unwrap();
+            let line = lines.last().expect("proxy received a CONNECT");
+            assert!(
+                line.starts_with(&format!("CONNECT {}:", tls_addr.ip())),
+                "CONNECT must target the validated IP: {line}"
+            );
+            assert!(
+                !line.contains(SERVER_HOSTNAME),
+                "hostname must not appear in the CONNECT authority: {line}"
+            );
+        }
+
+        // Mismatch: the same validated tunnel, but verifying a different
+        // hostname must fail — the server cert is only valid for
+        // SERVER_HOSTNAME, so a rebinding/split-horizon substitution cannot
+        // pass certificate verification.
+        let stream = connect_via_validated(
+            &endpoint,
+            "wrong.example.test",
+            tls_addr.port(),
+            &[tls_addr],
+        )
+        .await
+        .unwrap();
+        assert!(
+            tls::tls_connect_upstream(stream, "wrong.example.test", &client_config)
+                .await
+                .is_err(),
+            "TLS must reject a certificate that does not match the requested hostname"
+        );
+    }
+
+    #[tokio::test]
     async fn connect_via_sends_hostname_on_operator_opt_in() {
         let (addr, handle) = fake_proxy("HTTP/1.1 200 Connection established\r\n\r\n").await;
         let endpoint = endpoint_for(addr, None);
