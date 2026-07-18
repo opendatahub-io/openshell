@@ -323,8 +323,21 @@ pub const MAX_UPSTREAM_PROXY_CREDENTIAL_BYTES: u64 = 4096;
 pub fn read_upstream_proxy_credential_file(path: &str) -> Result<String, String> {
     use std::io::Read as _;
 
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("failed to open proxy auth file '{path}': {e}"))?;
+    // On Unix, open non-blocking so a FIFO with no writer does not hang the
+    // open() call indefinitely; the regular-file check below then rejects it.
+    // O_NONBLOCK has no effect on the subsequent read of a regular file.
+    #[cfg(unix)]
+    let open_result = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(path)
+    };
+    #[cfg(not(unix))]
+    let open_result = std::fs::File::open(path);
+
+    let file = open_result.map_err(|e| format!("failed to open proxy auth file '{path}': {e}"))?;
     let metadata = file
         .metadata()
         .map_err(|e| format!("failed to stat proxy auth file '{path}': {e}"))?;
@@ -639,5 +652,24 @@ mod tests {
     fn credential_file_missing_path_is_an_error() {
         let err = read_upstream_proxy_credential_file("/nonexistent/proxy-auth").unwrap_err();
         assert!(err.contains("open proxy auth file"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_file_rejects_fifo_without_hanging() {
+        // A FIFO with no writer would block a blocking open() forever. The
+        // reader opens non-blocking and rejects the non-regular file, so it
+        // must return promptly even though nothing ever opens the write end.
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("proxy-auth-fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+
+        let start = std::time::Instant::now();
+        let err = read_upstream_proxy_credential_file(fifo.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("regular file"), "{err}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "reading a FIFO must not block"
+        );
     }
 }
