@@ -186,12 +186,20 @@ impl NoProxy {
     /// `(host, port)`, or `None` when no entry matches and the corporate
     /// proxy must be used.
     ///
-    /// Hostname-level matches — loopback, `*`, a domain entry, or an IP/CIDR
-    /// entry matching an IP-literal host — authorize every validated
-    /// address. IP/CIDR entries match hostnames through their *resolved*
-    /// addresses and authorize only the addresses they contain, so a bypass
-    /// scoped to an internal range can never widen into a direct dial of an
-    /// address outside that range.
+    /// Hostname-level matches — `*`, a domain entry, or an IP/CIDR entry
+    /// matching an IP-literal host — authorize every validated address.
+    /// IP/CIDR entries match hostnames through their *resolved* addresses and
+    /// authorize only the addresses they contain, so a bypass scoped to an
+    /// internal range can never widen into a direct dial of an address
+    /// outside that range.
+    ///
+    /// The automatic loopback bypass is derived from resolved addresses, never
+    /// from the host string: `resolved` may come from the sandbox's own
+    /// `/etc/hosts` (see `resolve_socket_addrs`), which the workload controls,
+    /// so treating the name `localhost` as proof of loopback would let a
+    /// spoofed mapping dial a policy-allowed public address while escaping the
+    /// operator proxy. A spoofed `localhost` falls through to the entries below
+    /// and is proxied unless an explicit `NO_PROXY` entry matches.
     fn direct_addrs(
         &self,
         host: &str,
@@ -199,7 +207,16 @@ impl NoProxy {
         resolved: &[SocketAddr],
     ) -> Option<Vec<SocketAddr>> {
         let host_ip = host.trim_matches(['[', ']']).parse::<IpAddr>().ok();
-        if host == "localhost" || host_ip.is_some_and(|ip| ip.is_loopback()) {
+        if let Some(ip) = host_ip {
+            // An IP literal is its own destination, so the host string is
+            // authoritative here.
+            if ip.is_loopback() {
+                return Some(resolved.to_vec());
+            }
+        } else if host == "localhost"
+            && !resolved.is_empty()
+            && resolved.iter().all(|addr| addr.ip().is_loopback())
+        {
             return Some(resolved.to_vec());
         }
         let mut subset: Vec<SocketAddr> = Vec::new();
@@ -1206,6 +1223,10 @@ mod tests {
         matches!(cfg.decision(host, port, &[]), ProxyDecision::Direct(_))
     }
 
+    fn bypasses_with(cfg: &UpstreamProxyConfig, host: &str, resolved: &[SocketAddr]) -> bool {
+        matches!(cfg.decision(host, 443, resolved), ProxyDecision::Direct(_))
+    }
+
     fn sock(ip: &str, port: u16) -> SocketAddr {
         SocketAddr::new(ip.parse().unwrap(), port)
     }
@@ -1383,13 +1404,58 @@ mod tests {
     }
 
     #[test]
-    fn loopback_and_localhost_always_bypass() {
+    fn loopback_bypasses_without_no_proxy() {
         // No NO_PROXY at all: loopback still bypasses unconditionally.
         let cfg = config_ok(&[(HTTPS_PROXY, "http://proxy:8080")]);
-        assert!(bypasses(&cfg, "localhost"));
+        assert!(bypasses_with(&cfg, "localhost", &[sock("127.0.0.1", 443)]));
         assert!(bypasses(&cfg, "127.0.0.1"));
         assert!(bypasses(&cfg, "::1"));
         assert!(!bypasses(&cfg, "example.com"));
+    }
+
+    /// A sandbox controls its own `/etc/hosts`, and `resolve_socket_addrs`
+    /// consults it before DNS, so `localhost` can resolve to any address the
+    /// network policy happens to allow. The name must not authorize a direct
+    /// dial that escapes the operator proxy — only genuinely loopback
+    /// resolved addresses may.
+    #[test]
+    fn spoofed_localhost_resolution_does_not_bypass_proxy() {
+        let cfg = config_ok(&[(HTTPS_PROXY, "http://proxy:8080")]);
+        assert!(!bypasses_with(
+            &cfg,
+            "localhost",
+            &[sock("203.0.113.10", 443)]
+        ));
+        // A mixed answer is not partially honored: one non-loopback address
+        // disqualifies the automatic bypass entirely.
+        assert!(!bypasses_with(
+            &cfg,
+            "localhost",
+            &[sock("127.0.0.1", 443), sock("203.0.113.10", 443)],
+        ));
+        // An empty resolution proves nothing about the destination.
+        assert!(!bypasses_with(&cfg, "localhost", &[]));
+        // Genuine loopback resolution still bypasses, including IPv6 and
+        // dual-stack answers.
+        assert!(bypasses_with(&cfg, "localhost", &[sock("127.0.0.1", 443)]));
+        assert!(bypasses_with(&cfg, "localhost", &[sock("::1", 443)]));
+        assert!(bypasses_with(
+            &cfg,
+            "localhost",
+            &[sock("127.0.0.1", 443), sock("::1", 443)],
+        ));
+    }
+
+    /// Losing the automatic bypass does not disable an operator's explicit
+    /// `NO_PROXY` entry: the operator, not the sandbox, declares that one.
+    #[test]
+    fn spoofed_localhost_still_honors_explicit_no_proxy_entry() {
+        let cfg = no_proxy_cfg("localhost");
+        assert!(bypasses_with(
+            &cfg,
+            "localhost",
+            &[sock("203.0.113.10", 443)]
+        ));
     }
 
     // -- CONNECT handshake --
