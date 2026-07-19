@@ -335,14 +335,15 @@ impl GatewayProxyConfig {
         if self.restored {
             return Ok(());
         }
-        self.restored = true;
         std::fs::write(&self.config_path, &self.original).map_err(|err| {
             format!(
                 "restore gateway config '{}': {err}",
                 self.config_path.display()
             )
         })?;
-        restart_gateway().await
+        restart_gateway().await?;
+        self.restored = true;
+        Ok(())
     }
 }
 
@@ -351,10 +352,18 @@ impl Drop for GatewayProxyConfig {
         if self.restored {
             return;
         }
-        // Panic path: put the original config back so later test binaries in
-        // this run do not inherit the proxy settings. `ManagedGateway::drop`
-        // restarts the gateway from the restored file.
+        // Panic path: put the original config back and synchronously restart the
+        // gateway so later test binaries in this run inherit neither the proxy
+        // settings on disk nor the temporary configuration still loaded in the
+        // running process. Nothing else restarts it here: the only
+        // `ManagedGateway` is the short-lived one inside `restart_gateway`, and
+        // its `Drop` only calls `start`, which does not reload config for an
+        // already-running gateway.
         let _ = std::fs::write(&self.config_path, &self.original);
+        if let Ok(Some(gateway)) = ManagedGateway::from_env() {
+            let _ = gateway.stop();
+            let _ = gateway.start();
+        }
     }
 }
 
