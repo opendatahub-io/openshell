@@ -722,6 +722,11 @@ impl PodmanComputeDriver {
             }
             cleanup_sandbox_token_secret(&self.client, &container::token_secret_name(sandbox_id))
                 .await;
+            cleanup_sandbox_proxy_auth_secret(
+                &self.client,
+                &container::proxy_auth_secret_name(sandbox_id),
+            )
+            .await;
             return Ok(false);
         };
         info!(sandbox_id = %sandbox_id, container = %container_id, "Deleting sandbox container");
@@ -1608,7 +1613,7 @@ mod tests {
 
     fn proxy_auth_config(socket_path: PathBuf, auth_file: &Path) -> PodmanComputeConfig {
         PodmanComputeConfig {
-            socket_path,
+            socket_path: Some(socket_path),
             stop_timeout_secs: 10,
             proxy_auth_file: Some(auth_file.to_string_lossy().into_owned()),
             proxy_auth_allow_insecure: Some(true),
@@ -1621,6 +1626,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             namespace: String::new(),
+            workspace: String::new(),
             spec: None,
             status: None,
         }
@@ -1722,10 +1728,8 @@ mod tests {
         let (socket_path, request_log, handle) = spawn_podman_stub(
             "delete-proxy-auth",
             vec![
-                StubResponse::new(StatusCode::NOT_FOUND, r#"{"message":"gone"}"#), // inspect
-                StubResponse::new(StatusCode::NOT_FOUND, r#"{"message":"gone"}"#), // stop
-                StubResponse::new(StatusCode::NOT_FOUND, r#"{"message":"gone"}"#), // remove container
-                StubResponse::new(StatusCode::NO_CONTENT, ""),                     // remove volume
+                StubResponse::new(StatusCode::OK, "[]"), // list_containers (not found)
+                StubResponse::new(StatusCode::NO_CONTENT, ""), // remove volume
                 StubResponse::new(StatusCode::NO_CONTENT, ""), // remove token secret
                 StubResponse::new(StatusCode::NO_CONTENT, ""), // remove proxy-auth secret
             ],
@@ -1733,7 +1737,7 @@ mod tests {
         let driver = test_driver(socket_path.clone());
 
         driver
-            .delete_sandbox(sandbox_id, "demo")
+            .delete_sandbox(sandbox_id)
             .await
             .expect("delete should succeed");
 
