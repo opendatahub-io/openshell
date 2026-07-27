@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Build Konflux images locally using Hermeto prefetched dependencies.
+# Replicates the Konflux hermetic build pipeline (--network none).
+#
+# Prerequisites:
+#   - hermeto (pip install git+https://github.com/hermetoproject/hermeto.git)
+#   - podman
+#
+# Usage:
+#   ./deploy/konflux/build-local.sh gateway
+#   ./deploy/konflux/build-local.sh supervisor
+#   ./deploy/konflux/build-local.sh all
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+OUTPUT_DIR="${REPO_ROOT}/hermeto-output"
+
+CLEANUP_PATHS=()
+cleanup() {
+    for p in "${CLEANUP_PATHS[@]}"; do
+        rm -rf "$p"
+    done
+    git -C "${REPO_ROOT}" checkout .cargo/config.toml 2>/dev/null || true
+}
+trap cleanup EXIT
+
+build_image() {
+    local component="$1"
+    local dockerfile konfig_dir output_dir repos_dir
+
+    case "$component" in
+        gateway)
+            dockerfile="deploy/docker/Dockerfile.konflux.gateway"
+            konfig_dir="deploy/konflux/gateway"
+            ;;
+        supervisor)
+            dockerfile="deploy/docker/Dockerfile.konflux.supervisor"
+            konfig_dir="deploy/konflux/supervisor"
+            ;;
+        *)
+            echo "Unknown component: $component" >&2
+            exit 1
+            ;;
+    esac
+
+    output_dir="${OUTPUT_DIR}/${component}"
+    repos_dir=$(mktemp -d)
+    CLEANUP_PATHS+=("${repos_dir}")
+
+    echo "=== Prefetching ${component} dependencies ==="
+    rm -rf "${output_dir}"
+    hermeto fetch-deps \
+        --source "${REPO_ROOT}" \
+        --output "${output_dir}" \
+        "[
+            {\"path\": \".\", \"type\": \"cargo\"},
+            {\"path\": \"${konfig_dir}\", \"type\": \"rpm\"},
+            {\"path\": \"${konfig_dir}\", \"type\": \"generic\", \"lockfile\": \"generic-fetcher.yaml\"}
+        ]"
+
+    echo "=== Injecting files ==="
+    hermeto inject-files "${output_dir}" --for-output-dir /cachi2
+    hermeto generate-env "${output_dir}" \
+        --format env --for-output-dir /cachi2 \
+        --output "${output_dir}/cachi2.env"
+
+    echo "=== Preparing RPM repos ==="
+    find "${output_dir}" -name "hermeto.repo" -execdir cp {} cachi2.repo \;
+    cp "${output_dir}"/deps/rpm/*/repos.d/cachi2.repo "${repos_dir}/"
+    chmod -R go+rX "${repos_dir}"
+
+    echo "=== Building ${component} (--network none) ==="
+    local hermetic_dockerfile
+    hermetic_dockerfile=$(mktemp)
+    CLEANUP_PATHS+=("${hermetic_dockerfile}")
+    cp "${REPO_ROOT}/${dockerfile}" "${hermetic_dockerfile}"
+    sed -i 's|^\s*RUN |RUN . /cachi2/cachi2.env \&\& \\\n    |i' "${hermetic_dockerfile}"
+
+    podman build \
+        -f "${hermetic_dockerfile}" \
+        --volume "$(realpath "${output_dir}"):/cachi2:Z" \
+        --volume "$(realpath "${repos_dir}"):/etc/yum.repos.d:Z" \
+        --network none \
+        -t "openshell-${component}-konflux" \
+        "${REPO_ROOT}"
+
+    echo "=== ${component} built successfully ==="
+    podman run --rm "openshell-${component}-konflux" --help 2>&1 | head -3
+    echo ""
+}
+
+if [[ $# -eq 0 ]]; then
+    echo "Usage: $0 {gateway|supervisor|all}" >&2
+    exit 1
+fi
+
+target="$1"
+if [[ "$target" == "all" ]]; then
+    build_image gateway
+    build_image supervisor
+else
+    build_image "$target"
+fi
