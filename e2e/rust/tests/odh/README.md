@@ -27,7 +27,8 @@ e2e/rust/tests/odh/
 ├── tier3/                      # Tier 3: negative and destructive tests
 │   └── mod.rs                    # empty — no scenarios yet
 ├── tiers.toml                  # tier → upstream test binaries + ODH module filter
-└── run-odh-test-tier.sh        # runner: entrypoint for tiered execution
+├── run-odh-test-tier.sh        # runner: entrypoint for tiered execution
+└── verify-image-provenance.sh  # post-run image registry/pull-policy check
 ```
 
 All ODH test functions compile into a single `odh` test binary
@@ -108,18 +109,22 @@ context you happen to have active elsewhere. This means:
 |---|---|
 | `mise run e2e:odh` | All ODH-specific tests (all tiers, `odh` binary only) |
 | `mise run e2e:odh:full` | All upstream e2e + e2e-kubernetes + ODH tests (see caveat below) |
-| `mise run e2e:odh:smoke` | Smoke tier: mapped upstream tests + ODH `smoke::` |
-| `mise run e2e:odh:tier1` | Tier 1: mapped upstream tests + ODH `tier1::` |
-| `mise run e2e:odh:tier2` | Tier 2: mapped upstream tests + ODH `tier2::` |
-| `mise run e2e:odh:tier3` | Tier 3: mapped upstream tests + ODH `tier3::` |
+| `mise run e2e:odh:smoke` | Smoke tier: mapped upstream tests + ODH `smoke::` + image provenance |
+| `mise run e2e:odh:tier1` | Tier 1: mapped upstream tests + ODH `tier1::` + image provenance |
+| `mise run e2e:odh:tier2` | Tier 2: mapped upstream tests + ODH `tier2::` + image provenance |
+| `mise run e2e:odh:tier3` | Tier 3: mapped upstream tests + ODH `tier3::` + image provenance |
 | `cargo test --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh -- test_name` | A single ODH test function |
 
 Example, running the Smoke tier against a real cluster:
 
 ```bash
 oc --kubeconfig ~/.kube/config config view --minify --flatten > kubeconfig
-mise run e2e:odh:smoke
+ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/" mise run e2e:odh:smoke
 ```
+
+`ALLOWED_IMAGE_REGISTRY_PREFIXES` is required by the image provenance step —
+see below. Set `NAMESPACE`/`RELEASE` too if your deployment doesn't use the
+defaults (`openshell`/`openshell`).
 
 ### Why `e2e:odh` / `e2e:odh:full` run more than you might expect
 
@@ -130,6 +135,41 @@ test --features e2e-odh` builds and runs **every** test binary whose
 `required-features` are satisfied by that chain — not just the `odh` binary.
 `e2e:odh` passes `--test odh` specifically to restrict to just the ODH
 binary; `e2e:odh:full` intentionally omits that filter to run everything.
+
+### `e2e:odh` / `e2e:odh:full` do not run the image provenance check
+
+Only the tiered tasks (`e2e:odh:smoke`/`tier1`/`tier2`/`tier3`) go through
+`run-odh-test-tier.sh`, which is what invokes
+`verify-image-provenance.sh` as a post-step. `e2e:odh` and `e2e:odh:full`
+call `cargo test` directly and skip it.
+
+## Image provenance verification
+
+After a tier's tests run, `run-odh-test-tier.sh` calls
+`verify-image-provenance.sh` to verify that every container image observed
+in the release's pods — plus the supervisor image referenced from the
+gateway's rendered config, since the supervisor never runs as its own pod —
+came from an authorized downstream registry, and that no container has
+regressed away from `imagePullPolicy: IfNotPresent`.
+
+```bash
+ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/" \
+  e2e/rust/tests/odh/verify-image-provenance.sh --namespace openshell --release openshell
+```
+
+- `ALLOWED_IMAGE_REGISTRY_PREFIXES` (required, comma-separated) — no default,
+  since an empty list would silently approve any image. This should be the
+  registry prefix your downstream build pipeline actually publishes to
+  (confirmed in practice to be `quay.io/opendatahub/` for this project).
+- `--namespace`/`--release` (or `NAMESPACE`/`RELEASE` env vars) default to
+  `openshell`/`openshell`.
+- The check is a registry-prefix allowlist, not an exact image/digest match.
+  It works because the downstream pipeline only ever publishes to one
+  registry — matching that prefix is sufficient proof an image (including
+  the supervisor) is the downstream build and not an upstream
+  `ghcr.io/nvidia/openshell/*` reference.
+- Skip it locally with `SKIP_IMAGE_PROVENANCE=1 mise run e2e:odh:smoke` (e.g.
+  if `oc` isn't configured for the target cluster in your current shell).
 
 ## Rebase guidance
 

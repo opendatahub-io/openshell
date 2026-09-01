@@ -6,10 +6,18 @@
 #
 # Reads tiers.toml (co-located with this script) to determine which upstream
 # test binaries and ODH test modules belong to the given tier, runs them, and
-# exits with the combined result.
+# then verifies image provenance against whatever pods are left running in
+# the target namespace.
 #
 # Usage:
 #   e2e/rust/tests/odh/run-odh-test-tier.sh <tier>
+#
+# Env:
+#   ALLOWED_IMAGE_REGISTRY_PREFIXES  Required by the provenance step unless
+#                                    it's skipped; see verify-image-provenance.sh.
+#   NAMESPACE, RELEASE               Passed through to the provenance step
+#                                    (defaults: openshell, openshell).
+#   SKIP_IMAGE_PROVENANCE=1          Skip the provenance step (local iteration).
 
 set -euo pipefail
 
@@ -69,6 +77,15 @@ if [ -n "$ODH_FILTER" ]; then
       --features e2e-odh --test odh -- "$ODH_FILTER" --nocapture; then
     overall_status=1
   fi
+fi
+
+if [ "${SKIP_IMAGE_PROVENANCE:-0}" != "1" ]; then
+  log "Verifying image provenance"
+  if ! "${SCRIPT_DIR}/verify-image-provenance.sh"; then
+    overall_status=1
+  fi
+else
+  log "Skipping image provenance check (SKIP_IMAGE_PROVENANCE=1)"
 fi
 
 exit "$overall_status"
