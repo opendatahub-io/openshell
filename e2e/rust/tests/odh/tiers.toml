@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Maps each test tier to the upstream e2e test binaries and the ODH test
+# module filter that belong to it. Read at runtime by run-odh-test-tier.sh.
+#
+# `upstream_tests` names `[[test]]` entries from e2e/rust/Cargo.toml (run via
+# `cargo test --test <name>`). `odh_filter` is a `cargo test` substring filter
+# applied to the `odh` test binary, matching module-path-prefixed test names
+# (e.g. "smoke::" runs every test under tests/odh/smoke/).
+#
+# The upstream test assignments below are placeholders — fill them in based
+# on actual test criticality and measured execution time.
+
+[smoke]
+description = "Component-level critical tests (5 min target)"
+upstream_tests = ["smoke"]
+odh_filter = "smoke::"
+
+[tier1]
+description = "High-priority tests excluding Smoke (15 min target)"
+upstream_tests = ["readyz_health", "sandbox_lifecycle", "user_namespaces"]
+odh_filter = "tier1::"
+
+[tier2]
+description = "Medium/low priority positive tests"
+upstream_tests = ["kubernetes_corporate_proxy", "workspace_lifecycle"]
+odh_filter = "tier2::"
+
+[tier3]
+description = "Negative and destructive tests"
+upstream_tests = []
+odh_filter = "tier3::"

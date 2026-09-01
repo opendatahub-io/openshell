@@ -36,6 +36,10 @@ e2e-podman-gpu = ["e2e-podman", "e2e-gpu"]
 e2e-oidc-pkce = []
 e2e-provider-refresh-keycloak = []
 e2e-vm = ["e2e", "e2e-host-gateway"]
+# opendatahub-io fork: downstream-only ODH/RHOAI e2e tests (see
+# e2e/rust/tests/odh/ and TESTING-odh.md). Inherits e2e-kubernetes so
+# upstream harness improvements propagate automatically.
+e2e-odh = ["e2e-kubernetes"]
 
 [[test]]
 name = "oidc_pkce"
@@ -181,6 +185,13 @@ required-features = ["e2e-kubernetes-workspace-operator"]
 name = "gpu"
 path = "tests/gpu.rs"
 required-features = ["e2e-gpu"]
+
+# opendatahub-io fork: downstream-only ODH/RHOAI e2e tests (see
+# e2e/rust/tests/odh/ and TESTING-odh.md).
+[[test]]
+name = "odh"
+path = "tests/odh/main.rs"
+required-features = ["e2e-odh"]
 
 [dependencies]
 base64 = "0.22"

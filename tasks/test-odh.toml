@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# opendatahub-io fork: downstream-only ODH/RHOAI e2e tasks.
+# Fork-only file — see e2e/rust/tests/odh/README.md.
+#
+# All tasks require oc CLI authenticated to an OpenShift cluster with
+# ODH/RHOAI installed and the OpenShell gateway deployed. e2e:odh:* tasks
+# additionally require ALLOWED_IMAGE_REGISTRY_PREFIXES for the image
+# provenance step (see verify-image-provenance.sh).
+
+["e2e:odh"]
+description = "Run all ODH-specific tests (all tiers, ODH binary only)"
+run = "cargo test --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh"
+
+["e2e:odh:full"]
+description = "Run all tiers (upstream e2e + e2e-kubernetes + ODH)"
+run = "cargo test --manifest-path e2e/rust/Cargo.toml --features e2e-odh"
+
+["e2e:odh:smoke"]
+description = "Run Smoke tier: upstream + ODH (5 min target)"
+run = "e2e/rust/tests/odh/run-odh-test-tier.sh smoke"
+
+["e2e:odh:tier1"]
+description = "Run Tier 1: upstream + ODH, high-priority (15 min target)"
+run = "e2e/rust/tests/odh/run-odh-test-tier.sh tier1"
+
+["e2e:odh:tier2"]
+description = "Run Tier 2: upstream + ODH, medium/low priority positive tests"
+run = "e2e/rust/tests/odh/run-odh-test-tier.sh tier2"
+
+["e2e:odh:tier3"]
+description = "Run Tier 3: upstream + ODH, negative and destructive tests"
+run = "e2e/rust/tests/odh/run-odh-test-tier.sh tier3"
