@@ -96,19 +96,23 @@ context you happen to have active elsewhere. This means:
   flow, which populates this file automatically), populate it yourself once:
 
   ```bash
+  umask 077
   oc --kubeconfig ~/.kube/config config view --minify --flatten > kubeconfig
+  chmod 600 kubeconfig
   ```
 
   (`--kubeconfig ~/.kube/config` is explicit on purpose — if mise's shell
   hook has already exported `KUBECONFIG` for this directory, an unqualified
-  `oc config view` would read from the very file you're trying to create.)
+  `oc config view` would read from the very file you're trying to create.
+  The `umask`/`chmod` keep the flattened cluster credentials — an mTLS
+  client cert and key — from being created group/world-readable.)
 
 ## How to run
 
 | Command | What runs |
 |---|---|
-| `mise run e2e:odh` | All ODH-specific tests (all tiers, `odh` binary only) |
-| `mise run e2e:odh:full` | All upstream e2e + e2e-kubernetes + ODH tests (see caveat below) |
+| `mise run e2e:odh` | All ODH-specific tests (all tiers, `odh` binary only) + image provenance |
+| `mise run e2e:odh:full` | All upstream e2e + e2e-kubernetes + ODH tests (see caveat below) + image provenance |
 | `mise run e2e:odh:smoke` | Smoke tier: mapped upstream tests + ODH `smoke::` + image provenance |
 | `mise run e2e:odh:tier1` | Tier 1: mapped upstream tests + ODH `tier1::` + image provenance |
 | `mise run e2e:odh:tier2` | Tier 2: mapped upstream tests + ODH `tier2::` + image provenance |
@@ -118,7 +122,9 @@ context you happen to have active elsewhere. This means:
 Example, running the Smoke tier against a real cluster:
 
 ```bash
+umask 077
 oc --kubeconfig ~/.kube/config config view --minify --flatten > kubeconfig
+chmod 600 kubeconfig
 ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/" mise run e2e:odh:smoke
 ```
 
@@ -130,23 +136,25 @@ defaults (`openshell`/`openshell`).
 
 `e2e-odh` is defined as `e2e-odh = ["e2e-kubernetes"]` in `Cargo.toml`, so it
 transitively activates the full upstream feature chain
-(`e2e` → `e2e-kubernetes` → `e2e-odh`). Without a `--test` filter, `cargo
+(`e2e-odh` → `e2e-kubernetes` → `e2e`). Without a `--test` filter, `cargo
 test --features e2e-odh` builds and runs **every** test binary whose
 `required-features` are satisfied by that chain — not just the `odh` binary.
 `e2e:odh` passes `--test odh` specifically to restrict to just the ODH
 binary; `e2e:odh:full` intentionally omits that filter to run everything.
 
-### `e2e:odh` / `e2e:odh:full` do not run the image provenance check
+### Every `e2e:odh*` task runs the image provenance check
 
-Only the tiered tasks (`e2e:odh:smoke`/`tier1`/`tier2`/`tier3`) go through
-`run-odh-test-tier.sh`, which is what invokes
-`verify-image-provenance.sh` as a post-step. `e2e:odh` and `e2e:odh:full`
-call `cargo test` directly and skip it.
+The tiered tasks (`e2e:odh:smoke`/`tier1`/`tier2`/`tier3`) go through
+`run-odh-test-tier.sh`, which invokes `verify-image-provenance.sh` as a
+post-step. `e2e:odh` and `e2e:odh:full` call `cargo test` directly instead,
+but wrap it so the provenance check still runs unconditionally afterward and
+the task fails if either the tests or the provenance check failed — neither
+short-circuits the other, so a passing test run can't mask a provenance
+failure (or vice versa).
 
 ## Image provenance verification
 
-After a tier's tests run, `run-odh-test-tier.sh` calls
-`verify-image-provenance.sh` to verify that every container image observed
+After the tests run, `verify-image-provenance.sh` verifies that every container image observed
 in the release's pods — plus the supervisor image referenced from the
 gateway's rendered config, since the supervisor never runs as its own pod —
 came from an authorized downstream registry, and that no container has

@@ -9,6 +9,8 @@ use std::time::Duration;
 use openshell_e2e::harness::binary::openshell_cmd;
 use openshell_e2e::harness::output::strip_ansi;
 
+const STATUS_TIMEOUT: Duration = Duration::from_secs(15);
+
 #[tokio::test]
 async fn test_reachable() {
     let mut clean_status = String::new();
@@ -20,9 +22,9 @@ async fn test_reachable() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let status_out = status_cmd
-            .output()
+        let status_out = tokio::time::timeout(STATUS_TIMEOUT, status_cmd.output())
             .await
+            .expect("openshell status timed out")
             .expect("failed to run openshell status");
 
         let status_text = format!(
