@@ -1,0 +1,130 @@
+# GitLab CI for a project that pull-mirrors https://github.com/opendatahub-io/openshell.
+# Builds the EL9 RPMs in deploy/rpm/el9/ with rust from an internal RHEL AI
+# compose repository. See deploy/rpm/el9/README.md.
+#
+# Required project CI/CD variables (Settings > CI/CD > Variables):
+#   RHELAI_REPO_FILE   type File: dnf .repo file for the RHEL AI compose ($rhelaiver expands)
+#   RH_IT_CA_FILE      type File: internal root CA (PEM) for the compose host
+#   OPENSHELL_GITLAB_RPM_CI  set to "true" to enable this pipeline on the mirror project
+#
+# Optional variables:
+#   RHELAI_VERSION     compose version, 3.5 -> rust 1.95.0, 3.6 -> rust 1.97.1
+#   RUST_MIN_VERSION   minimum rust version to install (default 1.94)
+
+workflow:
+  rules:
+    - if: $OPENSHELL_GITLAB_RPM_CI != "true"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "api"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH =~ /^feat\/rpm-build/
+
+variables:
+  RHELAI_VERSION: "3.5"
+  RUST_MIN_VERSION: "1.94"
+  BUILDER_IMAGE: $CI_REGISTRY_IMAGE/el9-builder
+  GIT_DEPTH: "0"
+
+stages:
+  - image
+  - sources
+  - build
+  - publish
+
+.arch-matrix:
+  parallel:
+    matrix:
+      - ARCH: [x86_64, aarch64]
+  tags:
+    - aipcc-small-$ARCH
+
+builder-image:
+  stage: image
+  extends: .arch-matrix
+  image: quay.io/buildah/stable:v1.40.1
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"
+    - changes:
+        - deploy/rpm/el9/Containerfile.builder
+        - .gitlab-ci.yml
+  script:
+    - buildah login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - >
+      buildah build --layers
+      --secret id=rhelai_repo,src="$RHELAI_REPO_FILE"
+      --secret id=rh_it_ca,src="$RH_IT_CA_FILE"
+      --build-arg RHELAI_VERSION="$RHELAI_VERSION"
+      --build-arg RUST_MIN_VERSION="$RUST_MIN_VERSION"
+      -f deploy/rpm/el9/Containerfile.builder
+      -t "$BUILDER_IMAGE:$ARCH-$CI_COMMIT_SHORT_SHA"
+      -t "$BUILDER_IMAGE:$ARCH"
+      .
+    - buildah push "$BUILDER_IMAGE:$ARCH-$CI_COMMIT_SHORT_SHA"
+    - buildah push "$BUILDER_IMAGE:$ARCH"
+
+sources:
+  stage: sources
+  image: $BUILDER_IMAGE:x86_64
+  tags:
+    - aipcc-small-x86_64
+  needs:
+    - job: builder-image
+      optional: true
+  cache:
+    key:
+      files:
+        - Cargo.lock
+    paths:
+      - deploy/rpm/el9/_sources/*-vendor.tar.xz*
+  script:
+    - git fetch --tags --force
+    - deploy/rpm/el9/make-sources.sh --reuse-vendor
+  artifacts:
+    paths:
+      - deploy/rpm/el9/_sources/
+    reports:
+      dotenv: deploy/rpm/el9/_sources/build.env
+    expire_in: 1 week
+
+rpm:
+  stage: build
+  extends: .arch-matrix
+  image: $BUILDER_IMAGE:$ARCH
+  needs:
+    - sources
+  timeout: 3h
+  script:
+    - deploy/rpm/el9/build-rpm.sh
+    - mkdir -p "rpms/$ARCH"
+    - find deploy/rpm/el9/_rpmbuild/RPMS deploy/rpm/el9/_rpmbuild/SRPMS -name '*.rpm' -exec cp {} "rpms/$ARCH/" \;
+    - rpmlint "rpms/$ARCH"/*.rpm || true
+    - deploy/rpm/el9/smoke-test.sh "rpms/$ARCH" "$OPENSHELL_GIT_VERSION"
+  artifacts:
+    paths:
+      - rpms/
+    expire_in: 1 month
+
+publish:
+  stage: publish
+  image: $BUILDER_IMAGE:x86_64
+  tags:
+    - aipcc-small-x86_64
+  needs:
+    - sources
+    - rpm
+  rules:
+    - if: $CI_COMMIT_TAG
+    - when: manual
+      allow_failure: true
+  script:
+    - for arch in x86_64 aarch64; do createrepo_c "rpms/$arch"; done
+    - |
+      base="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/openshell/${OPENSHELL_RPM_VERSION}-${OPENSHELL_RPM_RELEASE}"
+      find rpms -name '*.rpm' | while read -r f; do
+        curl -fsS --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file "$f" "${base}/$(basename "$f")"
+      done
+  artifacts:
+    paths:
+      - rpms/
+    expire_in: 1 month

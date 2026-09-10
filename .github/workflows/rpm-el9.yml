@@ -1,0 +1,147 @@
+name: RPM (EL9)
+
+on:
+  pull_request:
+    paths:
+      - deploy/rpm/el9/**
+      - deploy/rpm/gateway.toml.default
+      - .github/workflows/rpm-el9.yml
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - proto/**
+      - providers/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUST_VERSION: 1.95.0
+  UBI_IMAGE: registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6
+
+jobs:
+  sources:
+    name: Sources (vendor tarball)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6
+    outputs:
+      git_version: ${{ steps.sources.outputs.git_version }}
+      cargo_lock_hash: ${{ steps.sources.outputs.cargo_lock_hash }}
+    steps:
+      - name: Install tools
+        run: dnf install -y --nodocs git-core tar xz
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install Rust toolchain
+        run: .github/workflows/scripts/rpm-el9-install-rust.sh x86_64
+
+      - name: Restore vendor tarball
+        id: vendor-cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: deploy/rpm/el9/_sources/*-vendor.tar.xz*
+          key: rpm-el9-vendor-${{ hashFiles('Cargo.lock') }}
+
+      - name: Prepare sources
+        id: sources
+        run: deploy/rpm/el9/make-sources.sh --reuse-vendor
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rpm-el9-sources
+          path: deploy/rpm/el9/_sources/
+          retention-days: 5
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    container:
+      image: registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y --nodocs --setopt=install_weak_deps=0 \
+            --enablerepo=ubi-9-codeready-builder-rpms \
+            rpm-build rpmdevtools gcc gcc-c++ make cmake \
+            gcc-toolset-14 gcc-toolset-14-gcc-c++ glibc-static \
+            systemd-rpm-macros binutils tar xz
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: .github/workflows/scripts/rpm-el9-install-rust.sh ${{ matrix.arch }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rpm-el9-sources
+          path: deploy/rpm/el9/_sources/
+
+      - name: Build RPMs
+        run: deploy/rpm/el9/build-rpm.sh --without system_rust
+
+      - name: Collect packages
+        run: |
+          mkdir -p artifacts
+          find deploy/rpm/el9/_rpmbuild/RPMS deploy/rpm/el9/_rpmbuild/SRPMS -name '*.rpm' -exec cp {} artifacts/ \;
+          ls -lah artifacts/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rpm-el9-${{ matrix.arch }}
+          path: artifacts/*.rpm
+          retention-days: 14
+
+  smoke:
+    name: Smoke test (${{ matrix.arch }})
+    needs: [sources, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    container:
+      image: registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rpm-el9-${{ matrix.arch }}
+          path: rpms/
+
+      - name: Install and verify
+        run: deploy/rpm/el9/smoke-test.sh rpms "${{ needs.sources.outputs.git_version }}"
