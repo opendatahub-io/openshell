@@ -5,15 +5,6 @@
 
 use openshell_e2e::harness::sandbox::SandboxGuard;
 
-/// Binary path the Kubernetes driver mounts the supervisor at and sets as the
-/// sandbox container's command, in both the default `Combined` topology
-/// (agent container command overridden to run this binary directly, so it
-/// becomes PID 1) and the opt-in `Sidecar` topology (agent container still
-/// runs this binary in `--mode=process`). See
-/// `crates/openshell-driver-kubernetes/src/driver.rs`
-/// (`SUPERVISOR_MOUNT_PATH`/`apply_supervisor_sideload_with_params`).
-const SUPERVISOR_BINARY_NAME: &str = "openshell-sandbox";
-
 #[tokio::test]
 async fn test_create_delete() {
     // A bare `echo` exits before the gateway's create-time readiness
@@ -30,17 +21,17 @@ async fn test_create_delete() {
         sb.create_output,
     );
 
-    // PID 1 inside the sandbox is always the supervisor binary — it wraps
-    // and supervises the user's process rather than the reverse — so this
-    // holds regardless of supervisor topology (Combined vs Sidecar) and
-    // regardless of whether the initial command has already exited.
-    let cmdline = sb
-        .exec(&["cat", "/proc/1/cmdline"])
+    // Exercise a distinct relay request after sandbox creation. This is valid
+    // for both supervisor topologies: sidecar pods share a process namespace,
+    // so PID 1 belongs to Kubernetes pod infrastructure rather than the
+    // process supervisor.
+    let output = sb
+        .exec(&["sh", "-c", "printf odh-exec-ok"])
         .await
-        .expect("exec into sandbox to inspect PID 1 should succeed");
+        .expect("exec into sandbox should succeed");
     assert!(
-        cmdline.contains(SUPERVISOR_BINARY_NAME),
-        "expected the supervisor ('{SUPERVISOR_BINARY_NAME}') to be PID 1 in the sandbox, got: {cmdline:?}",
+        output.contains("odh-exec-ok"),
+        "expected 'odh-exec-ok' in exec output:\n{output}",
     );
 
     sb.cleanup().await;

@@ -22,7 +22,8 @@ e2e/rust/tests/odh/
 │   ├── image_provenance.rs     # sandbox/gateway/supervisor image registry + pull-policy check
 │   └── sandbox.rs              # sandbox create/exec/delete + supervisor presence check
 ├── tier1/                     # Tier 1: high-priority tests, excluding Smoke
-│   └── mod.rs                    # empty — no scenarios yet
+│   ├── mod.rs
+│   └── selinux.rs              # combined/sidecar process-supervisor SELinux label
 ├── tier2/                     # Tier 2: medium/low priority positive tests
 │   └── mod.rs                    # empty — no scenarios yet
 ├── tier3/                      # Tier 3: negative and destructive tests
@@ -62,14 +63,11 @@ The upstream test assignments in `tiers.toml` are currently placeholders —
 they should be revisited based on measured execution time and actual test
 criticality, not just copied as-is.
 
-**Current implementation status:** only the Smoke tier has real test
-functions (`smoke::gateway::test_reachable`, `smoke::sandbox::test_create_delete`,
-`smoke::image_provenance::test_sandbox_gateway_supervisor_images`).
-Tier 1–3 are empty modules with no scenarios yet — running those tiers today
-executes 0 ODH tests (a legitimate `ok` result, not a failure) plus whatever
-upstream tests are mapped to them, plus the image provenance test (see
-below). Add scenarios by creating a `.rs` file under the tier's directory and
-declaring it with a `mod` line in that tier's `mod.rs`.
+Smoke covers gateway reachability, sandbox lifecycle, and image provenance.
+Tier 1 checks the process-supervisor SELinux label. Tier 2 and Tier 3 have no
+ODH scenarios yet; they run their mapped upstream tests and the image
+provenance check. Add scenarios by creating a `.rs` file under the tier's
+directory and declaring it with a `mod` line in that tier's `mod.rs`.
 
 ## Prerequisites
 
@@ -118,6 +116,7 @@ context you happen to have active elsewhere. This means:
 | `mise run e2e:odh:tier1` | Tier 1: mapped upstream tests + ODH `tier1::` + image provenance |
 | `mise run e2e:odh:tier2` | Tier 2: mapped upstream tests + ODH `tier2::` + image provenance |
 | `mise run e2e:odh:tier3` | Tier 3: mapped upstream tests + ODH `tier3::` + image provenance |
+| `mise run e2e:odh:selinux` | Deploys the standard upstream images, then runs Smoke, Tier 1, and Tier 2 on OCP; checks the process-supervisor label and fails on OpenShell AVCs after each test scenario |
 | `cargo test --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh -- test_name --exact` | A single ODH test function |
 
 Example, running the Smoke tier against a real cluster:
@@ -126,7 +125,7 @@ Example, running the Smoke tier against a real cluster:
 umask 077
 oc --kubeconfig ~/.kube/config config view --minify --flatten > kubeconfig
 chmod 600 kubeconfig
-ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/nvidia/openshell-community/sandboxes/" \
+ALLOWED_IMAGE_REGISTRY_PREFIXES="ghcr.io/nvidia/openshell/,ghcr.io/nvidia/openshell-community/sandboxes/" \
   mise run e2e:odh:smoke
 ```
 
@@ -136,6 +135,51 @@ defaults (`openshell`/`openshell`). The Helm chart's
 `server.sandboxImagePullPolicy` must also be set to `IfNotPresent` (it
 defaults to `""`, i.e. Kubernetes' own default of `Always` for the
 `:latest`-tagged sandbox image) — see below.
+
+### SELinux-enforcing OCP validation
+
+`mise run e2e:odh:selinux` is the SELinux-enforcing OCP validation lane. It deploys
+a temporary Helm release using the standard upstream gateway and supervisor images,
+then runs
+the lifecycle/exec Smoke scenario, Tier 1 (including Landlock filesystem
+enforcement and the supervisor process-label check; the upstream
+Docker-specific `user_namespaces` test is excluded), and Tier 2 (excluding the
+host-fixture Kubernetes corporate-proxy test, which is not reachable from a
+remote OCP cluster). It also runs downstream-only egress and
+filesystem-denial controls. Every selected test and downstream control scenario
+has its own node-local audit cutoff. The runner first requires `getenforce` to report
+`Enforcing` on worker nodes, then queries each of those nodes with
+`ausearch -m AVC -x` for the gateway and both supervisor executable paths:
+`/usr/local/bin/openshell-gateway` (the downstream gateway),
+`/opt/openshell/bin/openshell-sandbox` (the side-loaded combined/process
+supervisor) and `/openshell-sandbox` (the init-container and sidecar network
+supervisor). The executable filter avoids Linux's truncated process-name
+(`comm`) field. Any matching OpenShell AVC or audit-query failure fails the
+lane.
+
+The CI service account needs permission to create debug pods and host access
+that permits `chroot /host ausearch`. This is intentional: pod-local logs
+cannot establish whether the node SELinux policy denied an OpenShell process.
+The check matches the stable `container_t` type and does not pin the per-pod MCS
+category in the process supervisor's `/proc/<pid>/attr/current`.
+It locates the supervisor by its exact first command-line argument,
+`/opt/openshell/bin/openshell-sandbox`, in both combined and sidecar deployments.
+
+Image provenance runs once with Smoke because it validates the installed Helm
+release rather than a tier-specific behavior. Tier 1 and Tier 2 skip that
+duplicate sandbox creation, while keeping their own functional tests and AVC
+audit windows.
+
+Before Helm installs the release, the runner creates an authenticated proxy and
+TLS upstream as an in-cluster Service. The downstream egress control proves an
+approved request crossed that proxy with its Secret credentials and that a
+denied request fails closed without reaching it. The filesystem control proves
+that a write to `/dev/shm` is denied when only `/sandbox` and `/tmp` are
+permitted. Both controls run under the same AVC collection as the product tests.
+
+The task uses the same upstream image defaults as the other ODH PR tests and
+layers the lane-specific `IfNotPresent` pull policies required by the
+image-provenance test.
 
 ### Why `e2e:odh` / `e2e:odh:full` run more than you might expect
 
@@ -166,12 +210,12 @@ already covers it.
 `smoke::image_provenance::test_sandbox_gateway_supervisor_images` creates a
 sandbox, then verifies that its image, the gateway's image, and the
 supervisor image (read from the rendered gateway config, since the
-supervisor never runs as its own pod) all came from an authorized downstream
+supervisor never runs as its own pod) all came from an authorized
 registry, and that no container — including ephemeral containers — has
 regressed away from `imagePullPolicy: IfNotPresent`.
 
 ```bash
-ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/nvidia/openshell-community/sandboxes/" \
+ALLOWED_IMAGE_REGISTRY_PREFIXES="ghcr.io/nvidia/openshell/,ghcr.io/nvidia/openshell-community/sandboxes/" \
   cargo test --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh \
   -- smoke::image_provenance::
 ```
@@ -180,25 +224,22 @@ ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/nvidia/openshell-c
   must end in `/`) — no default, since an empty list would silently approve
   any image. This should include every registry prefix your deployment
   legitimately pulls from:
-  - `quay.io/opendatahub/` — confirmed in practice for this project's
-    gateway/supervisor/CLI builds.
+  - `ghcr.io/nvidia/openshell/` — the standard upstream gateway,
+    supervisor, and CLI image prefix.
   - `ghcr.io/nvidia/openshell-community/sandboxes/` — the sandbox default
     image (`server.sandboxImage` in the Helm chart). There is no
     downstream-built sandbox base image yet (only `gateway`, `supervisor`,
     and `cli` have Tekton pipelines under `.tekton/`), so this upstream
     prefix has to stay allowed until one exists. This is a different path
-    than the upstream gateway/CLI images
-    (`ghcr.io/nvidia/openshell/*`), which this check is meant to reject.
+    alongside the upstream gateway and CLI images.
 
   A prefix without a trailing `/` is rejected outright, since it could
   otherwise match a lookalike host (e.g. `registry.redhat.io` would also
   match `registry.redhat.io.attacker.example/image`).
 - `NAMESPACE`/`RELEASE` env vars default to `openshell`/`openshell`.
 - The check is a registry-prefix allowlist, not an exact image/digest match.
-  It works because the downstream pipeline only ever publishes to one
-  registry — matching that prefix is sufficient proof an image (including
-  the supervisor) is the downstream build and not an upstream
-  `ghcr.io/nvidia/openshell/*` reference.
+  The allowlist is explicit about both the upstream gateway images and the
+  upstream sandbox image.
 - The `imagePullPolicy: IfNotPresent` check applies to every container,
   including the sandbox pod's. The Helm chart's `server.sandboxImagePullPolicy`
   defaults to `""` (Kubernetes' own default, which is `Always` for a
@@ -206,7 +247,9 @@ ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/nvidia/openshell-c
   set it explicitly, e.g. `--set server.sandboxImagePullPolicy=IfNotPresent`,
   or this check fails on a freshly installed chart.
 - Requires the `oc` CLI in PATH with a kubeconfig targeting the cluster (same
-  as the rest of this suite).
+  as the rest of this suite). When `OPENSHELL_E2E_KUBE_CONTEXT_ACTIVE` is set,
+  all provenance queries use that context; otherwise they use the kubeconfig's
+  current context.
 - Skip it locally with `SKIP_IMAGE_PROVENANCE=1 mise run e2e:odh:tier1` (e.g.
   if `oc` isn't configured for the target cluster in your current shell) —
   this only affects the tiered tasks' extra step; `e2e:odh`/`e2e:odh:full`/
