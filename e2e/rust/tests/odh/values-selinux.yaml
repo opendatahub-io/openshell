@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Downstream qualification consumes a selected image release. Do not silently
+# repull a mutable tag while validating its provenance.
+
+image:
+  pullPolicy: IfNotPresent
+
+supervisor:
+  image:
+    pullPolicy: IfNotPresent
+
+server:
+  # The generic Skaffold values point at a local observability collector that
+  # does not exist on a remote OCP cluster. E2E telemetry is disabled, so do
+  # not retain an OTLP exporter that only produces DNS errors.
+  otlp:
+    endpoint: ""
+  sandboxImagePullPolicy: IfNotPresent

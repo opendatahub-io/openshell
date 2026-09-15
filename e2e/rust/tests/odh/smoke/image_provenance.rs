@@ -18,6 +18,27 @@ use serde_json::Value;
 
 use openshell_e2e::harness::sandbox::SandboxGuard;
 
+fn oc_command(context: Option<&std::ffi::OsStr>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("oc");
+    if let Some(context) = context.filter(|value| !value.is_empty()) {
+        command.arg("--context").arg(context);
+    }
+    command
+}
+
+#[test]
+fn oc_context_selection_preserves_default_and_explicit_contexts() {
+    for (context, expected) in [
+        (None, vec![]),
+        (Some(""), vec![]),
+        (Some("qualification"), vec!["--context", "qualification"]),
+    ] {
+        let command = oc_command(context.map(std::ffi::OsStr::new));
+        let args: Vec<_> = command.as_std().get_args().collect();
+        assert_eq!(args, expected);
+    }
+}
+
 fn allowed_prefixes() -> Vec<String> {
     std::env::var("ALLOWED_IMAGE_REGISTRY_PREFIXES")
         .expect(
@@ -31,7 +52,7 @@ fn allowed_prefixes() -> Vec<String> {
 }
 
 async fn oc_json(args: &[&str]) -> Value {
-    let output = tokio::process::Command::new("oc")
+    let output = oc_command(std::env::var_os("OPENSHELL_E2E_KUBE_CONTEXT_ACTIVE").as_deref())
         .args(args)
         .output()
         .await
@@ -206,7 +227,7 @@ async fn test_sandbox_gateway_supervisor_images() {
     // gateway config instead. Held to the same registry-prefix bar (which
     // already excludes upstream ghcr.io/nvidia/openshell/* refs).
     let cm_name = format!("{release}-config");
-    let cm_output = tokio::process::Command::new("oc")
+    let cm_output = oc_command(std::env::var_os("OPENSHELL_E2E_KUBE_CONTEXT_ACTIVE").as_deref())
         .args([
             "get",
             "configmap",

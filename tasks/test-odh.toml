@@ -33,3 +33,7 @@ run = "e2e/rust/tests/odh/run-odh-test-tier.sh tier2"
 ["e2e:odh:tier3"]
 description = "Run Tier 3: upstream + ODH, negative and destructive tests"
 run = "e2e/rust/tests/odh/run-odh-test-tier.sh tier3"
+
+["e2e:odh:selinux"]
+description = "Deploy upstream images and run ODH SELinux qualification on OCP (requires oc debug node access)"
+run = "e2e/rust/tests/odh/run-odh-selinux.sh"
