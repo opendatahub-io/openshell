@@ -12,10 +12,10 @@ use openshell_e2e::harness::sandbox::{E2E_WORKLOAD_IMAGE, unique_sandbox_name};
 use serde_json::Value;
 
 use crate::odh_harness::oc::{
-    oc_command, oc_get_json, paired_supervisor_pod, supervisor_selinux_label,
+    is_openshift, oc_command, oc_get_json, paired_supervisor_pod, supervisor_selinux_label,
 };
 use crate::odh_harness::scc::{Allocation, annotation, categories, check_pod_identity};
-use crate::odh_harness::selinux::{SelinuxAudit, is_openshift};
+use crate::odh_harness::selinux::SelinuxAudit;
 
 const UID_RANGE: &str = "openshift.io/sa.scc.uid-range";
 const GROUP_RANGE: &str = "openshift.io/sa.scc.supplemental-groups";
