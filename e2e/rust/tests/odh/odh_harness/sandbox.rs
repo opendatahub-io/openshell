@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Helpers for resolving OpenShell sandbox resources on an ODH cluster.
+//! Helpers for resolving `OpenShell` sandbox resources on an ODH cluster.
 
 use serde_json::Value;
 
@@ -10,7 +10,7 @@ use super::oc::oc_json;
 /// Returns the pod selector reported by the Sandbox custom resource.
 ///
 /// The sandbox-agent controller owns pod creation and does not propagate the
-/// OpenShell sandbox-name label to its pod. The custom resource's status is
+/// `OpenShell` sandbox-name label to its pod. The custom resource's status is
 /// therefore the stable way for downstream tests to discover that pod.
 pub async fn sandbox_pod_selector(namespace: &str, sandbox_name: &str) -> Option<String> {
     let selector = format!("openshell.ai/sandbox-name={sandbox_name}");
