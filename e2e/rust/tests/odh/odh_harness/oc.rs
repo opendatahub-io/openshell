@@ -97,7 +97,7 @@ pub async fn oc(args: &[&str], input: Option<&str>) -> OcOutput {
 /// ODH-only tests use this to skip cleanly on non-OpenShift clusters while
 /// preserving the standard tier entry points.
 pub async fn is_openshift() -> bool {
-    oc_command()
+    let output = oc_command()
         .args([
             "api-resources",
             "--api-group=route.openshift.io",
@@ -105,7 +105,16 @@ pub async fn is_openshift() -> bool {
         ])
         .output()
         .await
-        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+        .expect(
+            "failed to run `oc api-resources` — cannot decide whether the cluster is OpenShift; \
+             ensure `oc` is in PATH and KUBECONFIG targets the cluster",
+        );
+    assert!(
+        output.status.success(),
+        "oc api-resources failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    !output.stdout.is_empty()
 }
 
 /// Runs `oc <args>` and parses stdout as JSON.
