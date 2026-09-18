@@ -2,3 +2,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Tier 1: high-priority tests, excluding Smoke (15 min target).
+
+mod selinux;

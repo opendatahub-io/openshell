@@ -33,7 +33,7 @@ a rule and the README disagree, fix the drift rather than guessing.
 ## Commit messages
 
 - Prefix the commit title of any downstream-only (fork carry) commit with
-  `CARRY: ` so it is identifiable when rebasing against `NVIDIA/OpenShell`.
+  `CARRY:` so it is identifiable when rebasing against `NVIDIA/OpenShell`.
 - Keep the repository-root Conventional Commits format after the prefix, e.g.
   `CARRY: test(odh): add SELinux enforcing coverage`.
 - Sign off every commit for DCO (`git commit --signoff`) and never reference AI
