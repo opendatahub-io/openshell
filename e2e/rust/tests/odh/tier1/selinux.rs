@@ -9,7 +9,7 @@ use openshell_e2e::harness::sandbox::SandboxGuard;
 use serial_test::serial;
 use tempfile::NamedTempFile;
 
-use crate::odh_harness::oc::{paired_supervisor_pod, supervisor_selinux_label};
+use crate::odh_harness::oc::{paired_supervisor_pod, sandbox_namespace, supervisor_selinux_label};
 use crate::odh_harness::selinux::SelinuxAudit;
 
 /// OCP's container `SELinux` type. The complete label includes per-pod MLS/MCS
@@ -58,7 +58,7 @@ async fn selinux_is_enforcing_on_all_worker_nodes() {
 async fn supervisor_runs_in_container_selinux_domain() {
     run_audited("supervisor label", || async {
         let mut sandbox = SandboxGuard::create(&[]).await?;
-        let namespace = std::env::var("NAMESPACE").unwrap_or_else(|_| "openshell".to_string());
+        let namespace = sandbox_namespace();
         let supervisor_pod = paired_supervisor_pod(&namespace, &sandbox.name).await?;
         let label_result = supervisor_selinux_label(&namespace, &supervisor_pod).await;
         sandbox.cleanup().await;
