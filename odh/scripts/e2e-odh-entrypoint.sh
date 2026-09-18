@@ -195,11 +195,15 @@ if [[ -z "${TIER}" || $# -ne 1 ]]; then
 fi
 
 plan_json="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" "${TIER}" "${TIERS_FILE}")"
-phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"]+"|"+",".join(p["runners"]) for p in json.load(sys.stdin)["phases"]))')"
+phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,os,sys; print(chr(10).join(p["name"]+"|"+p["mode"]+"|"+",".join(p["runners"]) for p in json.load(sys.stdin)["phases"] if not p.get("required_env") or os.environ.get(p["required_env"]) == "1"))')"
+[[ -n "${phase_lines}" ]] || {
+	echo "ERROR: ${TIER} did not resolve the required phase" >&2
+	exit 1
+}
 phase_count=0
 while IFS= read -r _; do ((phase_count+=1)); done <<< "${phase_lines}"
 has_python_runner=0
-if printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; sys.exit(0 if any("python" in p["runners"] for p in json.load(sys.stdin)["phases"]) else 1)'; then
+if printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,os,sys; sys.exit(0 if any("python" in p["runners"] for p in json.load(sys.stdin)["phases"] if not p.get("required_env") or os.environ.get(p["required_env"]) == "1") else 1)'; then
 	has_python_runner=1
 fi
 deploy_enabled="${OPENSHELL_E2E_DEPLOY_GATEWAY:-1}"
@@ -564,6 +568,8 @@ if [[ "${report_available}" == 1 ]]; then
 		echo "ERROR: failed to merge ODH phase reports" >&2
 		[[ "${status}" != 0 ]] || status="${merge_status}"
 	}
+else
+	echo "WARNING: no phase reports were produced; skipping report merge" >&2
 fi
 if [[ -f "${merged_report}" ]]; then
 	if command -v xsltproc >/dev/null 2>&1; then

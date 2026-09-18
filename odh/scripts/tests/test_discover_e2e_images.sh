@@ -66,6 +66,7 @@ setup() {
 	# Unset image env vars.
 	unset GATEWAY_IMAGE SANDBOX_IMAGE SUPERVISOR_IMAGE IMAGE_TAG GATEWAY_IMAGE_DIGEST
 	unset OPENSHELL_E2E_REPORT_MERGER OPENSHELL_E2E_REPLACE_EXISTING OPENSHELL_E2E_DEPLOY_STATE_DIR
+	unset OPENSHELL_ODH_HA_FAILOVER
 	export PYTHON_BIN="${TEST_PYTHON}"
 	export KUBECONFIG="${WORK_DIR}/kubeconfig"
 	: > "${KUBECONFIG}"
@@ -620,6 +621,62 @@ test_no_deploy_rejects_multiple_phases() {
 	[[ ! -s "${WORK_DIR}/calls" ]]
 }
 run_test "Deployment disabled rejects multiple gateway modes" test_no_deploy_rejects_multiple_phases
+
+test_tier3_ha_opt_in() {
+	setup; setup_rhoai_csv
+	export OPENSHELL_ODH_HA_FAILOVER="$1"
+	run_script 0 "${ENTRYPOINT}" tier3
+	local expected_phases=1
+	[[ "$1" != 1 ]] || expected_phases=2
+	assert_count "${expected_phases}" '^deploy|deploy '
+	assert_count "${expected_phases}" '^deploy|teardown '
+	assert_count "${expected_phases}" '^phase|'
+	grep -Fq 'phase|tier3 shared ' "${WORK_DIR}/calls"
+	if [[ "$1" == 1 ]]; then
+		grep -Fq 'deploy|deploy --yes --mode ha|' "${WORK_DIR}/calls"
+		grep -Fq 'phase|tier3 ha ' "${WORK_DIR}/calls"
+		grep -Fq 'name="ha"' "${OPENSHELL_E2E_RESULTS_DIR}/e2e-odh-tier3-xunit.xml"
+	fi
+}
+run_test "Tier 3 omits HA without its opt-in" test_tier3_ha_opt_in 0
+run_test "Tier 3 deploys and reports shared then HA with opt-in" test_tier3_ha_opt_in 1
+
+test_tier3_no_deploy() {
+	setup
+	export OPENSHELL_E2E_DEPLOY_GATEWAY=0 OPENSHELL_ODH_HA_FAILOVER="$1"
+	if [[ "$1" == 1 ]]; then
+		run_script 2 "${ENTRYPOINT}" tier3
+		grep -Fq 'only supports single-phase tiers' "${WORK_DIR}/stderr"
+		[[ ! -s "${WORK_DIR}/calls" ]]
+	else
+		run_script 0 "${ENTRYPOINT}" tier3
+		assert_count 1 '^phase|'
+		assert_count 0 '^deploy|'
+	fi
+}
+run_test "Tier 3 permits no-deploy without HA" test_tier3_no_deploy 0
+run_test "Tier 3 rejects no-deploy with HA before cluster access" test_tier3_no_deploy 1
+
+test_direct_ha_phase() {
+	setup
+	cat > "${WORK_DIR}/bin/cargo" <<'FAKECARGO'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'cargo|%s|mode=%s\n' "$*" "${OPENSHELL_E2E_GATEWAY_MODE}" >> "${FAKE_OC_WORK_DIR}/calls"
+printf '<testsuite name="ha"><testcase name="failover"/></testsuite>\n' > "${OPENSHELL_E2E_RESULTS_DIR}/e2e-odh.xml"
+FAKECARGO
+	chmod +x "${WORK_DIR}/bin/cargo"
+	export OPENSHELL_E2E_KUBE_CONTEXT_ACTIVE=fake-context OPENSHELL_ODH_HA_FAILOVER=1
+	local report="${OPENSHELL_E2E_RESULTS_DIR}/e2e-odh-tier3-ha.xml"
+	run_script 0 "${ROOT}/e2e/rust/tests/odh/run-odh-test-tier.sh" tier3 ha "${report}"
+	assert_count 0 '^oc|'
+	assert_count 0 '^deploy|'
+	grep -Fq -- '--run-ignored all' "${WORK_DIR}/calls"
+	grep -Fq 'test(~tier3::gateway_failover::)' "${WORK_DIR}/calls"
+	grep -Fq '|mode=ha' "${WORK_DIR}/calls"
+	[[ -f "${report}" ]]
+}
+run_test "Direct HA phase runs ignored failover coverage without deployment" test_direct_ha_phase
 
 test_discovery_failure_prevents_deployment() {
 	setup; setup_rhoai_csv
