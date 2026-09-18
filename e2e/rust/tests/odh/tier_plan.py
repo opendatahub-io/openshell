@@ -19,6 +19,7 @@ _FILTER = re.compile(r"[A-Za-z0-9_:]+\Z")
 # The runners a phase may execute, in order. "nextest" runs the Rust test
 # selection; "python" runs the upstream Python gateway E2E suite.
 _RUNNERS = frozenset({"nextest", "python"})
+_ENVIRONMENT_VARIABLE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 
 
 def _validate_mode(mode_name: str, mode: dict) -> dict:
@@ -130,9 +131,14 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
             for prefix in excluded_odh_filters
         ):
             raise ValueError(f"invalid excluded ODH test filter in phase {name!r}")
-        for flag in ("all_binaries", "all_odh_tests", "include_image_provenance"):
+        for flag in ("all_binaries", "all_odh_tests", "include_image_provenance", "run_ignored"):
             if flag in phase and not isinstance(phase[flag], bool):
                 raise ValueError(f"phase {name!r} {flag} must be a boolean")
+        required_env = phase.get("required_env")
+        if required_env is not None and (
+            not isinstance(required_env, str) or not _ENVIRONMENT_VARIABLE.fullmatch(required_env)
+        ):
+            raise ValueError(f"phase {name!r} required_env must be an environment variable name")
         has_nextest_selection = (
             binaries
             or exclusions
@@ -146,6 +152,7 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
                     "all_odh_tests",
                     "odh_only",
                     "include_image_provenance",
+                    "run_ignored",
                 )
             )
         )
@@ -161,6 +168,8 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
                          "upstream_test_exclusions": exclusions, "odh_filter": odh_filter,
                          "global_test_exclusions": global_exclusions,
                          "all_odh_tests": phase.get("all_odh_tests", phase.get("odh_only", False)),
+                         "run_ignored": phase.get("run_ignored", False),
+                         "required_env": required_env,
                          "include_image_provenance": phase.get("include_image_provenance", mode_name == "shared")})
     return {"tier": tier, "phases": resolved, "modes": modes}
 
