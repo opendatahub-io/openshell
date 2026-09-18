@@ -130,7 +130,7 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
             for prefix in excluded_odh_filters
         ):
             raise ValueError(f"invalid excluded ODH test filter in phase {name!r}")
-        for flag in ("all_binaries", "all_odh_tests", "include_image_provenance"):
+        for flag in ("all_binaries", "all_odh_tests", "include_image_provenance", "run_ignored"):
             if flag in phase and not isinstance(phase[flag], bool):
                 raise ValueError(f"phase {name!r} {flag} must be a boolean")
         has_nextest_selection = (
@@ -146,6 +146,7 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
                     "all_odh_tests",
                     "odh_only",
                     "include_image_provenance",
+                    "run_ignored",
                 )
             )
         )
@@ -161,6 +162,7 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
                          "upstream_test_exclusions": exclusions, "odh_filter": odh_filter,
                          "global_test_exclusions": global_exclusions,
                          "all_odh_tests": phase.get("all_odh_tests", phase.get("odh_only", False)),
+                         "run_ignored": phase.get("run_ignored", False),
                          "include_image_provenance": phase.get("include_image_provenance", mode_name == "shared")})
     return {"tier": tier, "phases": resolved, "modes": modes}
 

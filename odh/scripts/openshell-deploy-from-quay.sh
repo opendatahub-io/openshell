@@ -103,6 +103,11 @@ source "${REPO_ROOT}/e2e/support/gateway-common.sh"
 CHART="${REPO_ROOT}/deploy/helm/openshell"
 PLAN_RESOLVER="${REPO_ROOT}/e2e/rust/tests/odh/tier_plan.py"
 TIERS_FILE="${REPO_ROOT}/e2e/rust/tests/odh/tiers.toml"
+POSTGRES_FIXTURE_MANIFEST="${REPO_ROOT}/e2e/kubernetes/postgres-fixture.yaml"
+POSTGRES_FIXTURE_SERVICE="openshell-e2e-postgres"
+POSTGRES_FIXTURE_SECRET="openshell-ha-pg"
+POSTGRES_FIXTURE_USER="openshell"
+POSTGRES_FIXTURE_DATABASE="openshell"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 OPEN_SHELL="${OPENSHELL_BIN:-openshell}"
 
@@ -381,6 +386,18 @@ if [[ "${MODE}" == managed ]]; then
 		openshell.ai/sandbox-attachable=true
 fi
 
+if [[ "${MODE}" == ha ]]; then
+	echo ">> Creating external PostgreSQL fixture for HA gateway"
+	oc -n "${NAMESPACE}" apply -f "${POSTGRES_FIXTURE_MANIFEST}"
+	oc -n "${NAMESPACE}" rollout status "deployment/${POSTGRES_FIXTURE_SERVICE}" --timeout=120s
+	postgres_password="$(oc -n "${NAMESPACE}" get secret openshell-e2e-postgres-credentials \
+		-o jsonpath='{.data.password}' | base64 -d)"
+	[[ -n "${postgres_password}" ]] || fail "external PostgreSQL fixture password is empty"
+	postgres_uri="postgresql://${POSTGRES_FIXTURE_USER}:${postgres_password}@${POSTGRES_FIXTURE_SERVICE}.${NAMESPACE}.svc.cluster.local:5432/${POSTGRES_FIXTURE_DATABASE}"
+	oc -n "${NAMESPACE}" create secret generic "${POSTGRES_FIXTURE_SECRET}" \
+		--from-literal=uri="${postgres_uri}" --dry-run=client -o yaml | oc apply -f -
+fi
+
 echo ">> Deploying OpenShell via Helm"
 helm_value_args=()
 helm_value_args+=(--values "${REPO_ROOT}/deploy/helm/openshell/ci/values-openshift-scc.yaml")
@@ -433,7 +450,14 @@ helm upgrade --install "${RELEASE}" "${CHART}" \
 	--set "pkiInitJob.serverDnsNames[0]=${ROUTE_HOST}"
 
 echo ">> Waiting for gateway rollout"
-if ! oc -n "${NAMESPACE}" rollout status "statefulset/${HELM_FULLNAME}" --timeout=300s; then
+gateway_workload=""
+for candidate in "statefulset/${HELM_FULLNAME}" "deployment/${HELM_FULLNAME}"; do
+	if oc -n "${NAMESPACE}" get "${candidate}" >/dev/null 2>&1; then
+		gateway_workload="${candidate}"
+		break
+	fi
+done
+if [[ -z "${gateway_workload}" ]] || ! oc -n "${NAMESPACE}" rollout status "${gateway_workload}" --timeout=300s; then
 	oc -n "${NAMESPACE}" get pods
 	fail "gateway did not become ready"
 fi
@@ -547,13 +571,16 @@ if [[ "${route_ready}" != 1 ]]; then
 	fail "OpenShift Route did not reject unauthenticated ListSandboxes RPCs within 180s: ${route_probe_error}"
 fi
 
-rm -rf "${auth_check_dir}"
-
 echo ">> Registering gateway '${GATEWAY_NAME}' in the local CLI"
 if [[ -n "${OPENSHELL_E2E_DEPLOY_STATE_DIR:-}" ]]; then
 	: > "${OPENSHELL_E2E_DEPLOY_STATE_DIR}/gateway"
 fi
-"${OPEN_SHELL}" gateway add "https://${ROUTE_HOST}" --local --name "${GATEWAY_NAME}"
+# Keep package-managed credentials from replacing the Route's client bundle.
+mkdir "${auth_check_dir}/local-tls"
+OPENSHELL_LOCAL_TLS_DIR="${auth_check_dir}/local-tls" \
+	"${OPEN_SHELL}" gateway add "https://${ROUTE_HOST}" --local --name "${GATEWAY_NAME}"
+cleanup_auth_check
+auth_check_dir=""
 
 echo ">> Checking deployed gateway mode '${MODE}'"
 expected_values="$(printf '%s' "${mode_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["expected_helm_values"]))')"

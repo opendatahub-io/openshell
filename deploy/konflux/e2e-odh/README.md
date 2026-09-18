@@ -13,8 +13,10 @@ phase's configured runners (the precompiled nextest selection and, when
 selected, the Python gateway E2E), and tears down that deployment before moving
 to the next phase. Local `mise run e2e:odh*` tasks use the same plan,
 entrypoint, and deployment path. Tier 2, `odh`, and `full` run shared mode
-followed by managed-workspace mode; Tier 2's shared phase also runs the Python
-gateway E2E. Each logical tier runs image provenance once in the shared phase.
+followed by managed-workspace mode. Tier 2's shared phase also runs the Python
+gateway E2E. Tier 3, `odh`, and `full` finish with an HA phase that uses
+external PostgreSQL and runs the destructive gateway failover test.
+Each logical tier runs image provenance once in the shared phase.
 The entrypoint preserves
 cleanup on failures and signals, continues after a test-phase failure, and
 merges the ordered JUnit files into one `e2e-odh-<tier>-xunit.xml` for Jenkins

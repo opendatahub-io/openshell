@@ -119,6 +119,22 @@ pub async fn oc_with_timeout(
     input: Option<&str>,
     command_timeout: Duration,
 ) -> OcOutput {
+    try_oc_with_timeout(args, input, command_timeout)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Runs `oc <args>` without panicking, for callers that can retry failures.
+///
+/// The returned error deliberately excludes command output, which can contain
+/// sensitive cluster data. Polling loops should retain the last error for
+/// their eventual timeout diagnostic rather than aborting on one slow API
+/// request.
+pub async fn try_oc_with_timeout(
+    args: &[&str],
+    input: Option<&str>,
+    command_timeout: Duration,
+) -> Result<OcOutput, String> {
     let mut cmd = oc_command();
     cmd.args(args)
         .stdout(Stdio::piped())
@@ -128,29 +144,36 @@ pub async fn oc_with_timeout(
         cmd.stdin(Stdio::piped());
     }
     let output = tokio::time::timeout(command_timeout, async {
-        let mut child = cmd.spawn().expect(
-            "failed to run `oc` — required for ODH cluster-state checks; ensure it is in PATH \
-             and KUBECONFIG targets the cluster",
-        );
-        if let Some(input) = input {
-            child
-                .stdin
-                .take()
-                .expect("piped stdin")
-                .write_all(input.as_bytes())
+        let mut child = cmd.spawn().map_err(|error| {
+            format!(
+                "failed to run oc {args:?}; ensure it is in PATH and KUBECONFIG targets the cluster: {error}"
+            )
+        })?;
+        let stdin_writer = input.map(|input| {
+            let mut stdin = child.stdin.take().expect("piped stdin");
+            let input = input.to_owned();
+            tokio::spawn(async move { stdin.write_all(input.as_bytes()).await })
+        });
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|error| format!("wait for oc {args:?}: {error}"))?;
+        if let Some(writer) = stdin_writer {
+            writer
                 .await
-                .expect("write manifest to oc");
+                .map_err(|error| format!("oc stdin writer should not panic: {error}"))?
+                .map_err(|error| format!("write manifest to oc {args:?}: {error}"))?;
         }
-        child.wait_with_output().await.expect("wait for oc")
+        Ok::<_, String>(output)
     })
     .await
-    .unwrap_or_else(|_| {
-        panic!(
+    .map_err(|_| {
+        format!(
             "oc {args:?} timed out after {} seconds",
             command_timeout.as_secs()
         )
-    });
-    OcOutput::from_output(&output)
+    })??;
+    Ok(OcOutput::from_output(&output))
 }
 
 /// Returns whether the active cluster exposes the `OpenShift` Route API.
@@ -177,15 +200,23 @@ pub async fn is_openshift() -> Result<bool, String> {
 /// non-zero, or does not return valid JSON — use it for `-o json` queries
 /// whose failure should fail the test.
 pub async fn oc_json(args: &[&str]) -> Value {
-    let output = oc(args, None).await;
-    assert!(
-        output.success,
-        "oc JSON query failed ({})",
-        output.status_summary()
-    );
+    try_oc_json(args)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Runs an `oc` JSON query without panicking, for callers that can retry it.
+pub async fn try_oc_json(args: &[&str]) -> Result<Value, String> {
+    let output = try_oc_with_timeout(args, None, OC_COMMAND_TIMEOUT).await?;
+    if !output.success {
+        return Err(format!(
+            "oc JSON query {args:?} failed ({})",
+            output.status_summary()
+        ));
+    }
     output
         .json()
-        .unwrap_or_else(|_| panic!("oc JSON query returned invalid JSON"))
+        .map_err(|_| format!("oc JSON query {args:?} returned invalid JSON"))
 }
 
 #[cfg(test)]
@@ -237,6 +268,49 @@ mod oc_output_tests {
         assert!(not_found.is_not_found());
         assert!(!forbidden.is_not_found());
     }
+}
+
+const DEFAULT_DEPLOYMENT_NAME: &str = "openshell";
+
+/// Resolves the namespace containing gateway resources for the ODH deployment.
+///
+/// The names match the standard ODH and Kubernetes e2e configuration
+/// variables.
+pub fn gateway_namespace() -> String {
+    std::env::var("NAMESPACE")
+        .or_else(|_| std::env::var("OPENSHELL_E2E_KUBE_NAMESPACE"))
+        .unwrap_or_else(|_| DEFAULT_DEPLOYMENT_NAME.to_string())
+}
+
+/// Resolves the namespace containing Sandbox custom resources and workload Pods.
+///
+/// Sandbox resources normally share the gateway namespace. Set
+/// `SANDBOX_NAMESPACE` when the compute driver uses a separate namespace.
+pub fn sandbox_namespace() -> String {
+    std::env::var("SANDBOX_NAMESPACE")
+        .or_else(|_| std::env::var("OPENSHELL_E2E_SANDBOX_NAMESPACE"))
+        .unwrap_or_else(|_| gateway_namespace())
+}
+
+/// Resolves the Helm release name used by the ODH deployment under test.
+pub fn release() -> String {
+    std::env::var("RELEASE")
+        .or_else(|_| std::env::var("OPENSHELL_E2E_KUBE_RELEASE"))
+        .unwrap_or_else(|_| DEFAULT_DEPLOYMENT_NAME.to_string())
+}
+
+/// Returns whether a Kubernetes Pod JSON object is Running and Ready.
+pub fn pod_is_ready(pod: &Value) -> bool {
+    pod["metadata"]["deletionTimestamp"].is_null()
+        && pod["status"]["phase"].as_str() == Some("Running")
+        && pod["status"]["conditions"]
+            .as_array()
+            .is_some_and(|conditions| {
+                conditions.iter().any(|condition| {
+                    condition["type"].as_str() == Some("Ready")
+                        && condition["status"].as_str() == Some("True")
+                })
+            })
 }
 
 /// Resolve the supervisor Pod paired with a named Sandbox resource.
@@ -401,8 +475,31 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        pod_node_and_uid, pod_uid_cgroup_form, sandbox_id_from_json, supervisor_pod_from_json,
+        pod_is_ready, pod_node_and_uid, pod_uid_cgroup_form, sandbox_id_from_json,
+        supervisor_pod_from_json,
     };
+
+    #[test]
+    fn recognizes_only_running_ready_pods() {
+        assert!(pod_is_ready(&json!({
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}]
+            }
+        })));
+        assert!(!pod_is_ready(&json!({
+            "status": {
+                "phase": "Pending",
+                "conditions": [{"type": "Ready", "status": "True"}]
+            }
+        })));
+        assert!(!pod_is_ready(&json!({
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "False"}]
+            }
+        })));
+    }
 
     #[test]
     fn resolves_sandbox_id_from_named_sandbox() {
