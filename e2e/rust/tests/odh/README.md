@@ -18,7 +18,8 @@ e2e/rust/tests/odh/
 ├── main.rs                    # crate root, declares helper + tier modules, gated on feature "e2e-odh"
 ├── odh_harness/               # fork-local shared test helpers (see "Shared test helpers")
 │   ├── mod.rs
-│   └── oc.rs                   # `oc` command builder (honors active kube context) + JSON runner
+│   ├── oc.rs                   # `oc` command builder (honors active kube context) + runners
+│   └── sandbox.rs              # Sandbox custom-resource → pod-selector lookup
 ├── smoke/                     # Smoke tier: component-level critical tests
 │   ├── mod.rs
 │   ├── gateway.rs              # gateway reachability
@@ -27,7 +28,8 @@ e2e/rust/tests/odh/
 ├── tier1/                     # Tier 1: high-priority tests, excluding Smoke
 │   └── mod.rs                    # empty — no scenarios yet
 ├── tier2/                     # Tier 2: medium/low priority positive tests
-│   └── mod.rs                    # empty — no scenarios yet
+│   ├── mod.rs
+│   └── network_policy.rs       # NetworkPolicy and proxy-pod boundary coverage
 ├── tier3/                      # Tier 3: negative and destructive tests
 │   └── mod.rs                    # empty — no scenarios yet
 ├── tiers.toml                  # tier → upstream test binaries + ODH module filter
@@ -56,6 +58,10 @@ plain module is enough — no new crate and no workspace change.
   when it is set, so every ODH test targets the same cluster the upstream
   harness does. `oc_json()` runs a query and parses `-o json` output, panicking
   with a descriptive message on any failure.
+- `odh_harness::sandbox` — resolves a sandbox custom resource to the pod
+  selector reported by its status. The controller does not propagate the
+  OpenShell sandbox-name label to the pod, so downstream checks must use this
+  selector rather than querying pods by sandbox name.
 
 Put ODH-specific shared helpers here (the `oc` builder, and future node-level
 checks such as `getenforce` and the AVC-audit guard), and reuse them rather than
@@ -90,13 +96,14 @@ The upstream test assignments in `tiers.toml` are currently placeholders —
 they should be revisited based on measured execution time and actual test
 criticality, not just copied as-is.
 
-**Current implementation status:** only the Smoke tier has real test
-functions (`smoke::gateway::test_reachable`, `smoke::sandbox::test_create_delete`,
-`smoke::image_provenance::test_sandbox_gateway_supervisor_images`).
-Tier 1–3 are empty modules with no scenarios yet — running those tiers today
+**Current implementation status:** Smoke and Tier 2 have real test functions.
+Tier 2 contains `tier2::network_policy`, which verifies that OpenShift
+`NetworkPolicy` enforcement coexists with the OpenShell proxy-pod boundary.
+These tests skip cleanly when the active cluster is not OpenShift. Tier 1 and
+Tier 3 are empty modules with no scenarios yet — running those tiers today
 executes 0 ODH tests (a legitimate `ok` result, not a failure) plus whatever
-upstream tests are mapped to them, plus the image provenance test (see
-below). Add scenarios by creating a `.rs` file under the tier's directory and
+upstream tests are mapped to them, plus the image provenance test (see below).
+Add scenarios by creating a `.rs` file under the tier's directory and
 declaring it with a `mod` line in that tier's `mod.rs`.
 
 ## Prerequisites
