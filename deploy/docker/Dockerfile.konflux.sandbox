@@ -49,6 +49,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY .cargo/ .cargo/
 COPY crates/ crates/
 COPY proto/ proto/
+COPY deploy/konflux/sandbox/nss-static.c deploy/konflux/sandbox/nss-static.c
 
 # Version stamped into the binary via openshell-core::VERSION; tag builds
 # pass the git tag with the leading "v" stripped. Empty otherwise.
@@ -67,7 +68,9 @@ ARG OPENSHELL_VERSION=""
 RUN . /tmp/build-env && \
     VER="${OPENSHELL_VERSION#v}" && \
     if [ -n "$VER" ]; then export OPENSHELL_GIT_VERSION="$VER"; fi && \
-    RUSTFLAGS="-C target-feature=+crt-static" \
+    gcc -std=c11 -Wall -Wextra -Werror -c \
+        deploy/konflux/sandbox/nss-static.c -o /tmp/nss-static.o && \
+    RUSTFLAGS="-C target-feature=+crt-static -C link-arg=/tmp/nss-static.o" \
     cargo build --release \
         --target "${RUST_TARGET}" \
         --package openshell-sandbox \

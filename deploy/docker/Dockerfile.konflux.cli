@@ -6,9 +6,8 @@
 # CLI image for RHEL/Konflux (hermetic build).
 #
 # Multi-stage build that compiles the openshell CLI from source on UBI9 as a
-# fully-static binary. It is built against glibc with
-# `-C target-feature=+crt-static` using Red Hat's glibc-static package
-# (CodeReady Builder), so the build has no dependency on musl.
+# dynamically linked glibc binary, matching the runtime image's libc and NSS
+# modules.
 #
 # Requires prefetched dependencies via Hermeto (cargo, rpm, generic).
 # See deploy/konflux/ for prefetch configs.
@@ -18,7 +17,7 @@
 ARG RUST_VERSION=1.95.0
 
 # ---------------------------------------------------------------------------
-# Build stage: compile CLI (fully-static glibc binary)
+# Build stage: compile CLI (dynamically linked glibc binary)
 # ---------------------------------------------------------------------------
 FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6 AS builder
 
@@ -27,7 +26,6 @@ ARG TARGETARCH
 
 RUN dnf install -y --nodocs \
         gcc gcc-c++ make cmake \
-        glibc-static \
         openssl-devel git-core xz \
     && dnf clean all
 
@@ -58,17 +56,18 @@ RUN sed -i 's|members = \["crates/\*"\]|members = ["crates/openshell-cli", "crat
 # pass the git tag with the leading "v" stripped. Empty otherwise.
 ARG OPENSHELL_VERSION=""
 
-# `-C target-feature=+crt-static` links glibc statically, producing a
-# fully-static (static-PIE) binary with no runtime libc dependency.
 RUN . /tmp/build-env && \
     VER="${OPENSHELL_VERSION#v}" && \
     if [ -n "$VER" ]; then export OPENSHELL_GIT_VERSION="$VER"; fi && \
-    RUSTFLAGS="-C target-feature=+crt-static" \
     cargo build --release \
         --target "${RUST_TARGET}" \
         --package openshell-cli && \
     mkdir -p /build/output && \
-    cp /build/target/${RUST_TARGET}/release/openshell /build/output/
+    cp /build/target/${RUST_TARGET}/release/openshell /build/output/ && \
+    readelf -l /build/output/openshell > /tmp/program-headers && \
+    if ! grep -q 'Requesting program interpreter' /tmp/program-headers; then \
+        echo "openshell is not dynamically linked" >&2; exit 1; \
+    fi
 
 # ---------------------------------------------------------------------------
 # Runtime
@@ -84,8 +83,8 @@ RUN update-crypto-policies --set DEFAULT:PQ
 COPY --from=builder --chmod=0555 /build/output/openshell /usr/local/bin/openshell
 
 LABEL com.redhat.component="odh-openshell-cli-container" \
-      description="Statically linked (glibc) CLI for OpenShell sandboxed AI agent runtimes" \
-      summary="Statically linked (glibc) CLI for OpenShell sandboxed AI agent runtimes" \
+      description="OpenShell CLI for sandboxed AI agent runtimes" \
+      summary="OpenShell CLI for sandboxed AI agent runtimes" \
       name="rhoai/odh-openshell-cli-rhel9" \
       maintainer="['managed-open-data-hub@redhat.com']" \
       io.openshift.expose-services="" \
