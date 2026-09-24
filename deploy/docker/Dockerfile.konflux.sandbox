@@ -17,7 +17,8 @@
 # files and dns services at startup, matching upstream's musl behavior.
 #
 # Requires prefetched dependencies via Hermeto (cargo, rpm, generic).
-# See deploy/konflux/ for prefetch configs.
+# cargo-auditable is a generic artifact so the sandbox binary embeds crate
+# versions for image CVE scanners. See deploy/konflux/ for prefetch configs.
 #
 # Local build:  ./deploy/konflux/build-local.sh sandbox
 
@@ -46,6 +47,14 @@ RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64
     /tmp/rust-toolchain/install.sh --prefix=/usr/local && \
     rm -rf /tmp/rust-toolchain && \
     echo "RUST_TARGET=${RUST_TRIPLE}" > /tmp/build-env
+
+# Prefetched cargo-auditable (mise.toml 0.7.5) embeds crate versions in the
+# binary so image CVE scanners can report Rust advisories.
+ARG CARGO_AUDITABLE_VERSION=0.7.5
+RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) echo "${TARGETARCH}";; esac) && \
+    tar xJf "/cachi2/output/deps/generic/cargo-auditable-${CARGO_AUDITABLE_VERSION}-${RUST_ARCH}-unknown-linux-gnu.tar.xz" -C /tmp && \
+    install -m 0755 "/tmp/cargo-auditable-${RUST_ARCH}-unknown-linux-gnu/cargo-auditable" /usr/local/bin/cargo-auditable && \
+    rm -rf "/tmp/cargo-auditable-${RUST_ARCH}-unknown-linux-gnu"
 
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
@@ -84,7 +93,7 @@ RUN . /tmp/build-env && \
     if [ -n "$VER" ]; then export OPENSHELL_GIT_VERSION="$VER"; fi && \
     gcc -O2 -fPIE -Wall -Wextra -c /build/pin-nss.c -o /build/pin-nss.o && \
     RUSTFLAGS="-C target-feature=+crt-static -C link-arg=/build/pin-nss.o -C link-arg=-Wl,--undefined=__nss_configure_lookup" \
-    cargo build --release \
+    cargo auditable build --release \
         --target "${RUST_TARGET}" \
         --package openshell-sandbox \
         --bin openshell-sandbox && \
@@ -96,6 +105,9 @@ RUN . /tmp/build-env && \
     fi && \
     if ! grep -qa 'failed to pin NSS database' /build/output/openshell-sandbox; then \
         echo "openshell-sandbox is missing the NSS pin (pin-nss.c)" >&2; exit 1; \
+    fi && \
+    if ! readelf -S /build/output/openshell-sandbox | grep -q '\.dep-v0'; then \
+        echo "openshell-sandbox is missing cargo-auditable .dep-v0 metadata" >&2; exit 1; \
     fi
 
 # Prove the pin works, not only that it is linked (see nss-probe.c). A fake

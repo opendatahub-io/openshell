@@ -15,7 +15,8 @@
 # myhostname and systemd modules), which crashes a static binary (RHAI-1927).
 #
 # Requires prefetched dependencies via Hermeto (cargo, rpm, generic).
-# See deploy/konflux/ for prefetch configs.
+# cargo-auditable is a generic artifact so the supervisor binary embeds crate
+# versions for image CVE scanners. See deploy/konflux/ for prefetch configs.
 #
 # Local build:  ./deploy/konflux/build-local.sh supervisor
 
@@ -44,6 +45,14 @@ RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64
     rm -rf /tmp/rust-toolchain && \
     echo "RUST_TARGET=${RUST_TRIPLE}" > /tmp/build-env
 
+# Prefetched cargo-auditable (mise.toml 0.7.5) embeds crate versions in the
+# binary so image CVE scanners can report Rust advisories.
+ARG CARGO_AUDITABLE_VERSION=0.7.5
+RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) echo "${TARGETARCH}";; esac) && \
+    tar xJf "/cachi2/output/deps/generic/cargo-auditable-${CARGO_AUDITABLE_VERSION}-${RUST_ARCH}-unknown-linux-gnu.tar.xz" -C /tmp && \
+    install -m 0755 "/tmp/cargo-auditable-${RUST_ARCH}-unknown-linux-gnu/cargo-auditable" /usr/local/bin/cargo-auditable && \
+    rm -rf "/tmp/cargo-auditable-${RUST_ARCH}-unknown-linux-gnu"
+
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
 WORKDIR /build
@@ -69,7 +78,7 @@ ARG OPENSHELL_VERSION=""
 RUN . /tmp/build-env && \
     VER="${OPENSHELL_VERSION#v}" && \
     if [ -n "$VER" ]; then export OPENSHELL_GIT_VERSION="$VER"; fi && \
-    cargo build --release \
+    cargo auditable build --release \
         --target "${RUST_TARGET}" \
         --package openshell-supervisor \
         --bin openshell-supervisor \
@@ -80,6 +89,9 @@ RUN . /tmp/build-env && \
     readelf -l /build/output/openshell-supervisor > /tmp/program-headers && \
     if ! grep -q 'Requesting program interpreter' /tmp/program-headers; then \
         echo "openshell-supervisor must be dynamically linked against glibc" >&2; exit 1; \
+    fi && \
+    if ! readelf -S /build/output/openshell-supervisor | grep -q '\.dep-v0'; then \
+        echo "openshell-supervisor is missing cargo-auditable .dep-v0 metadata" >&2; exit 1; \
     fi
 
 # ---------------------------------------------------------------------------

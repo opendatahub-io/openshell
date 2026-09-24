@@ -1,0 +1,108 @@
+# Midstream image CVE scan for the ODH Quay builds. Catch HIGH/CRITICAL
+# image vulnerabilities early, before a build is released on a GA branch.
+# Kept separate from trivy-scan.yml so we do not inherit NVIDIA GHCR login
+# or Helm config scans.
+# Rust crate rows appear only after Konflux images are built with
+# cargo auditable (Dockerfile.konflux.*). Until then Trivy reports RPMs only.
+# Every run (schedule and workflow_dispatch) scans all four images:
+#   quay.io/opendatahub/odh-openshell-cli
+#   quay.io/opendatahub/odh-openshell-gateway
+#   quay.io/opendatahub/odh-openshell-supervisor
+#   quay.io/opendatahub/odh-openshell-sandbox
+# workflow_dispatch only chooses the tag applied to all four.
+
+name: ODH Trivy Image Scan
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+      timezone: "Europe/Dublin"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag applied to all four ODH images (cli, gateway, supervisor, sandbox). Examples: odh-stable or v0.0.116-rhaiv.13"
+        required: false
+        type: string
+        default: odh-stable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: odh-trivy-images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEFAULT_TAG: odh-stable
+  DEFAULT_IMAGES: |
+    quay.io/opendatahub/odh-openshell-cli
+    quay.io/opendatahub/odh-openshell-gateway
+    quay.io/opendatahub/odh-openshell-supervisor
+    quay.io/opendatahub/odh-openshell-sandbox
+
+jobs:
+  scan:
+    name: Trivy vulns (cli, gateway, supervisor, sandbox)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.74.0
+          cache: true
+
+      - name: Scan four ODH images
+        env:
+          IMAGE_TAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.tag) || 'odh-stable' }}
+        run: |
+          set -euo pipefail
+
+          tag=${IMAGE_TAG:-$DEFAULT_TAG}
+          if [ -z "$tag" ]; then
+            echo "::error::Image tag must not be empty."
+            exit 1
+          fi
+          if [[ "$tag" == *[[:space:]]* ]]; then
+            echo "::error::Image tag must not contain whitespace."
+            exit 1
+          fi
+
+          refs=()
+          while IFS= read -r image; do
+            [ -n "$image" ] || continue
+            refs+=("${image}:${tag}")
+          done <<<"$DEFAULT_IMAGES"
+
+          {
+            echo "### ODH Trivy image scan"
+            echo
+            echo "Severity gate: \`HIGH,CRITICAL\`"
+            echo
+            echo "Images:"
+            for ref in "${refs[@]}"; do
+              echo "- \`$ref\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          status=0
+          for ref in "${refs[@]}"; do
+            echo "::group::trivy image --scanners vuln $ref"
+            if trivy image \
+              --scanners vuln \
+              --severity HIGH,CRITICAL \
+              --format table \
+              --exit-code 1 \
+              "$ref"; then
+              echo "No HIGH/CRITICAL vulnerabilities in $ref"
+            else
+              echo "::error::Trivy found HIGH/CRITICAL vulnerabilities in $ref"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+
+          exit "$status"

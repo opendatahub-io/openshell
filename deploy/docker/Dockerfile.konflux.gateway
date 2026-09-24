@@ -7,7 +7,8 @@
 #
 # Multi-stage build that compiles openshell-gateway from source on UBI9.
 # Requires prefetched dependencies via Hermeto (cargo, rpm, generic).
-# See deploy/konflux/ for prefetch configs.
+# cargo-auditable is a generic artifact so the gateway binary embeds crate
+# versions for image CVE scanners. See deploy/konflux/ for prefetch configs.
 #
 # Local build:  ./deploy/konflux/build-local.sh gateway
 
@@ -34,6 +35,14 @@ RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64
     tar xJf /cachi2/output/deps/generic/rust-${RUST_VERSION}-${RUST_ARCH}-unknown-linux-gnu.tar.xz -C /tmp/rust-toolchain --strip-components=1 && \
     /tmp/rust-toolchain/install.sh --prefix=/usr/local && \
     rm -rf /tmp/rust-toolchain
+
+# Prefetched cargo-auditable (mise.toml 0.7.5) embeds crate versions in the
+# binary so image CVE scanners can report Rust advisories.
+ARG CARGO_AUDITABLE_VERSION=0.7.5
+RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) echo "${TARGETARCH}";; esac) && \
+    tar xJf "/cachi2/output/deps/generic/cargo-auditable-${CARGO_AUDITABLE_VERSION}-${RUST_ARCH}-unknown-linux-gnu.tar.xz" -C /tmp && \
+    install -m 0755 "/tmp/cargo-auditable-${RUST_ARCH}-unknown-linux-gnu/cargo-auditable" /usr/local/bin/cargo-auditable && \
+    rm -rf "/tmp/cargo-auditable-${RUST_ARCH}-unknown-linux-gnu"
 
 # gcc-toolset-14 provides C++20 <format> header required by bundled Z3.
 # Same pattern as ~/git/builder (AIPCC-10154).
@@ -62,10 +71,13 @@ RUN mkdir -p /tmp/z3-src \
     && VER="${OPENSHELL_VERSION#v}" \
     && if [ -n "$VER" ]; then export OPENSHELL_GIT_VERSION="$VER"; fi \
     && Z3_SYS_BUNDLED_DIR_OVERRIDE=/tmp/z3-src \
-    cargo build --release \
+    cargo auditable build --release \
         --package openshell-gateway \
         --no-default-features \
-        --features defaults-without-telemetry,bundled-z3
+        --features defaults-without-telemetry,bundled-z3 && \
+    if ! readelf -S /build/target/release/openshell-gateway | grep -q '\.dep-v0'; then \
+        echo "openshell-gateway is missing cargo-auditable .dep-v0 metadata" >&2; exit 1; \
+    fi
 
 # ---------------------------------------------------------------------------
 # Runtime

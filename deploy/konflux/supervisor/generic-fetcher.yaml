@@ -15,3 +15,13 @@ artifacts:
   - download_url: https://static.rust-lang.org/dist/rust-1.95.0-aarch64-unknown-linux-gnu.tar.xz
     checksum: "sha256:094c9c36531911c5cc7dd6ab2d3069ab8dcd744d6239b0bda1387b243dfc391e"
     filename: rust-1.95.0-aarch64-unknown-linux-gnu.tar.xz
+
+  # cargo-auditable (mise.toml 0.7.5). Keep filename version in lockstep with
+  # ARG CARGO_AUDITABLE_VERSION in Dockerfile.konflux.supervisor.
+  - download_url: https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.5/cargo-auditable-x86_64-unknown-linux-gnu.tar.xz
+    checksum: "sha256:322eda09f24e5dba97371c6c2c6949569c411ddf893852e88135cc5b51d5a719"
+    filename: cargo-auditable-0.7.5-x86_64-unknown-linux-gnu.tar.xz
+
+  - download_url: https://github.com/rust-secure-code/cargo-auditable/releases/download/v0.7.5/cargo-auditable-aarch64-unknown-linux-gnu.tar.xz
+    checksum: "sha256:6d364879b516fa914f98504e551faddedf35b71543b4331a6d26e4e217778cfa"
+    filename: cargo-auditable-0.7.5-aarch64-unknown-linux-gnu.tar.xz

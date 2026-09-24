@@ -1,0 +1,55 @@
+# Midstream RustSec advisory scan. Catch crate CVEs in Cargo.lock early,
+# before a build is released on a GA branch. Kept separate from
+# cargo-deny.yml so ODH does not depend on NVIDIA self-hosted runners or
+# the NVIDIA CI image.
+
+name: ODH Cargo Deny Advisories
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+      timezone: "Europe/Dublin"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: odh-cargo-deny-advisories-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  advisories:
+    name: Cargo Deny advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Stable mise-action (v4.2.0). install: false skips the full mise.toml
+      # toolset so we only install rust + cargo-deny next. experimental: true
+      # matches mise.toml so the github: backend can install cargo-deny; note, it is
+      # not an unstable action channel.
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          install: false
+          experimental: true
+
+      # Pin rust + cargo-deny from mise.lock. rust is required for cargo metadata.
+      - name: Install cargo-deny
+        run: mise install --locked rust github:EmbarkStudios/cargo-deny
+
+      - name: Check dependency advisories
+        env:
+          # Override mise.toml: mise-action exports RUSTC_WRAPPER=sccache, but
+          # this job does not install sccache and does not compile. cargo deny
+          # still runs cargo metadata, which would invoke sccache rustc -vV and
+          # fail. Empty string makes Cargo call rustc directly.
+          RUSTC_WRAPPER: ""
+        run: cargo deny check advisories
