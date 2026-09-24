@@ -49,11 +49,15 @@ jobs:
       - name: Install cargo-deny
         run: mise install --locked rust github:EmbarkStudios/cargo-deny
 
+      # mise shims re-apply mise.toml RUSTC_WRAPPER=sccache. env -u before
+      # `cargo` is not enough. Call the real binaries and drop the wrapper
+      # so cargo metadata does not need sccache (this job does not install it).
       - name: Check dependency advisories
-        env:
-          # Override mise.toml: mise-action exports RUSTC_WRAPPER=sccache, but
-          # this job does not install sccache and does not compile. cargo deny
-          # still runs cargo metadata, which would invoke sccache rustc -vV and
-          # fail. Empty string makes Cargo call rustc directly.
-          RUSTC_WRAPPER: ""
-        run: cargo deny check advisories
+        run: |
+          set -euo pipefail
+          cargo_bin="$(mise which cargo)"
+          deny_bin="$(mise which cargo-deny)"
+          env -u RUSTC_WRAPPER -u CARGO_BUILD_RUSTC_WRAPPER \
+            CARGO="$cargo_bin" \
+            PATH="$(dirname "$cargo_bin"):$(dirname "$deny_bin"):$PATH" \
+            "$deny_bin" check advisories

@@ -1,4 +1,4 @@
-# Midstream image CVE scan for the ODH Quay builds. Catch HIGH/CRITICAL
+# Midstream image CVE scan for the ODH Quay builds. Catch MEDIUM/HIGH/CRITICAL
 # image vulnerabilities early, before a build is released on a GA branch.
 # Kept separate from trivy-scan.yml so we do not inherit NVIDIA GHCR login
 # or Helm config scans.
@@ -81,10 +81,14 @@ jobs:
             refs+=("${image}:${tag}")
           done <<<"$DEFAULT_IMAGES"
 
+          severity=MEDIUM,HIGH,CRITICAL
+
           {
             echo "### ODH Trivy image scan"
             echo
-            echo "Severity gate: \`HIGH,CRITICAL\`"
+            echo "Severity gate: \`$severity\`"
+            echo
+            echo "Each image prints two tables: RHEL RPMs, then Rust crates. An empty crate table (\`language-specific files num=0\`) means the image has no cargo-auditable metadata; check \`Dockerfile.konflux.*\`."
             echo
             echo "Images:"
             for ref in "${refs[@]}"; do
@@ -94,18 +98,40 @@ jobs:
 
           status=0
           for ref in "${refs[@]}"; do
-            echo "::group::trivy image --scanners vuln $ref"
+            echo "::group::RPMs $ref"
             if trivy image \
               --scanners vuln \
-              --severity HIGH,CRITICAL \
+              --pkg-types os \
+              --severity "$severity" \
               --format table \
               --exit-code 1 \
               "$ref"; then
-              echo "No HIGH/CRITICAL vulnerabilities in $ref"
+              echo "No $severity RPM vulnerabilities in $ref"
             else
-              echo "::error::Trivy found HIGH/CRITICAL vulnerabilities in $ref"
+              echo "::error::Trivy found $severity RPM vulnerabilities in $ref"
               status=1
             fi
+            echo "::endgroup::"
+
+            echo "::group::Rust crates $ref"
+            crate_log=$(mktemp)
+            if trivy image \
+              --scanners vuln \
+              --pkg-types library \
+              --severity "$severity" \
+              --format table \
+              --exit-code 1 \
+              "$ref" 2>&1 | tee "$crate_log"; then
+              if grep -Eq 'language-specific files[[:space:]]+num=0' "$crate_log"; then
+                echo "No Rust crate results for $ref. Check that Dockerfile.konflux.* uses cargo auditable."
+              else
+                echo "No $severity crate vulnerabilities in $ref"
+              fi
+            else
+              echo "::error::Trivy found $severity crate vulnerabilities in $ref"
+              status=1
+            fi
+            rm -f "$crate_log"
             echo "::endgroup::"
           done
 
