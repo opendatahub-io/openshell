@@ -14,6 +14,10 @@
 name: ODH Trivy Image Scan
 
 on:
+  # Temporary: GitHub only registers schedule/workflow_dispatch on the
+  # default branch. Remove this block before merge.
+  push:
+    branches: [cve-testing-workflows]
   schedule:
     - cron: "0 7 * * *"
       timezone: "Europe/Dublin"
