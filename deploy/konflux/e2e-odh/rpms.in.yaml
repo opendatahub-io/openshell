@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build and runtime RPM closure for Dockerfile.konflux.e2e-odh.
+# Regenerate with:
+#   rpm-lockfile-prototype --outfile deploy/konflux/e2e-odh/rpms.lock.yaml \
+#       deploy/konflux/e2e-odh/rpms.in.yaml
+contentOrigin:
+  repos:
+    - repoid: ubi-9-baseos-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/baseos/os/
+    - repoid: ubi-9-appstream-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/appstream/os/
+packages:
+  # Build stage (git-core is also installed in the runtime stage)
+  - gcc
+  - gcc-c++
+  - make
+  - cmake
+  - openssl-devel
+  - git-core
+  - tar
+  - xz
+  # Runtime stage
+  - ca-certificates
+  - crypto-policies-scripts
+  - python3.11
+  - libxslt
+  - util-linux
+  - openssh-clients
+arches:
+  - x86_64
+  - aarch64
+installWeakDeps: false
+context:
+  bare: true

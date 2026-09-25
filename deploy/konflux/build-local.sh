@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Build Konflux images locally using Hermeto prefetched dependencies.
 # Replicates the Konflux hermetic build pipeline (--network none).
 #
 # Prerequisites:
-#   - hermeto (pip install git+https://github.com/hermetoproject/hermeto.git)
+#   - hermeto and rpm (the RPM backend requires a Linux environment)
 #   - podman
 #
 # Usage:
 #   ./deploy/konflux/build-local.sh gateway
 #   ./deploy/konflux/build-local.sh supervisor
 #   ./deploy/konflux/build-local.sh sandbox
+#   ./deploy/konflux/build-local.sh e2e-odh
 #   ./deploy/konflux/build-local.sh all
 #
 # Override architecture (default: host arch via uname -m):
@@ -29,17 +33,29 @@ esac
 PLATFORM="${PLATFORM:-${DEFAULT_PLATFORM}}"
 
 CLEANUP_PATHS=()
+CONFIG_BACKUP_DIR="$(mktemp -d)"
+cp -p "${REPO_ROOT}/.cargo/config.toml" "${CONFIG_BACKUP_DIR}/root-config.toml"
+if [[ -f "${REPO_ROOT}/e2e/rust/.cargo/config.toml" ]]; then
+    cp -p "${REPO_ROOT}/e2e/rust/.cargo/config.toml" "${CONFIG_BACKUP_DIR}/e2e-config.toml"
+fi
 cleanup() {
+    cp -p "${CONFIG_BACKUP_DIR}/root-config.toml" "${REPO_ROOT}/.cargo/config.toml"
+    if [[ -f "${CONFIG_BACKUP_DIR}/e2e-config.toml" ]]; then
+        cp -p "${CONFIG_BACKUP_DIR}/e2e-config.toml" "${REPO_ROOT}/e2e/rust/.cargo/config.toml"
+    else
+        rm -f "${REPO_ROOT}/e2e/rust/.cargo/config.toml"
+        rmdir "${REPO_ROOT}/e2e/rust/.cargo" 2>/dev/null || true
+    fi
     for p in "${CLEANUP_PATHS[@]}"; do
         rm -rf "$p"
     done
-    git -C "${REPO_ROOT}" checkout .cargo/config.toml 2>/dev/null || true
+    rm -rf "${CONFIG_BACKUP_DIR}"
 }
 trap cleanup EXIT
 
 build_image() {
     local component="$1"
-    local dockerfile konfig_dir output_dir repos_dir
+    local dockerfile konfig_dir output_dir repos_dir extra_cargo_input
 
     case "$component" in
         gateway)
@@ -58,6 +74,10 @@ build_image() {
             dockerfile="deploy/docker/Dockerfile.konflux.cli"
             konfig_dir="deploy/konflux/cli"
             ;;
+        e2e-odh)
+            dockerfile="deploy/docker/Dockerfile.konflux.e2e-odh"
+            konfig_dir="deploy/konflux/e2e-odh"
+            ;;
         *)
             echo "Unknown component: $component" >&2
             exit 1
@@ -65,6 +85,10 @@ build_image() {
     esac
 
     output_dir="${OUTPUT_DIR}/${component}"
+    extra_cargo_input=""
+    if [[ "${component}" == "e2e-odh" ]]; then
+        extra_cargo_input='{"path": "e2e/rust", "type": "cargo"},'
+    fi
     repos_dir=$(mktemp -d)
     CLEANUP_PATHS+=("${repos_dir}")
 
@@ -75,6 +99,7 @@ build_image() {
         --output "${output_dir}" \
         "[
             {\"path\": \".\", \"type\": \"cargo\"},
+            ${extra_cargo_input}
             {\"path\": \"${konfig_dir}\", \"type\": \"rpm\"},
             {\"path\": \"${konfig_dir}\", \"type\": \"generic\", \"lockfile\": \"generic-fetcher.yaml\"}
         ]"
@@ -101,7 +126,8 @@ build_image() {
     hermetic_dockerfile=$(mktemp)
     CLEANUP_PATHS+=("${hermetic_dockerfile}")
     cp "${REPO_ROOT}/${dockerfile}" "${hermetic_dockerfile}"
-    sed -i 's|^\s*RUN |RUN . /cachi2/cachi2.env \&\& \\\n    |i' "${hermetic_dockerfile}"
+    awk '/^[[:space:]]*RUN / { match($0, /RUN /); $0 = substr($0, 1, RSTART - 1) "RUN . /cachi2/cachi2.env && " sprintf("%c", 92) "\n    " substr($0, RSTART + RLENGTH) } { print }' "${hermetic_dockerfile}" > "${hermetic_dockerfile}.injected"
+    mv "${hermetic_dockerfile}.injected" "${hermetic_dockerfile}"
 
     # Disable subscription-manager so it doesn't inject RHEL repos that fail
     # DNS under --network=none. Same as Konflux Tekton script (unlink rhel secrets).
@@ -132,15 +158,17 @@ build_image() {
 
     echo "=== ${component} built successfully ==="
     # The sandbox runtime image is ubi-micro without crypto-policies.
-    if [[ "${component}" != "sandbox" ]]; then
+    if [[ "${component}" != "sandbox" && "${component}" != "e2e-odh" ]]; then
         test "$(podman run --rm --user=0 --entrypoint /usr/bin/update-crypto-policies "openshell-${component}-konflux" --show)" = "DEFAULT:PQ"
     fi
-    podman run --rm --platform "${PLATFORM}" "openshell-${component}-konflux" --help 2>&1 | head -3
+    if [[ "${component}" != "e2e-odh" ]]; then
+        podman run --rm --platform "${PLATFORM}" "openshell-${component}-konflux" --help 2>&1 | head -3
+    fi
     echo ""
 }
 
 if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 {gateway|supervisor|sandbox|cli|all}" >&2
+    echo "Usage: $0 {gateway|supervisor|sandbox|cli|e2e-odh|all}" >&2
     exit 1
 fi
 

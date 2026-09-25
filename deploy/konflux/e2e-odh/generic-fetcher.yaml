@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Hermeto places these pinned artifacts under /cachi2/output/deps/generic/.
+metadata:
+  version: "1.0"
+artifacts:
+  - download_url: https://static.rust-lang.org/dist/rust-1.95.0-x86_64-unknown-linux-gnu.tar.xz
+    checksum: "sha256:2e0338f18ecbaa4a0f631b9e80e8b8e26bb6fe77dd5454fba8a70cf96c1e84a1"
+    filename: rust-1.95.0-x86_64-unknown-linux-gnu.tar.xz
+  - download_url: https://static.rust-lang.org/dist/rust-1.95.0-aarch64-unknown-linux-gnu.tar.xz
+    checksum: "sha256:094c9c36531911c5cc7dd6ab2d3069ab8dcd744d6239b0bda1387b243dfc391e"
+    filename: rust-1.95.0-aarch64-unknown-linux-gnu.tar.xz
+
+  - download_url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.20.0/openshift-client-linux-amd64-rhel9-4.20.0.tar.gz
+    checksum: "sha256:dbc11aa32c8fa967c47c46900c524798b782b355615c9ca8ec2bbba647850420"
+    filename: openshift-client-linux-amd64-rhel9-4.20.0.tar.gz
+  - download_url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.20.0/openshift-client-linux-arm64-rhel9-4.20.0.tar.gz
+    checksum: "sha256:f8a18b7f6a3498d71825d954a54f7b0f9e042d9a7887d9e88c4a44371dddd5e4"
+    filename: openshift-client-linux-arm64-rhel9-4.20.0.tar.gz
+
+  - download_url: https://get.helm.sh/helm-v4.2.0-linux-amd64.tar.gz
+    checksum: "sha256:97dbeb971be4ac4b27e3839976d9564c0fb35c6f3b1da89dd1e292d236af4096"
+    filename: helm-v4.2.0-linux-amd64.tar.gz
+  - download_url: https://get.helm.sh/helm-v4.2.0-linux-arm64.tar.gz
+    checksum: "sha256:1f8de130dfbd04de64978e7b852a7a547be1404956a366608276d2520b678670"
+    filename: helm-v4.2.0-linux-arm64.tar.gz
+
+  - download_url: https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz
+    checksum: "sha256:66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e"
+    filename: cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz
+  - download_url: https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-aarch64-unknown-linux-gnu.tar.gz
+    checksum: "sha256:2a64b3566a92508550a7ab29c3e8db25472ca37730ecb4d22100b6aa440c2a68"
+    filename: cargo-nextest-0.9.143-aarch64-unknown-linux-gnu.tar.gz

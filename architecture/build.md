@@ -102,6 +102,17 @@ with GNU libc and uses the same glibc 2.28 compatibility floor as the gateway.
 
 ## Container Builds
 
+The downstream ODH Konflux e2e image is a separate test artifact. Its
+multi-stage UBI9 build compiles the CLI and a nextest archive from two
+independent Cargo lockfiles, with Rust, RPMs, and cluster tools prefetched by
+Hermeto for a network-isolated build. At runtime, the image entrypoint uses
+the Quay deployment script to create a gateway on the target OpenShift
+cluster, runs one selected test tier, writes JUnit and HTML reports to a
+mounted results directory, and tears down the deployment. The Rust tests
+themselves consume the deployed gateway. The runtime image includes the SSH
+client needed by sandbox connection and lifecycle tests and Git for test
+workloads that use repositories.
+
 Docker E2E tool-dependent workloads use a dedicated Noble-based fixture,
 separate from the product's minimal default image. The fixture supplies the
 test identity and tools, with Python aligned to the host test runner for

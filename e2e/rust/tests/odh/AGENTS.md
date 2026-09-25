@@ -15,6 +15,7 @@ is the source of truth for:
 - the image-provenance check and its required env vars
   (`ALLOWED_IMAGE_REGISTRY_PREFIXES`, `NAMESPACE`, `RELEASE`, `SKIP_IMAGE_PROVENANCE`);
 - the `KUBECONFIG` isolation gotcha for `mise` tasks;
+- the Konflux e2e image, its gateway lifecycle, and report artifacts;
 - rebase guidance for keeping this fork-only directory additive against
   `NVIDIA/OpenShell`.
 
@@ -24,16 +25,19 @@ a rule and the README disagree, fix the drift rather than guessing.
 ## Fork-only, rebase-safe
 
 - Everything under `e2e/rust/tests/odh/` and `tasks/test-odh.toml` is fork-only
-  and must stay that way. Do not add fork-specific content to any upstream file.
-- The only upstream file this work may touch is `e2e/rust/Cargo.toml`, and only
-  via the two appended additive blocks (the `e2e-odh` feature and the `odh`
-  `[[test]]` entry). Never edit the root `AGENTS.md` for ODH-specific rules —
-  put them here instead.
+  and must stay that way. Keep ODH test logic out of upstream source files.
+- Keep the upstream `e2e/rust/Cargo.toml` change limited to the appended
+  `e2e-odh` feature and `odh` `[[test]]` entry. The e2e image may also add
+  its nextest profile to `.config/nextest.toml` and additive integration in
+  `deploy/konflux/build-local.sh` and `architecture/build.md`. Review these
+  shared files when syncing upstream. Never edit the root `AGENTS.md` for
+  ODH-specific rules — put them here instead.
 
 ## Commit messages
 
 - Prefix the commit title of any downstream-only (fork carry) commit with
-  `CARRY:` so it is identifiable when rebasing against `NVIDIA/OpenShell`.
+  `CARRY:` followed by a space so it is identifiable when rebasing against
+  `NVIDIA/OpenShell`.
 - Keep the repository-root Conventional Commits format after the prefix, e.g.
   `CARRY: test(odh): add SELinux enforcing coverage`.
 - Sign off every commit for DCO (`git commit --signoff`) and never reference AI
@@ -49,8 +53,9 @@ a rule and the README disagree, fix the drift rather than guessing.
   `oc debug node ... chroot /host ausearch` work the same from Rust — put them
   in a shared helper (see below), not a shell script.
 - Cluster/deployment setup (Helm values, in-cluster fixtures, proxies) is
-  environment setup, not a test. Keep it out of test bodies and out of new
-  runner scripts. Tests assume an already-deployed, working gateway.
+  environment setup, not a test. Keep it out of test bodies and the tier
+  runner. The e2e image entrypoint may deploy and tear down the gateway;
+  tests still assume an already-deployed, working gateway.
 
 ## Shared helpers
 
@@ -73,11 +78,10 @@ a rule and the README disagree, fix the drift rather than guessing.
 - Add tests by creating a `.rs` file under the right tier and a `mod` line in
   that tier's `mod.rs`, and map upstream binaries/filters in `tiers.toml`. Do
   not add new one-off `mise` tasks for individual test lanes.
-- A small, fixed set of entry points (`e2e:odh:smoke|tier1|tier2|tier3`) is a
-  hard requirement: the OpenShift AI Shift-Left testing pipeline consumes these
-  standard tier tasks as quality gates. Bespoke deploy-and-run tasks with their
-  own deploy semantics and host-access assumptions are hard to slot into those
-  gates — keep the surface stable.
+- Keep the standard tier entry points
+  (`e2e:odh:smoke|tier1|tier2|tier3`, `e2e:odh`, and `e2e:odh:full`)
+  stable. The OpenShift AI Shift-Left pipeline consumes those tiers as
+  quality gates; the image entrypoint handles deployment around them.
 
 ## Gate environment-specific tests, don't fork the task
 

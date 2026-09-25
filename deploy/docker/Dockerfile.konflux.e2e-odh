@@ -1,0 +1,127 @@
+# syntax=docker/dockerfile:1.4
+
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# ODH Shift-Left e2e runner. Hermeto prefetches both Cargo lockfiles, RPMs,
+# and generic artifacts before this build runs without network access.
+
+ARG RUST_VERSION=1.95.0
+ARG OC_VERSION=4.20.0
+ARG HELM_VERSION=4.2.0
+ARG NEXTEST_VERSION=0.9.143
+
+FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6 AS builder
+
+ARG RUST_VERSION
+ARG NEXTEST_VERSION
+ARG TARGETARCH
+ARG OPENSHELL_VERSION=""
+
+RUN dnf install -y --nodocs --setopt=install_weak_deps=0 \
+        gcc gcc-c++ make cmake openssl-devel git-core tar xz \
+    && dnf clean all
+
+RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) exit 1;; esac) && \
+    RUST_TRIPLE="${RUST_ARCH}-unknown-linux-gnu" && \
+    mkdir -p /tmp/rust-toolchain && \
+    tar xJf "/cachi2/output/deps/generic/rust-${RUST_VERSION}-${RUST_TRIPLE}.tar.xz" \
+        -C /tmp/rust-toolchain --strip-components=1 && \
+    /tmp/rust-toolchain/install.sh --prefix=/usr/local && \
+    tar xzf "/cachi2/output/deps/generic/cargo-nextest-${NEXTEST_VERSION}-${RUST_TRIPLE}.tar.gz" \
+        -C /usr/local/bin cargo-nextest
+
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+
+WORKDIR /home/odh/openshell-e2e-odh
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ .cargo/
+COPY .config/ .config/
+COPY crates/ crates/
+COPY proto/ proto/
+COPY providers/ providers/
+COPY e2e/ e2e/
+COPY scripts/ scripts/
+COPY tasks/ tasks/
+COPY odh/ odh/
+COPY deploy/helm/openshell/ deploy/helm/openshell/
+
+RUN VER="${OPENSHELL_VERSION#v}" && \
+    if [ -n "${VER}" ]; then export OPENSHELL_GIT_VERSION="${VER}"; fi && \
+    cargo build --release --package openshell-cli && \
+    mkdir -p /opt/openshell && \
+    cargo nextest archive \
+        --manifest-path e2e/rust/Cargo.toml \
+        --target-dir e2e/rust/target \
+        --features e2e-odh \
+        --archive-file /opt/openshell/e2e-odh.tar.zst
+
+FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6
+
+ARG OC_VERSION
+ARG HELM_VERSION
+ARG TARGETARCH
+
+RUN dnf install -y --nodocs --setopt=install_weak_deps=0 \
+        ca-certificates crypto-policies-scripts \
+        python3.11 libxslt util-linux openssh-clients git-core tar \
+    && dnf clean all && \
+    update-crypto-policies --set DEFAULT:PQ
+
+COPY --from=builder /usr/local/ /usr/local/
+COPY --from=builder --chmod=0555 \
+    /home/odh/openshell-e2e-odh/target/release/openshell /usr/local/bin/openshell
+COPY --from=builder /opt/openshell/e2e-odh.tar.zst /opt/openshell/e2e-odh.tar.zst
+
+RUN OC_ARCH=$(case "${TARGETARCH}" in amd64) echo amd64;; arm64) echo arm64;; *) exit 1;; esac) && \
+    mkdir -p /tmp/oc /tmp/helm && \
+    tar xzf "/cachi2/output/deps/generic/openshift-client-linux-${OC_ARCH}-rhel9-${OC_VERSION}.tar.gz" \
+        -C /tmp/oc oc kubectl && \
+    install -m 0555 /tmp/oc/oc /tmp/oc/kubectl /usr/local/bin/ && \
+    tar xzf "/cachi2/output/deps/generic/helm-v${HELM_VERSION}-linux-${OC_ARCH}.tar.gz" \
+        -C /tmp/helm && \
+    install -m 0555 "/tmp/helm/linux-${OC_ARCH}/helm" /usr/local/bin/helm
+
+WORKDIR /home/odh/openshell-e2e-odh
+COPY --chown=1000:1000 Cargo.toml Cargo.lock ./
+COPY --chown=1000:1000 .cargo/ .cargo/
+COPY --chown=1000:1000 .config/ .config/
+COPY --chown=1000:1000 crates/ crates/
+COPY --chown=1000:1000 proto/ proto/
+COPY --chown=1000:1000 providers/ providers/
+COPY --chown=1000:1000 e2e/ e2e/
+COPY --chown=1000:1000 scripts/ scripts/
+COPY --chown=1000:1000 tasks/ tasks/
+COPY --chown=1000:1000 odh/ odh/
+COPY --chown=1000:1000 deploy/helm/openshell/ deploy/helm/openshell/
+
+RUN mkdir -p results .kube /home/odh/.config/openshell && \
+    chown -R 1000:1000 /home/odh
+
+# Fail the build if an expected test runtime tool is absent. In particular,
+# sandbox connection uses ssh, and future repository tests need git.
+RUN for tool in bash oc kubectl helm openshell cargo cargo-nextest \
+        python3.11 xsltproc script ssh git tar base64; do \
+        command -v "${tool}" >/dev/null || { echo "missing e2e runtime tool: ${tool}" >&2; exit 1; }; \
+    done
+
+ENV HOME=/home/odh \
+    KUBECONFIG=/home/odh/openshell-e2e-odh/.kube/config \
+    OPENSHELL_BIN=/usr/local/bin/openshell \
+    OPENSHELL_E2E_NEXTEST_ARCHIVE=/opt/openshell/e2e-odh.tar.zst \
+    OPENSHELL_E2E_DEPLOY_GATEWAY=1 \
+    PYTHON_BIN=python3.11
+
+LABEL com.redhat.component="odh-openshell-e2e-odh-container" \
+      description="ODH Shift-Left e2e tests for OpenShell" \
+      summary="ODH Shift-Left e2e tests for OpenShell" \
+      name="rhoai/odh-openshell-e2e-odh-rhel9" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.openshift.expose-services="" \
+      io.k8s.display-name="odh-openshell-e2e-odh" \
+      io.k8s.description="odh-openshell-e2e-odh" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
+
+USER 1000:1000
+ENTRYPOINT ["/home/odh/openshell-e2e-odh/odh/scripts/e2e-odh-entrypoint.sh"]
+CMD ["smoke"]

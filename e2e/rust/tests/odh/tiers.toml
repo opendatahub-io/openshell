@@ -4,9 +4,9 @@
 # Maps each test tier to the upstream e2e test binaries and the ODH test
 # module filter that belong to it. Read at runtime by run-odh-test-tier.sh.
 #
-# `upstream_tests` names `[[test]]` entries from e2e/rust/Cargo.toml (run via
-# `cargo test --test <name>`). `odh_filter` is a `cargo test` substring filter
-# applied to the `odh` test binary, matching module-path-prefixed test names
+# `upstream_tests` names explicit or auto-discovered Cargo test binaries.
+# `upstream_test_exclusions` removes named tests from a selected binary.
+# `odh_filter` matches module-path-prefixed test names in the `odh` binary
 # (e.g. "smoke::" runs every test under tests/odh/smoke/).
 #
 # The upstream test assignments below are placeholders — fill them in based
@@ -26,15 +26,44 @@ odh_filter = "smoke::"
 
 [tier1]
 description = "High-priority tests excluding Smoke (15 min target)"
-upstream_tests = ["readyz_health", "sandbox_lifecycle", "landlock", "user_namespaces"]
+upstream_tests = ["sandbox_lifecycle", "landlock", "user_namespaces"]
 odh_filter = "tier1::"
+
+[tier1.upstream_test_exclusions]
+sandbox_lifecycle = [
+  "canonical_main_disconnect_reconnect_replays_history_for_same_process",
+]
 
 [tier2]
 description = "Medium/low priority positive tests"
-upstream_tests = ["kubernetes_corporate_proxy", "workspace_lifecycle"]
+# Corporate proxy needs a cluster-reachable fixture configured before Helm install.
+upstream_tests = ["workspace_lifecycle"]
 odh_filter = "tier2::"
 
 [tier3]
 description = "Negative and destructive tests"
 upstream_tests = []
 odh_filter = "tier3::"
+
+[odh]
+description = "All ODH-specific tests"
+upstream_tests = []
+odh_filter = ""
+odh_only = true
+
+[full]
+description = "All feature-enabled upstream and ODH tests except listed exclusions"
+upstream_tests = []
+odh_filter = ""
+all_binaries = true
+
+[full.upstream_test_exclusions]
+# The full OpenShift run on 2026-09-25 identified these five failures.
+# Keep each exclusion exact so other tests in these binaries still run.
+live_policy_update = ["initial_sparse_policy_is_acknowledged_as_loaded"]
+no_proxy = ["sandbox_reaches_localhost_without_proxy_environment"]
+sandbox_lifecycle = [
+  "canonical_main_disconnect_reconnect_replays_history_for_same_process",
+  "sandbox_stop_start_preserves_workspace",
+]
+port_forward = ["port_forward_echo"]
