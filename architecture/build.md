@@ -23,6 +23,11 @@ OpenShell builds these main artifacts:
 | VM driver/runtime assets | `crates/openshell-driver-vm` |
 | Published docs site | `docs/` rendered by Fern config in `fern/` |
 
+Release Tag publishes the same tagged docs commit as an immutable `vX.Y.Z`
+snapshot and the mutable `latest` alias. Release Dev updates `dev`. The Fern
+selector pins `latest` and `dev`, then lists versioned snapshots newest first.
+The current release workflows do not request availability badges.
+
 Workload images are standard OCI images supplied by operators or users.
 
 ## Build Features

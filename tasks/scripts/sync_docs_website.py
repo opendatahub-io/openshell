@@ -91,8 +91,8 @@ def resolve_display_name(
     return slug
 
 
-def resolve_availability(channel: str, override: str) -> str | None:
-    availability = override or ("beta" if channel == "dev" else "")
+def resolve_availability(override: str) -> str | None:
+    availability = override
     if not availability:
         return None
     if availability not in VERSION_AVAILABILITIES:
@@ -108,12 +108,6 @@ def parse_release_version(value: str) -> Version:
         return Version(value.removeprefix("v"))
     except InvalidVersion as exc:
         raise ValueError(f"invalid release version: {value}") from exc
-
-
-def default_stable_availability(release_version: str) -> str | None:
-    if parse_release_version(release_version) >= Version("0.1.0"):
-        return "stable"
-    return None
 
 
 def ensure_existing(path: Path, label: str) -> None:
@@ -340,18 +334,20 @@ def ordered_entries(
 ) -> list[VersionEntry]:
     by_slug = {entry.slug: entry for entry in existing}
     by_slug[updated.slug] = updated
-    existing_order = [entry.slug for entry in existing if entry.slug != updated.slug]
+    pinned = [by_slug[slug] for slug in ("latest", "dev") if slug in by_slug]
 
-    order: list[str] = []
-    for slug in ("latest", "dev"):
-        if slug in by_slug:
-            order.append(slug)
-    for slug in existing_order:
-        if slug not in order and slug in by_slug:
-            order.append(slug)
-    if updated.slug not in order:
-        order.append(updated.slug)
-    return [by_slug[slug] for slug in order]
+    versioned: list[tuple[Version, VersionEntry]] = []
+    other: list[VersionEntry] = []
+    for entry in by_slug.values():
+        if entry.slug in {"latest", "dev"}:
+            continue
+        try:
+            versioned.append((parse_release_version(entry.slug), entry))
+        except ValueError:
+            other.append(entry)
+
+    versioned.sort(key=lambda item: item[0], reverse=True)
+    return pinned + [entry for _, entry in versioned] + other
 
 
 def render_versions(entries: list[VersionEntry]) -> list[YamlMapping]:
@@ -492,7 +488,7 @@ def sync_docs(args: argparse.Namespace) -> None:
         )
     slug = resolve_slug(channel, version_slug)
     display_name = resolve_display_name(channel, slug, source_ref, display_override)
-    availability = resolve_availability(channel, availability_override)
+    availability = resolve_availability(availability_override)
     metadata_path = target_fern / SNAPSHOT_METADATA_FILE
     snapshots = read_snapshot_metadata(metadata_path)
     docs_yml = target_fern / "docs.yml"
@@ -503,9 +499,6 @@ def sync_docs(args: argparse.Namespace) -> None:
         if slug != expected_slug:
             raise ValueError(f"stable version slug must be {expected_slug}, got {slug}")
         ensure_immutable_snapshot(snapshots, target_fern, slug, source_sha)
-        stable_availability = availability or default_stable_availability(
-            release_version
-        )
         write_snapshot(
             source_docs,
             source_fern,
@@ -514,7 +507,7 @@ def sync_docs(args: argparse.Namespace) -> None:
                 slug=slug,
                 display_name=slug,
                 path=f"./versions/{slug}.yml",
-                availability=stable_availability,
+                availability=availability,
                 announcement=source_version_announcement(
                     source_fern / "docs.yml", slug
                 ),
@@ -543,7 +536,7 @@ def sync_docs(args: argparse.Namespace) -> None:
                     slug="latest",
                     display_name=display_override or f"Latest ({slug})",
                     path="./versions/latest.yml",
-                    availability=stable_availability,
+                    availability=availability,
                     announcement=source_version_announcement(
                         source_fern / "docs.yml", "latest"
                     ),

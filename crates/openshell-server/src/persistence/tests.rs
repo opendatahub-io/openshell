@@ -2237,6 +2237,61 @@ async fn cas_update_message_cas_succeeds() {
 }
 
 #[tokio::test]
+async fn cas_update_message_cas_internal_updates_survive_concurrent_writers() {
+    use openshell_core::proto::Sandbox;
+    use std::sync::Arc;
+
+    let store = Arc::new(test_store().await);
+    let sandbox = Sandbox {
+        metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+            id: "test-id".to_string(),
+            name: "test-sandbox".to_string(),
+            created_time: openshell_core::time::timestamp_from_millis(1000).ok(),
+            labels: std::collections::HashMap::new(),
+            resource_version: 0,
+            annotations: std::collections::HashMap::new(),
+            workspace: "default".to_string(),
+            deletion_time: None,
+        }),
+        ..Sandbox::default()
+    };
+    store.put_message(&sandbox).await.unwrap();
+
+    let handles: Vec<_> = (0..5)
+        .map(|i| {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .update_message_cas::<Sandbox, _>("test-id", 0, move |s| {
+                        s.metadata
+                            .as_mut()
+                            .unwrap()
+                            .annotations
+                            .insert(format!("writer-{i}"), "done".to_string());
+                    })
+                    .await
+            })
+        })
+        .collect();
+    for result in futures::future::join_all(handles).await {
+        result
+            .unwrap()
+            .expect("internal update must not surface a conflict");
+    }
+
+    let stored = store
+        .get_message::<Sandbox>("test-id")
+        .await
+        .unwrap()
+        .unwrap();
+    let metadata = stored.metadata.unwrap();
+    assert_eq!(metadata.resource_version, 6);
+    for i in 0..5 {
+        assert_eq!(metadata.annotations[&format!("writer-{i}")], "done");
+    }
+}
+
+#[tokio::test]
 async fn cas_update_message_cas_conflicts_on_concurrent_updates() {
     use openshell_core::proto::Sandbox;
     use std::sync::Arc;

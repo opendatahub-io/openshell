@@ -1104,7 +1104,7 @@ impl Store {
     /// Update a protobuf message using CAS (compare-and-swap).
     ///
     /// Fetches the current object, validates the expected version, applies the
-    /// mutation function, and attempts a single CAS write. Returns Conflict on
+    /// mutation function, and attempts a CAS write. Returns Conflict on
     /// version mismatch for caller-driven retry.
     ///
     /// # Arguments
@@ -1137,79 +1137,92 @@ impl Store {
             + Clone,
         F: FnMut(&mut T),
     {
-        // Fetch current object with authoritative resource_version
-        let current = self
-            .get_message::<T>(id)
-            .await?
-            .ok_or_else(|| PersistenceError::Database(format!("object {id} not found")))?;
+        const INTERNAL_CAS_ATTEMPTS: u32 = 5;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            // Fetch current object with authoritative resource_version
+            let current = self
+                .get_message::<T>(id)
+                .await?
+                .ok_or_else(|| PersistenceError::Database(format!("object {id} not found")))?;
 
-        let current_version = current.get_resource_version();
+            let current_version = current.get_resource_version();
 
-        // Determine the version to use for CAS:
-        // - If expected_version is 0, use current version (internal operations)
-        // - Otherwise, validate that expected matches current (client-facing operations)
-        let cas_version = if expected_version == 0 {
-            current_version
-        } else {
-            if expected_version != current_version {
-                return Err(PersistenceError::Conflict {
-                    current_resource_version: Some(current_version),
-                });
+            // Determine the version to use for CAS:
+            // - If expected_version is 0, use current version (internal operations)
+            // - Otherwise, validate that expected matches current (client-facing operations)
+            let cas_version = if expected_version == 0 {
+                current_version
+            } else {
+                if expected_version != current_version {
+                    return Err(PersistenceError::Conflict {
+                        current_resource_version: Some(current_version),
+                    });
+                }
+                expected_version
+            };
+
+            // Apply mutation
+            let mut updated = current.clone();
+            mutate(&mut updated);
+
+            // Serialize labels
+            let labels_map = updated.object_labels();
+            let labels_json = if labels_map.as_ref().is_none_or(HashMap::is_empty) {
+                None
+            } else {
+                Some(serde_json::to_string(&labels_map).map_err(|e| {
+                    PersistenceError::Encode(format!("failed to serialize labels: {e}"))
+                })?)
+            };
+
+            if T::requires_workspace() && updated.object_workspace().is_empty() {
+                return Err(PersistenceError::Encode(format!(
+                    "{} requires a non-empty workspace",
+                    T::object_type(),
+                )));
             }
-            expected_version
-        };
 
-        // Apply mutation
-        let mut updated = current.clone();
-        mutate(&mut updated);
+            if updated.object_name() != current.object_name() {
+                return Err(PersistenceError::Encode(format!(
+                    "{} name cannot be changed after creation",
+                    T::object_type(),
+                )));
+            }
 
-        // Serialize labels
-        let labels_map = updated.object_labels();
-        let labels_json = if labels_map.as_ref().is_none_or(HashMap::is_empty) {
-            None
-        } else {
-            Some(serde_json::to_string(&labels_map).map_err(|e| {
-                PersistenceError::Encode(format!("failed to serialize labels: {e}"))
-            })?)
-        };
+            if updated.object_workspace() != current.object_workspace() {
+                return Err(PersistenceError::Encode(format!(
+                    "{} workspace cannot be changed after creation",
+                    T::object_type(),
+                )));
+            }
 
-        if T::requires_workspace() && updated.object_workspace().is_empty() {
-            return Err(PersistenceError::Encode(format!(
-                "{} requires a non-empty workspace",
-                T::object_type(),
-            )));
+            let result = match self
+                .put_if(
+                    T::object_type(),
+                    updated.object_id(),
+                    updated.object_name(),
+                    updated.object_workspace(),
+                    &updated.encode_to_vec(),
+                    labels_json.as_deref(),
+                    WriteCondition::MatchResourceVersion(cas_version),
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(PersistenceError::Conflict { .. })
+                    if expected_version == 0 && attempt < INTERNAL_CAS_ATTEMPTS =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+
+            // Success - hydrate the new resource_version and return
+            updated.set_resource_version(result.resource_version);
+            return Ok(updated);
         }
-
-        if updated.object_name() != current.object_name() {
-            return Err(PersistenceError::Encode(format!(
-                "{} name cannot be changed after creation",
-                T::object_type(),
-            )));
-        }
-
-        if updated.object_workspace() != current.object_workspace() {
-            return Err(PersistenceError::Encode(format!(
-                "{} workspace cannot be changed after creation",
-                T::object_type(),
-            )));
-        }
-
-        // Single-attempt CAS write - fails with Conflict on version mismatch
-        let result = self
-            .put_if(
-                T::object_type(),
-                updated.object_id(),
-                updated.object_name(),
-                updated.object_workspace(),
-                &updated.encode_to_vec(),
-                labels_json.as_deref(),
-                WriteCondition::MatchResourceVersion(cas_version),
-            )
-            .await?;
-
-        // Success - hydrate the new resource_version and return
-        updated.set_resource_version(result.resource_version);
-        Ok(updated)
     }
 }
 

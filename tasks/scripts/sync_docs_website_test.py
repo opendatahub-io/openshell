@@ -48,7 +48,7 @@ def test_release_workflows_sync_and_publish_docs_once() -> None:
     )
     assert dev_job["with"]["publish"] == "true"
     assert dev_job["with"]["display_name"] == "Dev"
-    assert dev_job["with"]["availability"] == "beta"
+    assert "availability" not in dev_job["with"]
 
     assert tag_job["needs"] == [
         "compute-versions",
@@ -58,12 +58,15 @@ def test_release_workflows_sync_and_publish_docs_once() -> None:
         "trigger-wheel-publish",
     ]
     assert tag_job["uses"] == "./.github/workflows/sync-docs.yml"
-    assert tag_job["with"]["channel"] == "latest"
+    assert tag_job["with"]["channel"] == "stable"
     assert (
         tag_job["with"]["release_version"]
         == "${{ needs.compute-versions.outputs.semver }}"
     )
-    assert "version_slug" not in tag_job["with"]
+    assert (
+        tag_job["with"]["version_slug"]
+        == "v${{ needs.compute-versions.outputs.semver }}"
+    )
     assert (
         tag_job["with"]["display_name"]
         == "Latest (v${{ needs.compute-versions.outputs.semver }})"
@@ -139,12 +142,11 @@ def test_resolve_display_name() -> None:
 
 
 def test_resolve_availability() -> None:
-    assert sdw.resolve_availability("dev", "") == "beta"
-    assert sdw.resolve_availability("latest", "") is None
-    assert sdw.resolve_availability("version", "") is None
-    assert sdw.resolve_availability("version", "deprecated") == "deprecated"
+    assert sdw.resolve_availability("") is None
+    assert sdw.resolve_availability("beta") == "beta"
+    assert sdw.resolve_availability("deprecated") == "deprecated"
     with pytest.raises(ValueError):
-        sdw.resolve_availability("dev", "alpha")
+        sdw.resolve_availability("alpha")
 
 
 def test_parse_and_render_versions_preserves_version_settings() -> None:
@@ -266,12 +268,35 @@ def test_source_version_announcement_maps_single_source_version_to_channel(
 
 def test_ordered_entries_pins_latest_then_dev() -> None:
     existing = [
-        sdw.VersionEntry("v0.0.36", "v0.0.36", "./versions/v0.0.36.yml"),
+        sdw.VersionEntry("v0.0.116", "v0.0.116", "./versions/v0.0.116.yml"),
         sdw.VersionEntry("dev", "dev", "./versions/dev.yml"),
+        sdw.VersionEntry("v1.4.0", "v1.4.0", "./versions/v1.4.0.yml"),
+        sdw.VersionEntry("v1.4.2", "v1.4.2", "./versions/v1.4.2.yml"),
+        sdw.VersionEntry("v1.4.1", "v1.4.1", "./versions/v1.4.1.yml"),
+        sdw.VersionEntry("legacy", "legacy", "./versions/legacy.yml"),
     ]
     updated = sdw.VersionEntry("latest", "Latest", "./versions/latest.yml")
     ordered = [entry.slug for entry in sdw.ordered_entries(existing, updated)]
-    assert ordered == ["latest", "dev", "v0.0.36"]
+    assert ordered == [
+        "latest",
+        "dev",
+        "v1.4.2",
+        "v1.4.1",
+        "v1.4.0",
+        "v0.0.116",
+        "legacy",
+    ]
+
+    refreshed = sdw.VersionEntry("v1.4.1", "v1.4.1", "./versions/v1.4.1.yml")
+    refreshed_order = [entry.slug for entry in sdw.ordered_entries(existing, refreshed)]
+    assert refreshed_order == [
+        "dev",
+        "v1.4.2",
+        "v1.4.1",
+        "v1.4.0",
+        "v0.0.116",
+        "legacy",
+    ]
 
 
 def test_prefix_navigation_paths() -> None:
@@ -398,7 +423,7 @@ def test_sync_docs_scopes_version_announcements_to_updated_channel(
             release_version="0.0.117.dev56",
             version_slug="",
             display_name="Dev",
-            availability="beta",
+            availability="",
         )
     )
 
@@ -421,7 +446,6 @@ def test_sync_docs_scopes_version_announcements_to_updated_channel(
             "display-name": "Dev",
             "path": "./versions/dev.yml",
             "slug": "dev",
-            "availability": "beta",
             "announcement": {"message": "OpenShell 0.1.0 is coming soon."},
         },
     ]
@@ -463,7 +487,9 @@ def test_sync_docs_scopes_version_announcements_to_updated_channel(
     assert versions[1]["announcement"] == {"message": "OpenShell 0.1.0 is coming soon."}
 
 
-def test_sync_docs_preserves_other_version_availability(tmp_path: Path) -> None:
+def test_sync_docs_clears_updated_badge_and_preserves_other_badges(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "source"
     website = tmp_path / "docs-website"
     _make_source_tree(source)
@@ -474,11 +500,17 @@ def test_sync_docs_preserves_other_version_availability(tmp_path: Path) -> None:
             {
                 "versions": [
                     {
+                        "display-name": "Dev",
+                        "path": "./versions/dev.yml",
+                        "slug": "dev",
+                        "availability": "beta",
+                    },
+                    {
                         "display-name": "v0.0.36",
                         "path": "./versions/v0.0.36.yml",
                         "slug": "v0.0.36",
                         "availability": "deprecated",
-                    }
+                    },
                 ]
             }
         ),
@@ -496,7 +528,7 @@ def test_sync_docs_preserves_other_version_availability(tmp_path: Path) -> None:
             release_version="0.0.117.dev56",
             version_slug="",
             display_name="Dev (v0.0.117.dev56)",
-            availability="beta",
+            availability="",
         )
     )
 
@@ -506,7 +538,6 @@ def test_sync_docs_preserves_other_version_availability(tmp_path: Path) -> None:
             "display-name": "Dev (v0.0.117.dev56)",
             "path": "./versions/dev.yml",
             "slug": "dev",
-            "availability": "beta",
         },
         {
             "display-name": "v0.0.36",
@@ -589,6 +620,30 @@ def test_stable_sync_creates_immutable_version_and_promotes_latest(
     website = tmp_path / "docs-website"
     _make_source_tree(source)
     _make_docs_website_tree(website)
+    (website / "fern" / "docs.yml").write_text(
+        yaml.safe_dump(
+            {
+                "versions": [
+                    {
+                        "display-name": "Latest (v0.0.116)",
+                        "path": "./versions/latest.yml",
+                        "slug": "latest",
+                    },
+                    {
+                        "display-name": "Dev",
+                        "path": "./versions/dev.yml",
+                        "slug": "dev",
+                    },
+                    {
+                        "display-name": "v0.0.116",
+                        "path": "./versions/v0.0.116.yml",
+                        "slug": "v0.0.116",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
     sdw.sync_docs(
         Namespace(
@@ -609,10 +664,14 @@ def test_stable_sync_creates_immutable_version_and_promotes_latest(
     assert (fern / "pages-v0.2.0" / "intro.mdx").is_file()
     assert (fern / "pages-latest" / "intro.mdx").is_file()
     versions = read_yaml(fern / "docs.yml")["versions"]
-    assert [entry["slug"] for entry in versions] == ["latest", "v0.2.0"]
+    assert [entry["slug"] for entry in versions] == [
+        "latest",
+        "dev",
+        "v0.2.0",
+        "v0.0.116",
+    ]
     assert versions[0]["display-name"] == "Latest (v0.2.0)"
-    assert versions[0]["availability"] == "stable"
-    assert versions[1]["availability"] == "stable"
+    assert all("availability" not in entry for entry in versions)
     snapshots = read_yaml(fern / sdw.SNAPSHOT_METADATA_FILE)["snapshots"]
     assert snapshots["latest"] == {
         "source-ref": "v0.2.0",
@@ -892,6 +951,7 @@ def test_remove_docs_drops_snapshot(tmp_path: Path) -> None:
     fern = website / "fern"
     assert (fern / "pages-v0.0.36").is_dir()
     assert (fern / "versions" / "v0.0.36.yml").is_file()
+    assert read_yaml(fern / "docs.yml")["versions"][0]["availability"] == "deprecated"
 
     sdw.remove_docs(
         Namespace(
