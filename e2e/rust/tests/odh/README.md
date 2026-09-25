@@ -18,7 +18,8 @@ e2e/rust/tests/odh/
 ├── main.rs                    # crate root, declares helper + tier modules, gated on feature "e2e-odh"
 ├── odh_harness/               # fork-local shared test helpers (see "Shared test helpers")
 │   ├── mod.rs
-│   └── oc.rs                   # `oc` command builder (honors active kube context) + JSON runner
+│   ├── oc.rs                   # `oc` command builder (honors active kube context) + runners
+│   └── sandbox.rs              # Sandbox custom-resource → pod-selector lookup
 ├── smoke/                     # Smoke tier: component-level critical tests
 │   ├── mod.rs
 │   ├── gateway.rs              # gateway reachability
@@ -28,7 +29,8 @@ e2e/rust/tests/odh/
 │   ├── mod.rs
 │   └── selinux.rs              # combined/sidecar process-supervisor SELinux label
 ├── tier2/                     # Tier 2: medium/low priority positive tests
-│   └── mod.rs                    # empty — no scenarios yet
+│   ├── mod.rs
+│   └── network_policy.rs       # NetworkPolicy and proxy-pod boundary coverage
 ├── tier3/                      # Tier 3: negative and destructive tests
 │   └── mod.rs                    # empty — no scenarios yet
 ├── tiers.toml                  # tier → upstream test binaries + ODH module filter
@@ -60,6 +62,10 @@ plain module is enough — no new crate and no workspace change.
 - `odh_harness::selinux::SelinuxAudit` — an opt-in scenario guard that detects
   OpenShift, requires every Ready worker to report `Enforcing`, records
   node-local audit cutoffs, and rejects OpenShell AVCs on completion.
+- `odh_harness::sandbox` — resolves a sandbox custom resource to the pod
+  selector reported by its status. The controller does not propagate the
+  OpenShell sandbox-name label to the pod, so downstream checks must use this
+  selector rather than querying pods by sandbox name.
 
 Put ODH-specific shared helpers here (the `oc` builder and node-level SELinux
 checks), and reuse them rather than
@@ -95,10 +101,57 @@ they should be revisited based on measured execution time and actual test
 criticality, not just copied as-is.
 
 Smoke covers gateway reachability, sandbox lifecycle, and image provenance.
-Tier 1 checks the process-supervisor SELinux label. Tier 2 and Tier 3 have no
-ODH scenarios yet; they run their mapped upstream tests and the image
-provenance check. Add scenarios by creating a `.rs` file under the tier's
-directory and declaring it with a `mod` line in that tier's `mod.rs`.
+Tier 1 checks the process-supervisor SELinux label. Tier 2 contains
+`tier2::network_policy`, which verifies that OpenShift `NetworkPolicy`
+enforcement coexists with the OpenShell proxy-pod boundary. These tests skip
+cleanly when the active cluster is not OpenShift. Tier 3 has no ODH scenarios
+yet; it runs its mapped upstream tests and the image provenance check. Add
+scenarios by creating a `.rs` file under the tier's directory and declaring
+it with a `mod` line in that tier's `mod.rs`.
+
+`tier2::network_policy` also connects from a supervisor-labeled probe through
+both boundary Services: the probe verifies its own pair's pinned TLS identity
+and checks that verification fails for the peer. The test reads the
+first supervisor's runtime descriptor from its bootstrap Secret, so the test
+identity needs the following RBAC permissions in the sandbox namespace:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openshell-odh-network-policy-e2e
+  namespace: openshell # replace with the sandbox namespace
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list"]
+```
+
+Bind this Role to the identity that runs the tests. The harness also runs
+`oc get --raw /apis/route.openshift.io/v1` to detect OpenShift, so that
+identity needs `get` access to that API-discovery endpoint as well (for
+example, a ClusterRole rule with
+`nonResourceURLs: ["/apis/route.openshift.io", "/apis/route.openshift.io/*"]`
+and `verbs: ["get"]`).
+
+Tier 3 is an empty module today. Running it executes 0 ODH tests (a
+legitimate `ok` result, not a failure) plus whatever its mapped upstream
+tests and the image provenance test (see below).
 
 ## Prerequisites
 
@@ -155,7 +208,7 @@ Example, running the Smoke tier against a real cluster:
 umask 077
 oc --kubeconfig ~/.kube/config config view --minify --flatten > kubeconfig
 chmod 600 kubeconfig
-ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/nvidia/openshell-community/sandboxes/" \
+ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/nvidia/openshell-community/sandboxes/,ghcr.io/astral-sh/" \
   mise run e2e:odh:smoke
 ```
 
@@ -183,7 +236,14 @@ The runner requires permission to create debug pods and access the host through
 the environment that deploys the gateway; tier1 does not create them. The
 custom egress control is intentionally outside SELinux scope; egress behavior
 remains covered by the existing proxy tests, and this tier does not create a
-SELinux-specific proxy fixture.
+SELinux-specific proxy fixture
+
+The NetworkPolicy Tier 2 fixtures use the immutable
+`registry.access.redhat.com/ubi9/python-311` digest defined in the test. To
+substitute it, set `OPENSHELL_ODH_NETWORK_POLICY_FIXTURE_IMAGE` to a complete
+lowercase SHA-256 image reference (for example,
+`registry.example.com/team/python@sha256:<64-hex-digits>`). Tag-only overrides
+are rejected, and the fixture Pods do not mount a service-account token.
 
 ### Why `e2e:odh` / `e2e:odh:full` run more than you might expect
 
@@ -219,7 +279,7 @@ registry, and that no container — including ephemeral containers — has
 regressed away from `imagePullPolicy: IfNotPresent`.
 
 ```bash
-ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/nvidia/openshell-community/sandboxes/" \
+ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/nvidia/openshell-community/sandboxes/,ghcr.io/astral-sh/" \
   cargo test --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh \
   -- smoke::image_provenance::
 ```
@@ -236,6 +296,10 @@ ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/nvidia/openshell-c
     and `cli` have Tekton pipelines under `.tekton/`), so this upstream
     prefix has to stay allowed until one exists. This is a different path
     alongside the upstream gateway and CLI images.
+  - `ghcr.io/astral-sh/` — the pinned `uv` workload fixture used by the
+    upstream e2e harness when it creates a sandbox. The Agent Sandbox
+    controller uses this image for the test workload's `agent` and
+    `workspace-init` containers; it is not an OpenShell component image.
 
   A prefix without a trailing `/` is rejected outright, since it could
   otherwise match a lookalike host (e.g. `registry.redhat.io` would also

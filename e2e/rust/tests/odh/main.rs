@@ -4,7 +4,7 @@
 //! ODH/RHOAI downstream integration tests.
 //!
 //! This binary is complementary to the upstream e2e suite: it exercises
-//! behavior specific to running OpenShell on OpenShift with ODH/RHOAI
+//! behavior specific to running `OpenShell` on `OpenShift` with ODH/RHOAI
 //! workloads. See TESTING-odh.md for tiering and how to run these tests.
 //!
 //! Test names include the full module path (e.g. `smoke::gateway::test_reachable`),

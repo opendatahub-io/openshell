@@ -19,6 +19,7 @@ use serde_json::Value;
 use openshell_e2e::harness::sandbox::SandboxGuard;
 
 use crate::odh_harness::oc::{oc_command, oc_json};
+use crate::odh_harness::sandbox::sandbox_pod_selector;
 
 fn allowed_prefixes() -> Vec<String> {
     std::env::var("ALLOWED_IMAGE_REGISTRY_PREFIXES")
@@ -143,23 +144,7 @@ async fn test_sandbox_gateway_supervisor_images() {
     // agents.x-k8s.io/sandbox-name-hash label. So look up the CR first and
     // follow its reported `status.selector` to find the pod.
     let sandbox_selector = format!("openshell.ai/sandbox-name={}", sb.name);
-    let sandbox_crs = oc_json(&[
-        "get",
-        "sandboxes.agents.x-k8s.io",
-        "-n",
-        &namespace,
-        "-l",
-        &sandbox_selector,
-        "-o",
-        "json",
-    ])
-    .await;
-    let pod_selector = sandbox_crs
-        .get("items")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .and_then(|cr| cr["status"]["selector"].as_str())
-        .map(str::to_string);
+    let pod_selector = sandbox_pod_selector(&namespace, &sb.name).await;
 
     match pod_selector {
         Some(pod_selector) => {
