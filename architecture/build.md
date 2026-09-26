@@ -324,24 +324,30 @@ for direct executable installation on every environment. Release Dev and
 Release Tag run Ubuntu conformance through the Debian package, while Fedora
 continues using direct executable installation until RPM coverage is available.
 The release canary separately exercises the public installer on Ubuntu. The
-OpenShell Snap requires a compatible, preinstalled non-Snap Docker daemon. Its
-positive canary uses system Docker; negative preflight coverage verifies that
-the installer rejects both missing Docker and the Docker Snap before installing
-OpenShell. Its Debian lane removes snapd before running the installer so Snap
-precedence cannot change the package under test.
-Explicit release tags and the `pre` alias bypass Snap selection and use the
-native Debian or RPM package path even when `snap` is available. The `pre` alias
+installer selects the OpenShell Snap only with `OPENSHELL_INSTALL_METHOD=snap`
+or when the Snap is already installed; otherwise it uses the native Debian or
+RPM package. The Snap requires a compatible, preinstalled non-Snap Docker
+daemon. Its positive canary uses system Docker; negative preflight coverage
+verifies that the installer rejects both missing Docker and the Docker Snap
+before installing OpenShell.
+Explicit release tags and the `pre` alias always use the native Debian or RPM
+package path. The `pre` alias
 checks matching Git tags in version order, then looks up the exact platform
 artifact and verifies the release run instead of listing every repository
 artifact.
 
 Snapd runs the gateway as a root-owned system service. Its generated client
-certificates reside in root-owned snap state and are unavailable to ordinary CLI
-users, so the Snap uses plaintext loopback transport and enables unauthenticated
-local users by default. Debian and RPM packages instead run systemd user services
-and use user-owned mTLS material. Bootstrap creates the default configuration
-only when it is missing. Sandbox-to-gateway sessions remain authenticated with
-gateway-minted JWTs.
+certificates reside in root-owned snap state. The installer copies the client
+bundle into the target user's private Snap state and registers the TLS endpoint;
+direct Snap installs require the same enrollment. The install and post-refresh
+hooks replace configs that explicitly enable plaintext or unauthenticated access
+with the secure default. Snap refreshes
+restart the gateway so the migrated config takes effect immediately.
+
+Debian and RPM packages instead run systemd user services with user-owned mTLS
+material. Sandbox-to-gateway sessions remain authenticated with gateway-minted
+JWTs.
+
 The Debian qualification profile keeps candidate-image overrides outside the
 operator-owned gateway configuration: it writes a harness-owned file under
 `/var/lib/openshell-qualification` and selects it through the packaged systemd

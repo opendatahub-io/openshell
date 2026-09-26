@@ -123,7 +123,14 @@ if [[ ! -x "$snap_install_hook" ]]; then
   echo "FAIL: Snap install hook must be executable" >&2
   exit 1
 fi
-assert_contains "$snap_install_hook" 'allow_unauthenticated_users = true'
+assert_not_contains "$snap_install_hook" 'compute_driver'
+assert_not_contains "$snap_install_hook" 'allow_unauthenticated_users = true'
+assert_contains "$snapcraft" 'refresh-mode: restart'
+if [[ ! -x "$(dirname "$snap_install_hook")/post-refresh" ]]; then
+  echo "FAIL: Snap post-refresh hook must be executable" >&2
+  exit 1
+fi
+assert_not_contains "$ROOT/tasks/scripts/snap-gateway-wrapper.sh" 'OPENSHELL_DISABLE_TLS'
 bash "$ROOT/tasks/scripts/test-snap-install-hook.sh" "$snap_install_hook"
 assert_not_contains "$snap_install_docs" "snap connect openshell:home"
 assert_not_contains "$snap_install_docs" "snap connect openshell:network"
@@ -132,7 +139,7 @@ assert_contains "$snap_install_docs" "snap connect openshell:docker :docker"
 assert_contains "$snap_canary" "install.sh | sh"
 assert_contains "$snap_canary" "ubuntu-snap-system-docker:"
 assert_contains "$snap_canary" "ubuntu-snap-docker-preflight:"
-assert_contains "$snap_repro" 'OPENSHELL_VERSION=dev sh "${install_script}"'
+assert_contains "$snap_repro" 'OPENSHELL_INSTALL_METHOD=snap OPENSHELL_VERSION=dev sh "${install_script}"'
 assert_contains "$snap_repro" "system-docker"
 assert_contains "$snap_repro" "missing-docker"
 assert_contains "$snap_repro" "docker-snap"
