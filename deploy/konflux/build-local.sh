@@ -131,9 +131,11 @@ build_image() {
         "${REPO_ROOT}"
 
     echo "=== ${component} built successfully ==="
-    # The sandbox runtime image is ubi-micro without crypto-policies.
+    # The stock RHEL 10.2 DEFAULT policy must keep the post-quantum ML-KEM
+    # groups. The sandbox runtime image is ubi-micro without crypto-policies.
     if [[ "${component}" != "sandbox" ]]; then
-        test "$(podman run --rm --user=0 --entrypoint /usr/bin/update-crypto-policies "openshell-${component}-konflux" --show)" = "DEFAULT:PQ"
+        test "$(podman run --rm --platform "${PLATFORM}" --entrypoint /usr/bin/cat "openshell-${component}-konflux" /etc/crypto-policies/state/current)" = "DEFAULT"
+        podman run --rm --platform "${PLATFORM}" --entrypoint /usr/bin/grep "openshell-${component}-konflux" -q MLKEM /etc/crypto-policies/back-ends/opensslcnf.config
     fi
     podman run --rm --platform "${PLATFORM}" "openshell-${component}-konflux" --help 2>&1 | head -3
     echo ""

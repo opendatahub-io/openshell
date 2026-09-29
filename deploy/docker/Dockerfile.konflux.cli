@@ -5,7 +5,7 @@
 
 # CLI image for RHEL/Konflux (hermetic build).
 #
-# Multi-stage build that compiles the openshell CLI from source on UBI9,
+# Multi-stage build that compiles the openshell CLI from source on UBI10,
 # dynamically linked against glibc, so the build has no dependency on musl.
 #
 # The CLI must not be linked statically against glibc: a static glibc binary
@@ -14,9 +14,11 @@
 # the process and crashes hostname lookups (RHAI-1927). Linking dynamically
 # uses the host's own libc and NSS, so host resolvers such as myhostname
 # (*.localhost), resolve and sss keep working; pinning NSS the way the static
-# sandbox does would drop them. The trade-off: the binary needs glibc 2.34 or
-# newer on the host (RHEL 9+, Fedora, current Debian and Ubuntu) and no longer
-# runs on older-glibc hosts such as RHEL 8, or on musl hosts.
+# sandbox does would drop them. The trade-off: the binary needs glibc 2.39 or
+# newer on the host (RHEL 10+, Fedora 40+, Debian 13+, Ubuntu 24.04+) and no
+# longer runs on older-glibc hosts such as RHEL 9, or on musl hosts. On
+# x86_64 it also needs an x86-64-v3 CPU, because RHEL 10's GCC targets
+# x86-64-v3 by default when building the C dependencies.
 #
 # Requires prefetched dependencies via Hermeto (cargo, rpm, generic).
 # cargo-auditable is a generic artifact so the CLI binary embeds crate
@@ -29,7 +31,7 @@ ARG RUST_VERSION=1.95.0
 # ---------------------------------------------------------------------------
 # Build stage: compile CLI (dynamically linked glibc binary)
 # ---------------------------------------------------------------------------
-FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6 AS builder
+FROM registry.access.redhat.com/ubi10/ubi:10.2@sha256:9c6a62df091dd9fcef9c52ca4e10c252bdeaa0cb48b363f7e61b4c975dc75d75 AS builder
 
 ARG RUST_VERSION
 ARG TARGETARCH
@@ -95,20 +97,19 @@ RUN . /tmp/build-env && \
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:7fbeae18dc9476399f565e68255f602a3374ea8614ba3d14843565131a13ff93
+FROM registry.access.redhat.com/ubi10/ubi-minimal:10.2@sha256:a9f9316ec3a1419a2de6ce4d2d9f034d477e97cdf2a16d6f04b7bd632ac753c4
 
-RUN microdnf install -y --nodocs ca-certificates crypto-policies-scripts \
+# The RHEL 10.2 DEFAULT crypto policy already enables the post-quantum ML-KEM
+# hybrid key exchange groups, so the stock policy is kept as is.
+RUN microdnf install -y --nodocs ca-certificates \
     && microdnf clean all
-
-# Enable post-quantum cryptography support in the RHEL system policy.
-RUN update-crypto-policies --set DEFAULT:PQ
 
 COPY --from=builder --chmod=0555 /build/output/openshell /usr/local/bin/openshell
 
 LABEL com.redhat.component="odh-openshell-cli-container" \
       description="CLI for OpenShell sandboxed AI agent runtimes" \
       summary="CLI for OpenShell sandboxed AI agent runtimes" \
-      name="rhoai/odh-openshell-cli-rhel9" \
+      name="rhoai/odh-openshell-cli-rhel10" \
       maintainer="['managed-open-data-hub@redhat.com']" \
       io.openshift.expose-services="" \
       io.k8s.display-name="odh-openshell-cli" \

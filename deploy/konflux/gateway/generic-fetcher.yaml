@@ -6,7 +6,7 @@
 metadata:
   version: "1.0"
 artifacts:
-  # Rust toolchain x86_64 (UBI9 ships rust 1.92.0; workspace MSRV is newer)
+  # Rust toolchain x86_64 (UBI10 ships rust 1.92.0; workspace MSRV is newer)
   - download_url: https://static.rust-lang.org/dist/rust-1.95.0-x86_64-unknown-linux-gnu.tar.xz
     checksum: "sha256:2e0338f18ecbaa4a0f631b9e80e8b8e26bb6fe77dd5454fba8a70cf96c1e84a1"
     filename: rust-1.95.0-x86_64-unknown-linux-gnu.tar.xz

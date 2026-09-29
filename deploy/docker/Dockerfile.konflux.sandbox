@@ -9,7 +9,9 @@
 # inside arbitrary agent workloads (Alpine, Debian, distroless, UBI), so it
 # MUST be a fully-static binary. It is built against glibc with
 # `-C target-feature=+crt-static` using Red Hat's glibc-static package
-# (CodeReady Builder), so the build has no dependency on musl.
+# (CodeReady Builder), so the build has no dependency on musl. On x86_64 the
+# binary needs an x86-64-v3 CPU, because RHEL 10 builds libc.a and its GCC
+# compiles the C dependencies for x86-64-v3.
 #
 # Static glibc still loads the NSS modules listed in the workload's
 # /etc/nsswitch.conf, and those crash a static binary (RHAI-1927). The build
@@ -27,7 +29,7 @@ ARG RUST_VERSION=1.95.0
 # ---------------------------------------------------------------------------
 # Build stage: compile sandbox runtime (fully-static glibc binary)
 # ---------------------------------------------------------------------------
-FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6 AS builder
+FROM registry.access.redhat.com/ubi10/ubi:10.2@sha256:9c6a62df091dd9fcef9c52ca4e10c252bdeaa0cb48b363f7e61b4c975dc75d75 AS builder
 
 ARG RUST_VERSION
 ARG TARGETARCH
@@ -136,10 +138,9 @@ RUN set -eu; \
 # Runtime
 # ---------------------------------------------------------------------------
 # ubi-micro with no extra RPMs: the Podman driver mounts this whole image into
-# every workload, so keep it small. Unlike the other Konflux images, it does
-# not set the DEFAULT:PQ crypto policy: the static binary uses its own TLS
-# stack and never reads the system policy.
-FROM registry.access.redhat.com/ubi9/ubi-micro:9.8@sha256:7a0454cbd9bd847e8f6a63b6f0254a6efbeb6e0ed71a5d824a4f6cccbe626650
+# every workload, so keep it small. The static binary uses its own TLS stack
+# and never reads the system crypto policy.
+FROM registry.access.redhat.com/ubi10/ubi-micro:10.2@sha256:37fadb004c6bea628fcdd81376c8fb77bd8d9fd432d90503af4d9e76b1ff7191
 
 # Keep the binary root-owned for image-volume mounts and executable by the
 # sandbox runtime's non-root UID.
@@ -148,7 +149,7 @@ COPY --from=builder --chmod=0555 /build/output/openshell-sandbox /openshell-sand
 LABEL com.redhat.component="odh-openshell-sandbox-container" \
       description="Statically linked (glibc) sandbox runtime for OpenShell, injected into arbitrary agent workloads" \
       summary="Statically linked (glibc) sandbox runtime for OpenShell, injected into arbitrary agent workloads" \
-      name="rhoai/odh-openshell-sandbox-rhel9" \
+      name="rhoai/odh-openshell-sandbox-rhel10" \
       maintainer="['managed-open-data-hub@redhat.com']" \
       io.openshift.expose-services="" \
       io.k8s.display-name="odh-openshell-sandbox" \

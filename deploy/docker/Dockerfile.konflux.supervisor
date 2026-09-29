@@ -11,8 +11,8 @@
 # image's glibc, the same way upstream builds it.
 #
 # It must not be linked statically against glibc: static glibc still dlopen()s
-# the NSS modules listed in /etc/nsswitch.conf (this image ships systemd's
-# myhostname and systemd modules), which crashes a static binary (RHAI-1927).
+# the NSS modules listed in /etc/nsswitch.conf, which crashes a static binary
+# (RHAI-1927).
 #
 # Requires prefetched dependencies via Hermeto (cargo, rpm, generic).
 # cargo-auditable is a generic artifact so the supervisor binary embeds crate
@@ -25,7 +25,7 @@ ARG RUST_VERSION=1.95.0
 # ---------------------------------------------------------------------------
 # Build stage: compile supervisor (dynamically linked glibc binary)
 # ---------------------------------------------------------------------------
-FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6 AS builder
+FROM registry.access.redhat.com/ubi10/ubi:10.2@sha256:9c6a62df091dd9fcef9c52ca4e10c252bdeaa0cb48b363f7e61b4c975dc75d75 AS builder
 
 ARG RUST_VERSION
 ARG TARGETARCH
@@ -97,16 +97,13 @@ RUN . /tmp/build-env && \
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:7fbeae18dc9476399f565e68255f602a3374ea8614ba3d14843565131a13ff93
+FROM registry.access.redhat.com/ubi10/ubi-minimal:10.2@sha256:a9f9316ec3a1419a2de6ce4d2d9f034d477e97cdf2a16d6f04b7bd632ac753c4
 
 ARG TARGETARCH
 
-RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
-        crypto-policies-scripts \
-    && microdnf clean all
-
-# Enable post-quantum cryptography support in the RHEL system policy.
-RUN update-crypto-policies --set DEFAULT:PQ
+# The RHEL 10.2 DEFAULT crypto policy already enables the post-quantum ML-KEM
+# hybrid key exchange groups, so the stock policy is kept as is and the
+# runtime stage installs no RPMs.
 
 # Copy the binary produced by the builder stage; it links against this image's
 # glibc.
@@ -115,7 +112,7 @@ COPY --from=builder --chmod=0555 /build/output/openshell-supervisor /openshell-s
 LABEL com.redhat.component="odh-openshell-supervisor-container" \
       description="Sandbox supervisor for OpenShell, run outside the agent workload" \
       summary="Sandbox supervisor for OpenShell, run outside the agent workload" \
-      name="rhoai/odh-openshell-supervisor-rhel9" \
+      name="rhoai/odh-openshell-supervisor-rhel10" \
       maintainer="['managed-open-data-hub@redhat.com']" \
       io.openshift.expose-services="" \
       io.k8s.display-name="odh-openshell-supervisor" \

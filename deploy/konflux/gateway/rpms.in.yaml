@@ -2,7 +2,7 @@
 # Build + runtime stages combined.
 #
 # Resolved with `context.bare: true` so the lockfile pins the full dependency
-# closure. The image installs RPMs into two different bases (the ubi:9.8 build
+# closure. The image installs RPMs into two different bases (the ubi:10.2 build
 # stage and the ubi-minimal runtime stage); bare guarantees every package is
 # pinned and prefetched regardless of which base already provides it.
 #
@@ -17,24 +17,23 @@
 # /etc/yum.repos.d from inside the base image.
 contentOrigin:
   repos:
-    - repoid: ubi-9-baseos-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/baseos/os/
-    - repoid: ubi-9-appstream-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/appstream/os/
+    - repoid: ubi-10-baseos-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/baseos/os/
+    - repoid: ubi-10-appstream-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/appstream/os/
 packages:
   # Build stage: Rust toolchain is prefetched from static.rust-lang.org (see
-  # generic-fetcher.yaml); UBI9 ships rust 1.92.0, below the workspace MSRV.
+  # generic-fetcher.yaml); UBI10 ships rust 1.92.0, below the workspace MSRV.
   # tar/xz extract the toolchain tarball.
   - tar
   - xz
-  # Build stage: C/C++ toolchain
+  # Build stage: C/C++ toolchain (the system GCC 14 provides the C++20 <format>
+  # header required by bundled Z3; gcc-toolset-15 comes in only as a clang-libs
+  # dependency)
   - gcc
   - gcc-c++
   - make
   - cmake
-  # Build stage: gcc-toolset-14 for C++20 <format> (required by bundled Z3)
-  - gcc-toolset-14
-  - gcc-toolset-14-gcc-c++
   # Build stage: z3-sys bindgen needs libclang
   - clang-devel
   # Build stage: other
@@ -42,7 +41,7 @@ packages:
   - git-core
   # Runtime stage
   - ca-certificates
-  - crypto-policies-scripts
+  - libstdc++
 arches:
   - x86_64
   - aarch64

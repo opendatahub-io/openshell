@@ -5,7 +5,7 @@
 
 # Gateway image for RHEL/Konflux (hermetic build).
 #
-# Multi-stage build that compiles openshell-gateway from source on UBI9.
+# Multi-stage build that compiles openshell-gateway from source on UBI10.
 # Requires prefetched dependencies via Hermeto (cargo, rpm, generic).
 # cargo-auditable is a generic artifact so the gateway binary embeds crate
 # versions for image CVE scanners. See deploy/konflux/ for prefetch configs.
@@ -17,18 +17,20 @@ ARG RUST_VERSION=1.95.0
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
-FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6 AS builder
+FROM registry.access.redhat.com/ubi10/ubi:10.2@sha256:9c6a62df091dd9fcef9c52ca4e10c252bdeaa0cb48b363f7e61b4c975dc75d75 AS builder
 
 ARG RUST_VERSION
 ARG TARGETARCH
 
+# The system GCC 14 provides the C++20 <format> header required by bundled Z3.
+# gcc-toolset-15 is installed only as a clang-libs dependency and is not put on
+# PATH.
 RUN dnf install -y --nodocs --setopt=install_weak_deps=0 \
         gcc gcc-c++ make cmake \
         openssl-devel git-core clang-devel tar xz \
-        gcc-toolset-14 gcc-toolset-14-gcc-c++ \
     && dnf clean all
 
-# UBI9 ships rust 1.92.0, below the workspace MSRV, so install the prefetched
+# UBI10 ships rust 1.92.0, below the workspace MSRV, so install the prefetched
 # upstream toolchain (GNU target) the same way the CLI and supervisor images do.
 RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) echo "${TARGETARCH}";; esac) && \
     mkdir -p /tmp/rust-toolchain && \
@@ -44,11 +46,7 @@ RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64
     install -m 0755 "/tmp/cargo-auditable-${RUST_ARCH}-unknown-linux-gnu/cargo-auditable" /usr/local/bin/cargo-auditable && \
     rm -rf "/tmp/cargo-auditable-${RUST_ARCH}-unknown-linux-gnu"
 
-# gcc-toolset-14 provides C++20 <format> header required by bundled Z3.
-# Same pattern as ~/git/builder (AIPCC-10154).
-ENV PATH=/opt/rh/gcc-toolset-14/root/usr/bin:${PATH} \
-    LD_LIBRARY_PATH=/opt/rh/gcc-toolset-14/root/usr/lib64:/opt/rh/gcc-toolset-14/root/usr/lib \
-    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -82,15 +80,17 @@ RUN mkdir -p /tmp/z3-src \
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:7fbeae18dc9476399f565e68255f602a3374ea8614ba3d14843565131a13ff93
+FROM registry.access.redhat.com/ubi10/ubi-minimal:10.2@sha256:a9f9316ec3a1419a2de6ce4d2d9f034d477e97cdf2a16d6f04b7bd632ac753c4
 
+# The RHEL 10.2 DEFAULT crypto policy already enables the post-quantum ML-KEM
+# hybrid key exchange groups, so the stock policy is kept as is.
+#
+# The gateway links libstdc++ (bundled Z3) dynamically. Install it from the
+# same lockfile as the builder's GCC so the runtime version always matches.
 RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
         ca-certificates \
-        crypto-policies-scripts \
+        libstdc++ \
     && microdnf clean all
-
-# Enable post-quantum cryptography support in the RHEL system policy.
-RUN update-crypto-policies --set DEFAULT:PQ
 
 COPY --from=builder --chmod=0555 \
     /build/target/release/openshell-gateway \
@@ -99,7 +99,7 @@ COPY --from=builder --chmod=0555 \
 LABEL com.redhat.component="odh-openshell-gateway-container" \
       description="gRPC/HTTP control-plane server for OpenShell sandboxed AI agent runtimes" \
       summary="gRPC/HTTP control-plane server for OpenShell sandboxed AI agent runtimes" \
-      name="rhoai/odh-openshell-gateway-rhel9" \
+      name="rhoai/odh-openshell-gateway-rhel10" \
       maintainer="['managed-open-data-hub@redhat.com']" \
       io.openshift.expose-services="8080:http" \
       io.k8s.display-name="odh-openshell-gateway" \

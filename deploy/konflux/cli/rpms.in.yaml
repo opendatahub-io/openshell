@@ -5,7 +5,7 @@
 # Build + runtime stages combined.
 #
 # Resolved with `context.bare: true` so the lockfile pins the full dependency
-# closure. The image installs RPMs into two different bases (the ubi:9.8 build
+# closure. The image installs RPMs into two different bases (the ubi:10.2 build
 # stage and the ubi-minimal runtime stage); bare guarantees every package is
 # pinned and prefetched regardless of which base already provides it.
 #
@@ -20,10 +20,10 @@
 # read /etc/yum.repos.d from inside the base image.
 contentOrigin:
   repos:
-    - repoid: ubi-9-baseos-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/baseos/os/
-    - repoid: ubi-9-appstream-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/appstream/os/
+    - repoid: ubi-10-baseos-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/baseos/os/
+    - repoid: ubi-10-appstream-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/appstream/os/
 packages:
   # Build stage: build tools
   - gcc
@@ -37,7 +37,6 @@ packages:
   - git-core
   # Runtime stage
   - ca-certificates
-  - crypto-policies-scripts
 arches:
   - x86_64
   - aarch64

@@ -6,7 +6,7 @@
 #
 # Resolved with `context.bare: true` so the lockfile pins the full dependency
 # closure; bare guarantees every package is pinned and prefetched regardless
-# of what the ubi:9.8 build base already provides.
+# of what the ubi:10.2 build base already provides.
 #
 # Target arches and repos are declared in this file (not passed on the command
 # line) so Konflux MintMaker can regenerate the lockfile with no CLI flags.
@@ -19,14 +19,14 @@
 # /etc/yum.repos.d from inside the base image.
 contentOrigin:
   repos:
-    - repoid: ubi-9-baseos-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/baseos/os/
-    - repoid: ubi-9-appstream-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/appstream/os/
+    - repoid: ubi-10-baseos-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/baseos/os/
+    - repoid: ubi-10-appstream-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/appstream/os/
     # glibc-static (for `-C target-feature=+crt-static`) ships in CodeReady
     # Builder, whose content is public on the UBI CDN.
-    - repoid: ubi-9-codeready-builder-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/codeready-builder/os/
+    - repoid: ubi-10-codeready-builder-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/codeready-builder/os/
 packages:
   # Build stage: static glibc + build tools
   - gcc
