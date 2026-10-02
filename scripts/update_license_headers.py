@@ -73,7 +73,6 @@ SIDECAR_LICENSE_FILES: set[str] = {
 
 # Directories to skip entirely (relative to repo root).
 EXCLUDE_DIRS: set[str] = {
-    ".tekton",
     "target",
     "e2e/rust/target",
     "plans",
@@ -90,7 +89,6 @@ EXCLUDE_DIRS: set[str] = {
 EXCLUDE_FILES: set[str] = {
     "Cargo.lock",
     "uv.lock",
-    "rpms.lock.yaml",
     ".gitlab-ci.yml",
 }
 
