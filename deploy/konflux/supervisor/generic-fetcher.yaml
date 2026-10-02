@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
 # Generic fetcher artifacts for Dockerfile.konflux.supervisor
 # These are prefetched by Hermeto and mounted at /cachi2/deps/generic/
 # Include in prefetch-input alongside cargo and rpm types.
