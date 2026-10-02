@@ -57,3 +57,28 @@ jobs:
             CARGO="$cargo_bin" \
             PATH="$(dirname "$cargo_bin"):$(dirname "$deny_bin"):$PATH" \
             "$deny_bin" check advisories
+  notify-slack:
+    name: Notify Slack on failure
+    needs: advisories
+    if: >-
+      ${{ always() &&
+          needs.advisories.result == 'failure' &&
+          github.repository == 'red-hat-data-services/openshell' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Post failure notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jq -nc \
+            --arg text ":x: ODH Cargo Deny Advisories
+            Status: ${{ needs.advisories.result }}
+            Run: $WORKFLOW_RUN_URL" \
+            '{text: $text}' |
+            curl --fail --silent --show-error \
+              -X POST \
+              -H 'Content-Type: application/json' \
+              --data @- \
+              "$SLACK_WEBHOOK_URL"

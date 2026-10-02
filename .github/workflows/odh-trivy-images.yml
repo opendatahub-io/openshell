@@ -77,58 +77,206 @@ jobs:
             refs+=("${image}:${tag}")
           done <<<"$DEFAULT_IMAGES"
 
-          severity=MEDIUM,HIGH,CRITICAL
+          rpm_severity=MEDIUM,HIGH,CRITICAL
+          crate_severity=MEDIUM,HIGH,CRITICAL
 
           {
             echo "### ODH Trivy image scan"
             echo
-            echo "Severity gate: \`$severity\`"
+            echo "RPM gate: \`CRITICAL\`"
+            echo "Rust crate gate: \`$crate_severity\`"
             echo
-            echo "Each image prints two tables: RHEL RPMs, then Rust crates. An empty crate table (\`language-specific files num=0\`) means the image has no cargo-auditable metadata; check \`Dockerfile.konflux.*\`."
+            echo "RPM Medium/High findings are reported but do not fail this workflow. They originate in the base image; ProdSec handles remediation on a best-effort basis."
+            echo
+            echo "Missing cargo-auditable crate metadata is a coverage warning only. Check \`Dockerfile.konflux.*\`."
             echo
             echo "Images:"
             for ref in "${refs[@]}"; do
               echo "- \`$ref\`"
             done
+            echo
+            echo "| Image | Scan | Result | Findings | Notes |"
+            echo "| --- | --- | :---: | --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+          reports_dir="$(mktemp -d)"
+          trap 'rm -rf "$reports_dir"' EXIT
+
           status=0
+
+          record_result() {
+            local ref="$1"
+            local scan="$2"
+            local result="$3"
+            local findings="$4"
+            local notes="$5"
+
+            echo "$result $scan - $ref: $findings. $notes"
+            printf '| `%s` | %s | %s | %s | %s |\n' \
+              "$ref" "$scan" "$result" "$findings" "$notes" \
+              >> "$GITHUB_STEP_SUMMARY"
+          }
+
           for ref in "${refs[@]}"; do
             echo "::group::RPMs $ref"
+            rpm_report="$reports_dir/rpm-${ref##*/}.json"
             if trivy image \
               --scanners vuln \
               --pkg-types os \
-              --severity "$severity" \
-              --format table \
-              --exit-code 1 \
+              --severity "$rpm_severity" \
+              --format json \
+              --output "$rpm_report" \
               "$ref"; then
-              echo "No $severity RPM vulnerabilities in $ref"
+              if ! trivy convert \
+                --scanners vuln \
+                --format table \
+                --severity "$rpm_severity" \
+                "$rpm_report"; then
+                echo "::error::Trivy could not render the RPM report for $ref"
+                record_result \
+                  "$ref" "RPMs" "❌" "scan error" \
+                  "Trivy could not render the RPM report."
+                status=1
+              else
+                critical_count=$(
+                  jq '[.Results[]?.Vulnerabilities[]? |
+                    select(.Severity == "CRITICAL")] | length' \
+                    "$rpm_report"
+                )
+                medium_high_count=$(
+                  jq '[.Results[]?.Vulnerabilities[]? |
+                    select(.Severity == "MEDIUM" or .Severity == "HIGH")] | length' \
+                    "$rpm_report"
+                )
+                if [ "$critical_count" -gt 0 ]; then
+                  echo "::error::Trivy found Critical RPM vulnerabilities in $ref"
+                  record_result \
+                    "$ref" "RPMs" "❌" \
+                    "$critical_count Critical, $medium_high_count Medium/High" \
+                    "Critical RPM findings fail the workflow."
+                  status=1
+                elif [ "$medium_high_count" -gt 0 ]; then
+                  record_result \
+                    "$ref" "RPMs" "✅" \
+                    "0 Critical, $medium_high_count Medium/High" \
+                    "Medium/High are reported only; base-image RPM remediation is ProdSec-owned and best-effort."
+                else
+                  record_result \
+                  "$ref" "RPMs" "✅" \
+                  "0 at MEDIUM/HIGH/CRITICAL" \
+                  "No gated RPM findings."
+                fi
+              fi
             else
-              echo "::error::Trivy found $severity RPM vulnerabilities in $ref"
+              echo "::error::Trivy could not scan RPMs in $ref"
+              record_result \
+                "$ref" "RPMs" "❌" "scan error" \
+                "Trivy could not complete the RPM scan."
               status=1
             fi
-            echo "::endgroup::"
 
+            echo "::endgroup::"
             echo "::group::Rust crates $ref"
-            crate_log=$(mktemp)
+
+            crate_report="$reports_dir/crates-${ref##*/}.json"
             if trivy image \
               --scanners vuln \
               --pkg-types library \
-              --severity "$severity" \
-              --format table \
-              --exit-code 1 \
-              "$ref" 2>&1 | tee "$crate_log"; then
-              if grep -Eq 'language-specific files[[:space:]]+num=0' "$crate_log"; then
-                echo "No Rust crate results for $ref. Check that Dockerfile.konflux.* uses cargo auditable."
+              --severity "$crate_severity" \
+              --list-all-pkgs \
+              --format json \
+              --output "$crate_report" \
+              "$ref"; then
+              if ! trivy convert \
+                --scanners vuln \
+                --format table \
+                --severity "$crate_severity" \
+                "$crate_report"; then
+                echo "::error::Trivy could not render the crate report for $ref"
+                record_result \
+                  "$ref" "Rust crates" "❌" "scan error" \
+                  "Trivy could not render the crate report."
+                status=1
               else
-                echo "No $severity crate vulnerabilities in $ref"
+                crate_count=$(
+                  jq '[.Results[]?.Vulnerabilities[]? |
+                    select(
+                      .Severity == "MEDIUM" or
+                      .Severity == "HIGH" or
+                      .Severity == "CRITICAL"
+                    )] | length' \
+                    "$crate_report"
+                )
+
+                rustbinary_count=$(
+                  jq '[.Results[]? |
+                    select(
+                      .Type == "rustbinary" and
+                      ((.Packages // []) | length > 0)
+                    )] | length' \
+                    "$crate_report"
+                )
+
+                metadata_note=""
+                if [ "$rustbinary_count" -eq 0 ]; then
+                  metadata_note=" No auditable crate metadata detected; check Dockerfile.konflux.* uses cargo auditable."
+                  echo "::warning::No auditable crate metadata detected in $ref. Check Dockerfile.konflux.* uses cargo auditable."
+                fi
+
+                if [ "$crate_count" -gt 0 ]; then
+                  echo "::error::Trivy found Medium, High, or Critical crate vulnerabilities in $ref"
+                  record_result \
+                    "$ref" "Rust crates" "❌" \
+                    "$crate_count at MEDIUM/HIGH/CRITICAL" \
+                    "Crate findings fail the workflow.$metadata_note"
+                  status=1
+                elif [ -n "$metadata_note" ]; then
+                  record_result \
+                    "$ref" "Rust crates" "✅" \
+                    "0 at MEDIUM/HIGH/CRITICAL; metadata missing" \
+                    "Coverage warning:$metadata_note"
+                else
+                  record_result \
+                    "$ref" "Rust crates" "✅" \
+                    "0 at MEDIUM/HIGH/CRITICAL" \
+                    "No gated crate findings."
+                fi
               fi
             else
-              echo "::error::Trivy found $severity crate vulnerabilities in $ref"
+              echo "::error::Trivy could not scan Rust crates in $ref"
+              record_result \
+                "$ref" "Rust crates" "❌" "scan error" \
+                "Trivy could not complete the crate scan."
               status=1
             fi
-            rm -f "$crate_log"
+
             echo "::endgroup::"
           done
 
           exit "$status"
+  notify-slack:
+    name: Notify Slack on failure
+    needs: scan
+    if: >-
+      ${{ always() &&
+          needs.scan.result == 'failure' &&
+          github.repository == 'red-hat-data-services/openshell' }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Post failure notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          jq -nc \
+            --arg text ":x: ODH Trivy Image Scan
+            Status: ${{ needs.scan.result }}
+            Run: $WORKFLOW_RUN_URL
+            See the run's Step Summary for the full RPM and Rust-crate result table." \
+            '{text: $text}' |
+            curl --fail --silent --show-error \
+              -X POST \
+              -H 'Content-Type: application/json' \
+              --data @- \
+              "$SLACK_WEBHOOK_URL"
