@@ -1,0 +1,53 @@
+# Sandbox profile overlay for agentic-ci / autofix runs.
+#
+# Provides the toolchains the repo needs from the sandbox catalog,
+# and installs mise so that tasks defined in mise.toml (pre-commit,
+# linters, proto generation) work inside the sandbox.
+#
+# IMPORTANT: The `github-release-assets` egress preset is required
+# to download the mise binary from GitHub releases. This preset is
+# NOT in the default overlay-allowed set (pypi, npm, goproxy).
+# It must be added to `overlay_allowed_presets` in the central
+# autofix configuration, or this profile must be promoted to a
+# central profile.
+
+toolchains:
+  go: auto
+  node: "24"
+  python: auto
+  protoc: auto
+  buf: auto
+  golangci-lint: auto
+  helm: auto
+  yq: auto
+  pnpm: auto
+  shfmt: auto
+
+egress:
+  - goproxy
+  - npm
+  - pypi
+  - github-release-assets
+
+setup:
+  - name: mise-install
+    run: |
+      set -euo pipefail
+      # renovate: datasource=github-releases depName=jdx/mise
+      MISE_VERSION="2026.9.9"
+      MISE_TARBALL="mise-v${MISE_VERSION}-linux-x64.tar.gz"
+      MISE_URL="https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/${MISE_TARBALL}"
+      MISE_CHECKSUMS_URL="https://github.com/jdx/mise/releases/download/v${MISE_VERSION}/SHASUMS256.txt"
+      TMPDIR="$(mktemp -d)"
+      trap 'rm -rf "$TMPDIR"' EXIT
+      curl -fsSL -o "${TMPDIR}/${MISE_TARBALL}" "$MISE_URL"
+      curl -fsSL -o "${TMPDIR}/SHASUMS256.txt" "$MISE_CHECKSUMS_URL"
+      (cd "$TMPDIR" && grep "${MISE_TARBALL}" SHASUMS256.txt | sha256sum -c -)
+      mkdir -p "$HOME/.local/bin"
+      tar xz -C "$HOME/.local/bin" --strip-components=1 -f "${TMPDIR}/${MISE_TARBALL}"
+      export PATH="$HOME/.local/bin:$PATH"
+      mise install --yes
+    timeout: 900
+
+env:
+  MISE_YES: "1"
