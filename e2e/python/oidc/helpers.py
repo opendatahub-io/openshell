@@ -22,6 +22,16 @@ from openshell._proto import openshell_pb2_grpc
 KEYCLOAK_REALM = "openshell"
 
 
+def fixture_secret(name: str, fallback: str) -> str:
+    """Read an OIDC fixture secret without changing the upstream defaults.
+
+    The OpenShift runner creates credentials for each invocation. Keeping the
+    established defaults makes the local container fixture continue to work
+    unchanged.
+    """
+    return os.environ.get(name, fallback)
+
+
 def _xdg_config_home() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 
@@ -73,27 +83,35 @@ def _gateway_endpoint() -> tuple[str, bool]:
 
 
 def _mtls_dir() -> Path:
+    if mtls_dir := os.environ.get("OPENSHELL_E2E_GATEWAY_MTLS_DIR"):
+        return Path(mtls_dir)
     cluster_name = os.environ.get("OPENSHELL_GATEWAY", "openshell")
     return _xdg_config_home() / "openshell" / "gateways" / cluster_name / "mtls"
 
 
-def _token_request(data: dict[str, str]) -> str:
-    """POST to the Keycloak token endpoint and return the access token."""
+def _token_request(data: dict[str, str]) -> dict[str, object]:
+    """POST form data to Keycloak's token endpoint without logging secrets."""
     encoded = urllib.parse.urlencode(data).encode()
     req = urllib.request.Request(TOKEN_ENDPOINT, data=encoded)
     with urllib.request.urlopen(req, timeout=10) as resp:
-        body = json.loads(resp.read())
-    return body["access_token"]
+        return json.loads(resp.read())
 
 
-def get_token(
+def get_token_response(
     username: str,
     password: str,
     *,
     client_id: str = "openshell-cli",
     scopes: str | None = None,
-) -> str:
-    """Get an access token from Keycloak via password grant."""
+) -> dict[str, object]:
+    """Get the complete password-grant response for token lifecycle tests."""
+    password_env = {
+        "admin@test": "OPENSHELL_E2E_OIDC_ADMIN_PASSWORD",
+        "user@test": "OPENSHELL_E2E_OIDC_USER_PASSWORD",
+        "user-b@test": "OPENSHELL_E2E_OIDC_USER_B_PASSWORD",
+    }.get(username)
+    if password_env:
+        password = fixture_secret(password_env, password)
     data = {
         "grant_type": "password",
         "client_id": client_id,
@@ -105,19 +123,48 @@ def get_token(
     return _token_request(data)
 
 
+def get_token(
+    username: str,
+    password: str,
+    *,
+    client_id: str = "openshell-cli",
+    scopes: str | None = None,
+) -> str:
+    """Get an access token from Keycloak via password grant."""
+    response = get_token_response(
+        username, password, client_id=client_id, scopes=scopes
+    )
+    return str(response["access_token"])
+
+
+def refresh_token(
+    refresh_token: str, *, client_id: str = "openshell-cli"
+) -> dict[str, object]:
+    """Exchange a refresh token without writing it to the test output."""
+    return _token_request(
+        {
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "refresh_token": refresh_token,
+        }
+    )
+
+
 def get_ci_token(
     *,
     client_id: str = "openshell-ci",
     client_secret: str = "ci-test-secret",
 ) -> str:
     """Get an access token via client credentials grant."""
-    return _token_request(
+    client_secret = fixture_secret("OPENSHELL_E2E_OIDC_CLIENT_SECRET", client_secret)
+    response = _token_request(
         {
             "grant_type": "client_credentials",
             "client_id": client_id,
             "client_secret": client_secret,
         }
     )
+    return str(response["access_token"])
 
 
 def grpc_channel() -> grpc.Channel:
@@ -129,12 +176,13 @@ def grpc_channel() -> grpc.Channel:
     target = f"{host}:{port}"
 
     if is_tls:
+        mtls_dir = os.environ.get("OPENSHELL_E2E_GATEWAY_MTLS_DIR")
         if ca_path := os.environ.get("OPENSHELL_E2E_GATEWAY_CA_CERT"):
             creds = grpc.ssl_channel_credentials(
                 root_certificates=Path(ca_path).read_bytes()
             )
         else:
-            mtls = _mtls_dir()
+            mtls = Path(mtls_dir) if mtls_dir else _mtls_dir()
             creds = grpc.ssl_channel_credentials(
                 root_certificates=(mtls / "ca.crt").read_bytes(),
                 private_key=(mtls / "tls.key").read_bytes(),
@@ -156,8 +204,12 @@ def stub_with_token(
 
 def extract_sub(token: str) -> str:
     """Extract the 'sub' claim from a JWT access token."""
+    return str(extract_jwt_claims(token)["sub"])
+
+
+def extract_jwt_claims(token: str) -> dict[str, object]:
+    """Decode public JWT claims for assertions without persisting a token."""
     payload = token.split(".")[1]
     padded = payload + "=" * (4 - len(payload) % 4)
     decoded = base64.urlsafe_b64decode(padded)
-    claims = json.loads(decoded)
-    return claims["sub"]
+    return json.loads(decoded)
