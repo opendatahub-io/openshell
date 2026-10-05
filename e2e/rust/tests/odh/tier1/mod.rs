@@ -3,4 +3,7 @@
 
 //! Tier 1: high-priority tests, excluding Smoke (15 min target).
 
+#[cfg(feature = "e2e-oidc-pkce")]
+mod oidc_pkce;
+
 mod selinux;
