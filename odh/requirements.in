@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Fork-local Python runtime and test dependencies for the ODH E2E image.
+# Regenerate requirements.txt with:
+#   uv pip compile --universal --generate-hashes --python-version 3.11 \
+#       --output-file odh/requirements.txt odh/requirements.in
+cloudpickle>=3.0
+googleapis-common-protos>=1.63
+grpcio>=1.60
+grpcio-tools>=1.60
+httpx>=0.27
+protobuf>=4.25
+pytest>=8.0
