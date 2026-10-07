@@ -54,6 +54,7 @@ cleanup() {
         rm -f "${REPO_ROOT}/e2e/rust/.cargo/config.toml"
         rmdir "${REPO_ROOT}/e2e/rust/.cargo" 2>/dev/null || true
     fi
+    rm -rf "${REPO_ROOT}/deploy/konflux/cargo-auditable/.cargo"
     for p in "${CLEANUP_PATHS[@]}"; do
         rm -rf "$p"
     done
@@ -112,6 +113,7 @@ build_image() {
     if [[ -z "${prefetch_input}" ]]; then
         prefetch_input="[
             {\"path\": \".\", \"type\": \"cargo\"},
+            {\"path\": \"deploy/konflux/cargo-auditable\", \"type\": \"cargo\"},
             {\"path\": \"${konfig_dir}\", \"type\": \"rpm\"},
             {\"path\": \"${konfig_dir}\", \"type\": \"generic\", \"lockfile\": \"generic-fetcher.yaml\"}
         ]"
