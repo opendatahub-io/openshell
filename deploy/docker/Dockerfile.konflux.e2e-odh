@@ -27,6 +27,9 @@ ARG NEXTEST_VERSION
 ARG TARGETARCH
 ARG OPENSHELL_VERSION=""
 
+RUN dnf install -y --nodocs --setopt=install_weak_deps=0 python3.11 && \
+    dnf clean all
+
 RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) exit 1;; esac) && \
     RUST_TRIPLE="${RUST_ARCH}-unknown-linux-gnu" && \
     tar xzf "/cachi2/output/deps/generic/cargo-nextest-${NEXTEST_VERSION}-${RUST_TRIPLE}.tar.gz" \
@@ -40,6 +43,7 @@ COPY .cargo/ .cargo/
 COPY .config/ .config/
 COPY crates/ crates/
 COPY proto/ proto/
+COPY python/ python/
 COPY providers/ providers/
 COPY examples/ examples/
 COPY e2e/ e2e/
@@ -59,6 +63,16 @@ RUN VER="${OPENSHELL_VERSION#v}" && \
         --features e2e-odh \
         --archive-file /opt/openshell/e2e-odh.tar.zst
 
+RUN UV_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) exit 1;; esac) && \
+    tar xzf "/cachi2/output/deps/generic/uv-${UV_ARCH}-unknown-linux-gnu.tar.gz" \
+        -C /tmp && \
+    install -m 0555 "/tmp/uv-${UV_ARCH}-unknown-linux-gnu/uv" /usr/local/bin/uv
+COPY odh/requirements.txt /tmp/requirements.txt
+RUN uv venv --python python3.11 /opt/odh-e2e-venv && \
+    uv pip install --python /opt/odh-e2e-venv/bin/python --no-index --require-hashes \
+        --find-links /cachi2/output/deps/pip -r /tmp/requirements.txt
+RUN /opt/odh-e2e-venv/bin/python tasks/scripts/generate_python_proto.py
+
 FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d17538c8dbe55d8c305fa157ecc3f9c8977b05b6
 
 ARG OC_VERSION
@@ -67,7 +81,7 @@ ARG TARGETARCH
 
 RUN dnf install -y --nodocs --setopt=install_weak_deps=0 \
         ca-certificates crypto-policies-scripts \
-        python3.11 libxslt util-linux openssh-clients git-core tar \
+        python3.11 libxslt util-linux openssh-clients git-core tar openssl \
     && dnf clean all && \
     update-crypto-policies --set DEFAULT:PQ
 
@@ -76,22 +90,29 @@ COPY --from=builder --chmod=0555 \
 COPY --from=builder --chmod=0555 \
     /home/odh/openshell-e2e-odh/target/release/openshell /usr/local/bin/openshell
 COPY --from=builder /opt/openshell/e2e-odh.tar.zst /opt/openshell/e2e-odh.tar.zst
+COPY --from=builder /opt/odh-e2e-venv /opt/odh-e2e-venv
 
 RUN OC_ARCH=$(case "${TARGETARCH}" in amd64) echo amd64;; arm64) echo arm64;; *) exit 1;; esac) && \
+    UV_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) exit 1;; esac) && \
     mkdir -p /tmp/oc /tmp/helm && \
     tar xzf "/cachi2/output/deps/generic/openshift-client-linux-${OC_ARCH}-rhel9-${OC_VERSION}.tar.gz" \
         -C /tmp/oc oc kubectl && \
     install -m 0555 /tmp/oc/oc /tmp/oc/kubectl /usr/local/bin/ && \
     tar xzf "/cachi2/output/deps/generic/helm-v${HELM_VERSION}-linux-${OC_ARCH}.tar.gz" \
         -C /tmp/helm && \
-    install -m 0555 "/tmp/helm/linux-${OC_ARCH}/helm" /usr/local/bin/helm
+    install -m 0555 "/tmp/helm/linux-${OC_ARCH}/helm" /usr/local/bin/helm && \
+    tar xzf "/cachi2/output/deps/generic/uv-${UV_ARCH}-unknown-linux-gnu.tar.gz" \
+        -C /tmp && \
+    install -m 0555 "/tmp/uv-${UV_ARCH}-unknown-linux-gnu/uv" /usr/local/bin/uv
 
 WORKDIR /home/odh/openshell-e2e-odh
 COPY --chown=1000:1000 Cargo.toml Cargo.lock ./
+COPY --chown=1000:1000 pyproject.toml uv.lock ./
 COPY --chown=1000:1000 .cargo/ .cargo/
 COPY --chown=1000:1000 .config/ .config/
 COPY --chown=1000:1000 crates/ crates/
 COPY --chown=1000:1000 proto/ proto/
+COPY --from=builder --chown=1000:1000 /home/odh/openshell-e2e-odh/python/ python/
 COPY --chown=1000:1000 providers/ providers/
 COPY --chown=1000:1000 examples/ examples/
 COPY --chown=1000:1000 e2e/ e2e/
@@ -108,8 +129,8 @@ RUN install -d -o 1000 -g 1000 results .kube /home/odh/.config/openshell && \
 # sandbox connection uses ssh, and future repository tests need git. cargo
 # links the system libssl, libcrypto and libz, so run it once to catch a
 # missing library at build time.
-RUN for tool in bash oc kubectl helm openshell cargo cargo-nextest \
-        python3.11 xsltproc script ssh git tar base64; do \
+RUN for tool in bash oc kubectl helm openshell cargo cargo-nextest uv \
+        python3.11 xsltproc script ssh git tar base64 openssl; do \
         command -v "${tool}" >/dev/null || { echo "missing e2e runtime tool: ${tool}" >&2; exit 1; }; \
     done && \
     cargo nextest --version >/dev/null
@@ -119,7 +140,9 @@ ENV HOME=/home/odh \
     OPENSHELL_BIN=/usr/local/bin/openshell \
     OPENSHELL_E2E_NEXTEST_ARCHIVE=/opt/openshell/e2e-odh.tar.zst \
     OPENSHELL_E2E_DEPLOY_GATEWAY=1 \
-    PYTHON_BIN=python3.11
+    PYTHON_BIN=python3.11 \
+    UV_PROJECT_ENVIRONMENT=/opt/odh-e2e-venv \
+    PYTHONPATH=/home/odh/openshell-e2e-odh/python
 
 LABEL com.redhat.component="odh-openshell-e2e-container" \
       description="ODH Shift-Left e2e tests for OpenShell" \

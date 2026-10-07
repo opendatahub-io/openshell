@@ -101,6 +101,7 @@ build_image() {
             prefetch_input="[
             {\"path\": \".\", \"type\": \"cargo\"},
             {\"path\": \"e2e/rust\", \"type\": \"cargo\"},
+            {\"path\": \"odh\", \"type\": \"pip\", \"requirements_files\": [\"requirements.txt\"], \"binary\": {\"packages\": \":all:\", \"arch\": \"x86_64,aarch64\", \"os\": \"linux\", \"py_version\": 311, \"py_impl\": \"cp\"}},
             {\"path\": \"${konfig_dir}\", \"type\": \"rpm\"},
             {\"path\": \"${konfig_dir}\", \"type\": \"generic\", \"lockfile\": \"generic-fetcher.yaml\"}
         ]"
