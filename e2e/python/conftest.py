@@ -95,6 +95,9 @@ def sandbox(cluster_name: str | None) -> Callable[..., Sandbox]:
             delete_on_exit=delete_on_exit,
             # Allow time to pull an explicitly supplied workload fixture.
             ready_timeout_seconds=300.0,
+            # Kubernetes deletion waits for the workload Pod to terminate.
+            # Its bounded termination window exceeds the SDK default (30 s).
+            timeout=90.0,
         )
 
     return _create

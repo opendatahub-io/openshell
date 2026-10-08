@@ -33,3 +33,36 @@ run = "e2e/rust/tests/odh/run-odh-test-tier.sh tier2"
 ["e2e:odh:tier3"]
 description = "Run Tier 3: upstream + ODH, negative and destructive tests"
 run = "e2e/rust/tests/odh/run-odh-test-tier.sh tier3"
+
+# Python modes run separately from the Rust tiers and write their own reports.
+# The local runner never deploys a gateway; the image entrypoint does so for
+# gateway-e2e. See e2e/rust/tests/odh/README.md.
+
+["e2e:odh:python:sdk"]
+description = "Run Python SDK unit tests through the ODH Python runner (no cluster)"
+depends = ["python:proto"]
+run = "uv run --frozen odh/scripts/run-odh-python-tests.sh sdk"
+
+["e2e:odh:python:gateway"]
+description = "Run applicable e2e/python tests against the selected OpenShift gateway"
+depends = ["python:proto"]
+run = "uv run --frozen odh/scripts/run-odh-python-tests.sh gateway-e2e"
+
+["test:odh-python-runner"]
+description = "Test the ODH Python runner contract and gate plugin"
+run = [
+  "odh/scripts/test-odh-python-runner.sh",
+  "odh/scripts/test-odh-e2e-entrypoint.sh",
+  "odh/scripts/test-openshell-deploy-from-quay.sh",
+  # The gate plugin is a standalone test helper. Avoid installing the root
+  # package so an unrelated SCM-version tag cannot block this contract test.
+  "uv sync --frozen --no-install-project",
+  ".venv/bin/python -m pytest -p no:cacheprovider odh/scripts/pytest_odh_gates_test.py",
+]
+run_windows = "echo Skipping test:odh-python-runner: Unix OpenShift runner test does not apply on Windows."
+hide = true
+
+["konflux:e2e-odh:check-pins"]
+description = "Check that e2e image tool versions match the Hermeto generic-fetcher artifacts"
+run = "python3 deploy/konflux/e2e-odh/sync-generic-fetcher.py --check"
+hide = true

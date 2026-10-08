@@ -23,6 +23,7 @@ packages:
   - libxslt
   - util-linux
   - openssh-clients
+  - openssl
 arches:
   - x86_64
   - aarch64

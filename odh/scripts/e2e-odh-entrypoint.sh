@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Container entrypoint for the Shift-Left ODH e2e image. Deploy the selected
-# Quay images, run one test tier, and remove that deployment on every exit.
+# Quay images when required, run one Rust tier or Python mode, and remove that
+# deployment on every exit.
 
 set -euo pipefail
 
@@ -11,22 +12,34 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEPLOY_SCRIPT="${SCRIPT_DIR}/openshell-deploy-from-quay.sh"
 TEST_SCRIPT="${ROOT}/e2e/rust/tests/odh/run-odh-test-tier.sh"
-TIER="${1:-smoke}"
+PYTHON_TEST_SCRIPT="${SCRIPT_DIR}/run-odh-python-tests.sh"
+MODE="${1:-smoke}"
+TEST_COMMAND=()
+REQUIRES_DEPLOYMENT=1
 
 if [[ $# -gt 1 ]]; then
-	echo "Usage: $0 [smoke|tier1|tier2|tier3|odh|full]" >&2
+	echo "Usage: $0 [smoke|tier1|tier2|tier3|odh|full|sdk|gateway-e2e]" >&2
 	exit 2
 fi
-case "${TIER}" in
-	smoke|tier1|tier2|tier3|odh|full) ;;
-	*) echo "ERROR: unknown test tier: ${TIER}" >&2; exit 2 ;;
+case "${MODE}" in
+	smoke|tier1|tier2|tier3|odh|full)
+		TEST_COMMAND=("${TEST_SCRIPT}" "${MODE}")
+		;;
+	sdk)
+		TEST_COMMAND=("${PYTHON_TEST_SCRIPT}" sdk)
+		REQUIRES_DEPLOYMENT=0
+		;;
+	gateway-e2e)
+		TEST_COMMAND=("${PYTHON_TEST_SCRIPT}" gateway-e2e)
+		;;
+	*) echo "ERROR: unknown E2E mode: ${MODE}" >&2; exit 2 ;;
 esac
 
-if [[ -z "${KUBECONFIG:-}" ]]; then
+if [[ "${REQUIRES_DEPLOYMENT}" == 1 && -z "${KUBECONFIG:-}" ]]; then
 	KUBECONFIG="${ROOT}/.kube/config"
 	export KUBECONFIG
 fi
-if [[ ! -f "${KUBECONFIG}" ]]; then
+if [[ "${REQUIRES_DEPLOYMENT}" == 1 && ! -f "${KUBECONFIG}" ]]; then
 	echo "ERROR: kubeconfig not found at ${KUBECONFIG}" >&2
 	exit 1
 fi
@@ -77,7 +90,7 @@ trap cleanup EXIT
 trap 'stop_child TERM 130' INT
 trap 'stop_child TERM 143' TERM
 
-if [[ "${OPENSHELL_E2E_DEPLOY_GATEWAY:-1}" != 0 ]]; then
+if [[ "${REQUIRES_DEPLOYMENT}" == 1 && "${OPENSHELL_E2E_DEPLOY_GATEWAY:-1}" != 0 ]]; then
 	deploy_args=(deploy --yes)
 	if [[ "${OPENSHELL_E2E_REPLACE_EXISTING:-0}" == 1 ]]; then
 		deploy_args+=(--replace-existing)
@@ -90,4 +103,4 @@ if [[ "${OPENSHELL_E2E_DEPLOY_GATEWAY:-1}" != 0 ]]; then
 	run_child "${OPENSHELL_BIN:-openshell}" provider profile import --from "${ROOT}/providers" --global
 fi
 
-run_child "${TEST_SCRIPT}" "${TIER}"
+run_child "${TEST_COMMAND[@]}"
