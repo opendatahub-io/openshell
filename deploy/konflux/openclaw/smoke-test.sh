@@ -18,10 +18,12 @@ set -euo pipefail
 #
 # `openclaw-start --version` only proves onboarding plus the launcher fast
 # path (openclaw.mjs returns before loading config). Agent turns, `tui`,
-# `doctor` and `config get/set/validate` are deliberately not run here: EDR
-# on maintainers' laptops kills OpenClaw's sqlite workers. Some EDR policies
-# also kill any OpenClaw process (exit 137), which fails the version and
-# contract-b/c/d checks; run this on a host without such a policy.
+# `doctor`, `config get/validate` and direct `config set` are deliberately
+# not run here: EDR on maintainers' laptops kills OpenClaw's sqlite workers.
+# `config set` runs only through openclaw-start's MODEL_* overrides in the
+# model-overrides check. Some EDR policies also kill any OpenClaw process
+# (exit 137), which fails the version, contract-b/c/d, setgid-home and
+# model-overrides checks; run this on a host without such a policy.
 
 if [[ $# -ne 1 ]]; then
     echo "Usage: smoke-test.sh <image>" >&2
@@ -284,16 +286,91 @@ for sub in a b c d e; do
     fi
 done
 
+# --- setgid-home (K8s fsGroup makes the workspace volume setgid) ----------
+# A fresh /sandbox tmpfs per run, so onboarding happens here too. The stale
+# agent directory stands in for one an earlier run left behind, at the 2700
+# OpenClaw leaves under a setgid home.
+# shellcheck disable=SC2016 # runs inside the container's shell, not the host's
+if setgid_out=$(podman_run --user 51234:51234 --passwd=false --read-only \
+    --tmpfs /tmp:rw,mode=1777 --tmpfs /sandbox:rw,mode=2777 \
+    -e HOME=/sandbox -e MODEL_BASE_URL=http://model.example.svc.cluster.local:8000/v1 \
+    -e MODEL_ID=smoke-model -e CUSTOM_API_KEY=smoke-placeholder "${image}" bash -c '
+set -euo pipefail
+if [[ "$(stat -c %a /sandbox)" != 2777 ]]; then echo "HOME_NOT_SETGID"; exit 1; fi
+mkdir -p /sandbox/.openclaw/agents/main/agent
+chmod 2700 /sandbox/.openclaw/agents/main/agent
+openclaw-start --version >/tmp/out 2>&1 || { echo "START_FAILED $(tr "\n" " " </tmp/out)"; exit 1; }
+bad=$(find /sandbox/.openclaw /sandbox/.openclaw-worker -type d -perm -2000 -print -quit)
+if [[ -n "$bad" ]]; then echo "SETGID=$bad"; exit 1; fi
+modes=$(stat -c %a /sandbox/.openclaw /sandbox/.openclaw-worker /sandbox/.openclaw/agents/main/agent | tr "\n" " ")
+if [[ "$modes" != "700 700 700 " ]]; then echo "STATE_MODES=$modes"; exit 1; fi
+# A restart with an existing config repairs a root an earlier run left open,
+# and an unreadable directory in the agent workspace does not block it.
+chmod 2755 /sandbox/.openclaw
+mkdir -p /sandbox/.openclaw/workspace/locked
+chmod 000 /sandbox/.openclaw/workspace/locked
+openclaw-start --version >/tmp/out 2>&1 || { echo "RESTART_FAILED $(tr "\n" " " </tmp/out)"; exit 1; }
+mode=$(stat -c %a /sandbox/.openclaw)
+if [[ "$mode" != 700 ]]; then echo "RESTART_MODE=$mode"; exit 1; fi
+echo OK
+' 2>&1); then
+    setgid_rc=0
+else
+    setgid_rc=$?
+fi
+if [[ ${setgid_rc} -eq 0 && "${setgid_out}" == "OK" ]]; then
+    pass "setgid-home"
+else
+    fail "setgid-home" "rc=${setgid_rc} out='$(printf '%s' "${setgid_out}" | tr '\n' ' ' | cut -c1-400)'"
+fi
+
+# --- model-overrides (MODEL_* limits land on the onboarded model entry) ---
+# shellcheck disable=SC2016 # runs inside the container's shell, not the host's
+if overrides_out=$(podman_run --user 51234:51234 --passwd=false --read-only \
+    --tmpfs /tmp:rw,mode=1777 --tmpfs /sandbox:rw,mode=1777 \
+    -e HOME=/sandbox -e MODEL_BASE_URL=http://model.example.svc.cluster.local:8000/v1 \
+    -e MODEL_ID=smoke-model -e CUSTOM_API_KEY=smoke-placeholder "${image}" bash -c '
+set -euo pipefail
+rc=0; MODEL_MAX_TOKENS=lots openclaw-start --version >/dev/null 2>/tmp/err || rc=$?
+if [[ $rc -ne 2 ]] || ! grep -q MODEL_MAX_TOKENS /tmp/err; then echo "BAD_VALUE rc=$rc"; exit 1; fi
+if [[ -e /sandbox/.openclaw/openclaw.json ]]; then echo "ONBOARDED_ON_BAD_VALUE"; exit 1; fi
+MODEL_MAX_TOKENS=32768 MODEL_CONTEXT_WINDOW=131072 MODEL_REASONING=true \
+    openclaw-start --version >/tmp/out 2>&1 || { echo "START_FAILED $(tr "\n" " " </tmp/out)"; exit 1; }
+node -e "
+const cfg = JSON.parse(require(\"fs\").readFileSync(\"/sandbox/.openclaw/openclaw.json\", \"utf8\"));
+const m = cfg.models.providers[\"openshell-model\"].models[0];
+const ok = m.id === \"smoke-model\" && m.maxTokens === 32768 && m.contextWindow === 131072 && m.reasoning === true;
+console.log(ok ? \"OK\" : \"MISMATCH \" + JSON.stringify(m));
+"
+' 2>&1); then
+    overrides_rc=0
+else
+    overrides_rc=$?
+fi
+if [[ ${overrides_rc} -eq 0 && "${overrides_out}" == "OK" ]]; then
+    pass "model-overrides"
+else
+    fail "model-overrides" "rc=${overrides_rc} out='$(printf '%s' "${overrides_out}" | tr '\n' ' ' | cut -c1-400)'"
+fi
+
+# --- tmpdir (SQLite and Node temp files go to /tmp, not /var/tmp) ---------
+got_env=$(podman image inspect "${image}" --format '{{range .Config.Env}}{{println .}}{{end}}')
+if grep -qx 'TMPDIR=/tmp' <<<"${got_env}"; then
+    pass "tmpdir"
+else
+    fail "tmpdir" "image env has no TMPDIR=/tmp"
+fi
+
 # --- login-shell (K8s exec-style login shell picks up profile.d) ---------
 # shellcheck disable=SC2016 # runs inside the container's shell, not the host's
 if login_out=$(podman_run --user 51234:51234 --passwd=false "${image}" \
     env -i HOME=/sandbox PATH=/usr/bin:/bin bash -lc \
-    'printf "%s|%s|%s" "$OPENCLAW_NO_AUTO_UPDATE" "$DO_NOT_TRACK" "$(command -v openclaw)"' 2>/dev/null); then
+    'printf "%s|%s|%s|%s" "$OPENCLAW_NO_AUTO_UPDATE" "$DO_NOT_TRACK" "$TMPDIR" "$(command -v openclaw)"' 2>/dev/null); then
     login_rc=0
 else
     login_rc=$?
 fi
-if [[ ${login_rc} -eq 0 && "${login_out}" == "1|1|/usr/local/bin/openclaw" ]]; then
+if [[ ${login_rc} -eq 0 && "${login_out}" == "1|1|/tmp|/usr/local/bin/openclaw" ]]; then
     pass "login-shell"
 else
     fail "login-shell" "rc=${login_rc} out='${login_out}'"
