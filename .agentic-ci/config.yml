@@ -4,21 +4,27 @@
 # https://github.com/opendatahub-io/agentic-ci, docs/sandbox-profiles.md).
 # autofix reads it from the base branch before the agent runs. An overlay
 # may set toolchains, setup, validate, skips and env, and open only the
-# goproxy, npm and pypi egress presets; anything wider is configured
-# centrally in autofix.
+# goproxy, npm, pypi and crates egress presets; anything wider is
+# configured centrally in autofix.
 #
 # Toolchains come from the agentic-ci catalog at the versions pinned in
-# mise.toml (python reads .python-version). If an upstream sync bumps a
+# mise.toml (python reads .python-version, rust reads rust-toolchain.toml). If an upstream sync bumps a
 # version in mise.toml, bump it here too: mise does not install it, so
 # the validate steps fail until the pins match. Setup installs mise from
 # npm, links the catalog toolchains into mise so it never downloads
-# them, and installs the mise npm/go tools through the presets. Rust and
-# container, cluster and VM tasks cannot run in the sandbox and are
-# declared as skips.
+# them, and installs the mise npm/go tools through the presets. It also
+# fetches the crates of every tracked Cargo.lock through the crates
+# preset, so the Rust checks build offline, and runs rust:lint once to
+# warm the build cache, so clippy after the agent only rebuilds what it
+# changed. mise leaves rust alone (MISE_DISABLE_TOOLS) and the catalog's
+# cargo comes first on PATH.
+# cargo-deny, nextest and the container, cluster and VM tasks cannot run
+# in the sandbox and are declared as skips.
 
 sandbox:
   toolchains:
     python: auto  # reads .python-version
+    rust: auto  # reads rust-toolchain.toml
     node: "24.15.0"
     go: "1.26.7"
     buf: "1.72.0"
@@ -28,6 +34,7 @@ sandbox:
     - goproxy
     - npm
     - pypi
+    - crates
 
   env:
     MISE_YES: "1"
@@ -62,12 +69,52 @@ sandbox:
         mise link "buf@$(buf --version)" "$(root buf)"
         mise link "helm@$(helm version --template '{{.Version}}' | sed 's/^v//')" \
           "$(dirname "$(command -v helm)")"
-        mise install \
-          npm:markdownlint-cli2 \
-          go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint \
-          go:google.golang.org/protobuf/cmd/protoc-gen-go \
-          go:google.golang.org/grpc/cmd/protoc-gen-go-grpc \
-          go:golang.org/x/tools/cmd/goimports
+        # A few go module fetches can fail at once when the sandbox's DNS
+        # relay times out; mise install is idempotent, so retry it.
+        ok=""
+        for attempt in 1 2 3; do
+          if mise install \
+            npm:markdownlint-cli2 \
+            go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint \
+            go:google.golang.org/protobuf/cmd/protoc-gen-go \
+            go:google.golang.org/grpc/cmd/protoc-gen-go-grpc \
+            go:golang.org/x/tools/cmd/goimports; then
+            ok=1
+            break
+          fi
+          echo "mise install failed (attempt $attempt)" >&2
+          sleep 15
+        done
+        test -n "$ok"
+
+    - name: rust-crates
+      timeout: 1800
+      run: |
+        set -euo pipefail
+        # mise.toml sets RUSTC_WRAPPER=sccache for every `mise run`, and
+        # sccache is a GitHub download no preset opens. A pass-through
+        # wrapper runs rustc directly, without a cache.
+        mkdir -p "$HOME/.local/bin"
+        printf '#!/bin/sh\nexec "$@"\n' > "$HOME/.local/bin/sccache"
+        chmod +x "$HOME/.local/bin/sccache"
+        git ls-files -z -- ':(glob)**/Cargo.lock' |
+          while IFS= read -r -d '' lockfile; do
+            cargo fetch --locked --manifest-path "${lockfile%Cargo.lock}Cargo.toml"
+          done
+
+    - name: rust-warm
+      timeout: 3600
+      run: |
+        set -uo pipefail
+        # Build once before the agent with the exact rust:lint commands, so
+        # the agent's own clippy runs and the rust-lint validate step only
+        # rebuild what changed. A lint failure on the base commit does not
+        # matter here: the build cache is what this step is for.
+        status=0
+        mise run rust:lint || status=$?
+        if [ "$status" -ne 0 ]; then
+          echo "rust:lint exited $status during the warm-up; continuing, the build cache is what this step is for"
+        fi
 
   validate:
     - {name: python-lint, kind: lint, run: mise run python:lint, timeout: 600}
@@ -77,13 +124,22 @@ sandbox:
     - {name: helm-lint, kind: lint, run: mise run helm:lint, timeout: 600}
     - {name: go-format, kind: lint, run: mise run go:format:check, timeout: 600}
     - {name: go-lint, kind: lint, run: mise run go:lint, timeout: 900}
+    - {name: rust-format, kind: lint, run: mise run rust:format:check, timeout: 600}
+    - {name: rust-lint, kind: lint, run: mise run rust:lint, timeout: 3600}
 
   skips:
-    - match: "rust:*, cargo, clippy, nextest, cargo-deny"
-      reason: "No Rust toolchain or C compiler in the sandbox, so Rust builds, tests, lints and dependency checks rely on CI"
+    - match: "rust:deny, cargo deny, test:rust, cargo nextest, rust:verify:*"
+      reason: "cargo-deny and nextest are not in the toolchain catalog, and the Rust tests and verify scripts are left to CI"
     - match: "docker:*, gateway:*, sandbox:*, vm:*, package:*"
       reason: "Image, VM and package builds need a container runtime or privileged features the sandbox blocks"
     - match: "e2e:*, test:*, helm:test"
       reason: "End-to-end and cluster tests need a container runtime, a running gateway or a live cluster"
     - match: "license:check"
       reason: "Fails on main today: midstream files such as .tekton/*.yaml have no SPDX header"
+
+  # Build output stays in the sandbox and is never downloaded back.
+  discard_before_download:
+    - target
+    - e2e/rust/target
+    - examples/governance-interceptor/target
+    - examples/supervisor-middleware-content-guard/target
