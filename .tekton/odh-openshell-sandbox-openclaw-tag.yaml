@@ -8,14 +8,15 @@ metadata:
     build.appstudio.redhat.com/target_branch: '{{target_branch}}'
     pipelinesascode.tekton.dev/cancel-in-progress: "false"
     pipelinesascode.tekton.dev/max-keep-runs: "3"
-    pipelinesascode.tekton.dev/on-cel-expression: event == "push" && target_branch
-      == "main"
+    pipelinesascode.tekton.dev/on-cel-expression: |
+      event == "push"
+      && target_branch.matches("^refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+-rhaiv\\.[0-9]+$")
   creationTimestamp: null
   labels:
     appstudio.openshift.io/application: opendatahub-builds
-    appstudio.openshift.io/component: odh-openshell-e2e-ci
+    appstudio.openshift.io/component: odh-openshell-sandbox-openclaw-ci
     pipelines.appstudio.openshift.io/type: build
-  name: odh-openshell-e2e-on-push
+  name: odh-openshell-sandbox-openclaw-on-tag
   namespace: open-data-hub-tenant
 spec:
   params:
@@ -24,25 +25,22 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/opendatahub/odh-openshell-e2e:odh-stable
+    value: quay.io/opendatahub/odh-openshell-sandbox-openclaw:{{git_tag}}
   - name: dockerfile
-    value: deploy/docker/Dockerfile.konflux.e2e-odh
+    value: deploy/docker/Dockerfile.konflux.openclaw
   - name: path-context
     value: .
   - name: hermetic
     value: "true"
   - name: build-platforms
     value:
-    - linux-m2xlarge/amd64
-    - linux-m2xlarge/arm64
+    - linux/x86_64
+    - linux/arm64
   - name: prefetch-input
     value: |
       [
-        {"type": "cargo", "path": "."},
-        {"type": "cargo", "path": "e2e/rust"},
-        {"type": "pip", "path": "odh", "requirements_files": ["requirements.txt"], "binary": {"packages": ":all:", "arch": "x86_64,aarch64", "os": "linux", "py_version": 311, "py_impl": "cp"}},
-        {"type": "rpm", "path": "deploy/konflux/e2e-odh"},
-        {"type": "generic", "path": "deploy/konflux/e2e-odh", "lockfile": "generic-fetcher.yaml"}
+        {"type": "npm", "path": "deploy/konflux/openclaw"},
+        {"type": "rpm", "path": "deploy/konflux/openclaw"}
       ]
   pipelineRef:
     resolver: git
@@ -54,7 +52,7 @@ spec:
     - name: pathInRepo
       value: pipeline/multi-arch-container-build.yaml
   taskRunTemplate:
-    serviceAccountName: build-pipeline-odh-openshell-e2e-ci
+    serviceAccountName: build-pipeline-odh-openshell-sandbox-openclaw-ci
   workspaces:
   - name: git-auth
     secret:
