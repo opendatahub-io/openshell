@@ -10,4 +10,5 @@
 //! collide with the upstream `harness` module.
 
 pub mod oc;
+pub mod sandbox;
 pub mod selinux;

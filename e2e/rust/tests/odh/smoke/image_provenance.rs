@@ -18,7 +18,8 @@ use serde_json::Value;
 
 use openshell_e2e::harness::sandbox::SandboxGuard;
 
-use crate::odh_harness::oc::{oc_command, oc_json};
+use crate::odh_harness::oc::{gateway_namespace, oc_command, oc_json, release, sandbox_namespace};
+use crate::odh_harness::sandbox::sandbox_pod_selector;
 
 fn allowed_prefixes() -> Vec<String> {
     std::env::var("ALLOWED_IMAGE_REGISTRY_PREFIXES")
@@ -108,8 +109,9 @@ fn parse_supervisor_image(gateway_toml: &str) -> Option<String> {
 
 #[tokio::test]
 async fn test_sandbox_gateway_supervisor_images() {
-    let namespace = std::env::var("NAMESPACE").unwrap_or_else(|_| "openshell".to_string());
-    let release = std::env::var("RELEASE").unwrap_or_else(|_| "openshell".to_string());
+    let gateway_namespace = gateway_namespace();
+    let sandbox_namespace = sandbox_namespace();
+    let release = release();
     let allowed = allowed_prefixes();
 
     let mut errors = Vec::new();
@@ -143,27 +145,21 @@ async fn test_sandbox_gateway_supervisor_images() {
     // agents.x-k8s.io/sandbox-name-hash label. So look up the CR first and
     // follow its reported `status.selector` to find the pod.
     let sandbox_selector = format!("openshell.ai/sandbox-name={}", sb.name);
-    let sandbox_crs = oc_json(&[
-        "get",
-        "sandboxes.agents.x-k8s.io",
-        "-n",
-        &namespace,
-        "-l",
-        &sandbox_selector,
-        "-o",
-        "json",
-    ])
-    .await;
-    let pod_selector = sandbox_crs
-        .get("items")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .and_then(|cr| cr["status"]["selector"].as_str())
-        .map(str::to_string);
+    let pod_selector = sandbox_pod_selector(&sandbox_namespace, &sb.name).await;
 
     match pod_selector {
         Some(pod_selector) => {
-            let sandbox_pods = oc_json(&["get", "pods", "-n", &namespace, "-l", &pod_selector, "-o", "json"]).await;
+            let sandbox_pods = oc_json(&[
+                "get",
+                "pods",
+                "-n",
+                &sandbox_namespace,
+                "-l",
+                &pod_selector,
+                "-o",
+                "json",
+            ])
+            .await;
             collect_pod_images(&sandbox_pods, &pod_selector, &mut errors, &mut images);
         }
         None => errors.push(format!(
@@ -177,7 +173,7 @@ async fn test_sandbox_gateway_supervisor_images() {
         "get",
         "pods",
         "-n",
-        &namespace,
+        &gateway_namespace,
         "-l",
         &gateway_selector,
         "-o",
@@ -196,7 +192,7 @@ async fn test_sandbox_gateway_supervisor_images() {
             "configmap",
             &cm_name,
             "-n",
-            &namespace,
+            &gateway_namespace,
             "-o",
             "jsonpath={.data.gateway\\.toml}",
         ])
