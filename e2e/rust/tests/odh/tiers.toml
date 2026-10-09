@@ -1,26 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Maps each test tier to the upstream e2e test binaries and the ODH test
-# module filter that belong to it. Read at runtime by run-odh-test-tier.sh.
-#
-# `upstream_tests` names explicit or auto-discovered Cargo test binaries.
-# `upstream_test_exclusions` removes named tests from a selected binary.
-# `odh_filter` matches module-path-prefixed test names in the `odh` binary
-# (e.g. "smoke::" runs every test under tests/odh/smoke/).
-#
-# The upstream test assignments below are placeholders — fill them in based
-# on actual test criticality and measured execution time.
+# This upstream assertion expects unrestricted Secret reads in openshell, but
+# managed-mode RBAC deliberately limits reads to named source Secrets.
+# This assertion also expects a client certificate in the supervisor bootstrap
+# Secret, but the driver intentionally stages only the CA certificate there.
+# Remove each exclusion when its assertion matches the intended contract.
+[global_test_exclusions]
+workspace_namespace_managed = [
+  "managed_gateway_cannot_read_or_modify_workspace_secrets",
+  "managed_supervisor_reads_client_tls_from_its_bootstrap_secret",
+]
+
+[modes.shared]
+expected_helm_values = { server = { auth = { allowUnauthenticatedUsers = false }, drivers = { kubernetes = { workspaceMode = "shared" } } } }
+
+[modes.managed]
+helm_values = ["deploy/helm/openshell/ci/values-workspace-managed.yaml"]
+expected_helm_values = { server = { auth = { allowUnauthenticatedUsers = false }, drivers = { kubernetes = { workspaceMode = "managed" } } } }
 
 [smoke]
 description = "Component-level critical tests (5 min target)"
-# Upstream removed the standalone `smoke` test binary (commit bb704618,
-# "run conformance in gateway lanes") in favor of a portable CLI conformance
-# scenario run via the standalone `openshell-conformance` binary
-# (`mise run e2e:cli-conformance`) — not a `cargo test --test <name>` target,
-# so it doesn't fit this list's shape. Left empty rather than pointing at a
-# nonexistent test target; the ODH `smoke::` filter below still covers this
-# tier's own gateway/sandbox/image-provenance checks.
+# The standalone smoke binary was removed in favor of the portable CLI
+# conformance scenario. The ODH smoke filter covers this tier's own scenarios.
 upstream_tests = []
 odh_filter = "smoke::"
 
@@ -35,6 +37,10 @@ description = "Medium/low priority positive tests"
 upstream_tests = ["workspace_lifecycle"]
 odh_filter = "tier2::"
 
+[tier2.managed]
+description = "Managed-workspace lifecycle tests"
+upstream_tests = ["workspace_namespace_managed"]
+
 [tier3]
 description = "Negative and destructive tests"
 upstream_tests = []
@@ -42,15 +48,21 @@ odh_filter = "tier3::"
 
 [odh]
 description = "All ODH-specific tests"
+odh_only = true
 upstream_tests = []
 odh_filter = ""
-odh_only = true
+
+[odh.managed]
+description = "Managed-workspace tests"
+upstream_tests = ["workspace_namespace_managed"]
+odh_filter = ""
 
 [full]
 description = "All feature-enabled upstream and ODH tests except listed exclusions"
 upstream_tests = []
 odh_filter = ""
 all_binaries = true
+excluded_binaries = ["workspace_namespace_managed"]
 
 [full.upstream_test_exclusions]
 # Full OpenShift runs identified the failures and timeouts below.
@@ -58,3 +70,8 @@ all_binaries = true
 live_policy_update = ["initial_sparse_policy_is_acknowledged_as_loaded"]
 no_proxy = ["sandbox_reaches_localhost_without_proxy_environment"]
 port_forward = ["port_forward_echo"]
+
+[full.managed]
+description = "Managed-workspace tests"
+upstream_tests = ["workspace_namespace_managed"]
+odh_filter = ""

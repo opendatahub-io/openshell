@@ -41,7 +41,7 @@ e2e-vm = ["e2e", "e2e-host-gateway"]
 # opendatahub-io fork: downstream-only ODH/RHOAI e2e tests (see
 # e2e/rust/tests/odh/ and TESTING-odh.md). Inherits e2e-kubernetes so
 # upstream harness improvements propagate automatically.
-e2e-odh = ["e2e-kubernetes"]
+e2e-odh = ["e2e-kubernetes", "e2e-kubernetes-workspace-managed"]
 
 [[test]]
 name = "policy_activation"

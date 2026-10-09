@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# ODH e2e overrides. The shared OpenShift overlay enables unauthenticated dev
+# access; ODH uses the chart's default mTLS user authentication instead.
+server:
+  auth:
+    allowUnauthenticatedUsers: false
+
+# Upstream mutable-image tests use Always; ODH provenance requires IfNotPresent.
+gateway:
+  image:
+    pullPolicy: IfNotPresent
+
+supervisor:
+  image:
+    pullPolicy: IfNotPresent
+
+sandboxRuntime:
+  image:
+    pullPolicy: IfNotPresent
+
+sandbox:
+  image:
+    pullPolicy: IfNotPresent
