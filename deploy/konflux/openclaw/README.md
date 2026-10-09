@@ -4,7 +4,7 @@
 
 ## Status
 
-This image is an unsupported reference composition. It is published only on quay.io/opendatahub, it is not RHOAI product content, and it is not the default sandbox workload image. It targets midstream main 23ac1e1c2 (v0.1.2-rhaiv.2). Read [Verified vs not verified](#verified-vs-not-verified) before relying on it.
+This image is an unsupported reference composition. It is published only on quay.io/opendatahub, it is not RHOAI product content, and it is not the default sandbox workload image. It targets midstream main 4f6b3ad8 (v0.1.2-rhaiv.8 plus 18 commits). Read [Verified vs not verified](#verified-vs-not-verified) before relying on it.
 
 ## What's inside
 
@@ -13,6 +13,7 @@ This image is an unsupported reference composition. It is published only on quay
 - User 1000:1000 (`sandbox`), `HOME=/sandbox`, `WORKDIR /`, no `/sandbox` directory, no ENTRYPOINT and no baked sandbox policy. OpenShell creates and owns the workspace.
 - The `DEFAULT:PQ` system crypto policy, so Node's TLS 1.3 prefers X25519MLKEM768. `python3` is present as a dependency of `crypto-policies-scripts`.
 - OpenClaw defaults `OPENCLAW_NO_AUTO_UPDATE=1`, `DO_NOT_TRACK=1`, `OPENCLAW_DISABLE_BONJOUR=1` and `OPENCLAW_OFFLINE=1`, set in the image env and again in `/etc/profile.d/openclaw.sh` for login shells. Inherited base env such as `APP_ROOT` or `NPM_RUN` is harmless.
+- `TMPDIR=/tmp`, also set in both places. Without it, SQLite picks `/var/tmp`, which the sandbox filesystem policy does not grant, and OpenClaw fails with `unable to open database file`.
 - Not included: git, gzip, ps, Chromium and chat-channel plugins.
 
 ## Build locally
@@ -66,12 +67,16 @@ openshell sandbox exec --name openclaw -- openclaw-start agent exec "Summarize R
 | `MODEL_BASE_URL` | OpenAI-compatible base URL. It must use exactly the host and port from the provider profile. |
 | `MODEL_ID` | Model name served at that URL. |
 | `CUSTOM_API_KEY` | Injected by the provider as a placeholder. For an endpoint without auth, create the provider with `--credential CUSTOM_API_KEY=unused`; the provider also supplies the egress rule for the model endpoint. |
+| `MODEL_MAX_TOKENS` | Optional output token limit for the model. Onboarding defaults to 4096. |
+| `MODEL_CONTEXT_WINDOW` | Optional context window for the model. |
+| `MODEL_REASONING` | Optional `true` or `false`. Onboarding defaults to `false`. |
 | `OPENCLAW_*`, `DO_NOT_TRACK` | Update, telemetry, Bonjour and download defaults. Override them with `--env`. |
 
 - `openclaw-start` onboards only when `~/.openclaw/openclaw.json` is missing. Delete that file and its `.bak` to onboard again. Deleting `~/.openclaw` resets all OpenClaw state.
 - Start OpenClaw through `openclaw-start` or a login-shell exec. `sandbox exec --no-login-shell` skips the profile.d defaults.
 - With no arguments, `openclaw-start` runs `openclaw tui --local`, which needs a TTY, so don't combine it with `--detach`. When the TUI exits, the sandbox is Completed. `openshell sandbox start openclaw` restarts it with its state intact.
-- Set `contextWindow` and `maxTokens` for the model under `models.providers.openshell-model` with `openclaw config set` so they match your server.
+- `MODEL_MAX_TOKENS`, `MODEL_CONTEXT_WINDOW` and `MODEL_REASONING` apply only at onboarding, like the other `MODEL_*` variables. For a reasoning model, set `MODEL_REASONING=true` and raise `MODEL_MAX_TOKENS` (for example to 32768), or the model can spend the default 4096 tokens thinking and OpenClaw reports `Agent couldn't generate a response`. To change them after onboarding, use `openclaw config set 'models.providers.openshell-model.models[0].maxTokens' <n>`.
+- On every start, `openclaw-start` clears the setgid bit on directories under `~/.openclaw` and `~/.openclaw-worker`. The Kubernetes driver's pod `fsGroup` makes the workspace volume setgid, and OpenClaw rejects private directories that inherit the bit (`insecure permissions 2700`). Run OpenClaw through `openclaw-start` at least once per sandbox start so this repair happens.
 
 ## Policy
 
@@ -86,7 +91,7 @@ Best effort, not validated. Onboarding configures OpenClaw's gateway on loopback
 - OpenShell sandboxes need OCP 4.19 or later (Landlock ABI 3 or newer).
 - On RHCOS 9 the sandbox runs in legacy read-only mode. OpenClaw's gateway then treats every client as remote, so the Control UI always needs device approval, and Python or Go servers in the sandbox fail at `accept()`. OpenClaw's embedded MCP loopback server should still work.
 - EDR agents such as CrowdStrike Falcon may kill OpenClaw entirely, not only its sqlite workers. That includes image builds, where any step touching the OpenClaw package path can be killed. Build on sanctioned infrastructure without such a policy, such as Konflux, and run `smoke-test.sh` on a host or CI runner without it. Nodes running such an agent may kill OpenClaw inside sandboxes too.
-- OpenClaw calls `os.userInfo()` unguarded in several paths, so an SCC-assigned UID with no passwd entry may break status, session or TUI commands. This is unverified.
+- OpenClaw calls `os.userInfo()` unguarded in several paths. Onboarding, `agent exec` and the TUI work as a UID with no passwd entry; `status` and session commands under an SCC-assigned UID are unverified.
 - `web_fetch` rejects OpenShell's synthetic DNS answers (198.18.0.0/15, fc00::/7) unless `tools.web.fetch.ssrfPolicy.allowRfc2544BenchmarkRange` and `tools.web.fetch.ssrfPolicy.allowIpv6UniqueLocalRange` are set, per OpenClaw's `docs/tools/web.md`. This is unverified.
 - Updating the image never touches OpenClaw state on the sandbox's persistent volume.
 
@@ -94,18 +99,18 @@ Best effort, not validated. Onboarding configures OpenClaw's gateway on loopback
 
 Verified:
 
-- [x] `build-local.sh openclaw` on GitHub-hosted Ubuntu 24.04 runners (podman 4.9.3), amd64 and native arm64: the hermetic build succeeds, and every `smoke-test.sh` check passes on both arches. That covers arch, config, labels, `openclaw --version`, layout, `DEFAULT:PQ` with Node negotiating X25519MLKEM768, first-run onboarding and its idempotence as UID 51234 with no passwd entry on a read-only rootfs, the login-shell env, and the missing-env exit.
+- [x] `build-local.sh openclaw` on GitHub-hosted Ubuntu 24.04 runners (podman 4.9.3), amd64 and native arm64: the hermetic build succeeds, and every `smoke-test.sh` check that existed then passes on both arches. That covers arch, config, labels, `openclaw --version`, layout, `DEFAULT:PQ` with Node negotiating X25519MLKEM768, first-run onboarding and its idempotence as UID 51234 with no passwd entry on a read-only rootfs, the login-shell env, and the missing-env exit. The later `setgid-home`, `model-overrides` and `tmpdir` checks, and the `TMPDIR` assertion in `login-shell`, have only run on linux/amd64 with podman 5.8.7.
 - [x] Host unit tests for `openclaw-start` (with a fake OpenClaw CLI), `profile.sh` and `check-glibc.sh`.
 - [x] `build-local.sh`: a stub trace shows the four existing components build unchanged, and the npm files are restored even when the build fails.
 - [x] The glibc ceiling lint fails the build at 2.33 (`@openclaw/fs-safe-linux-x64-gnu` needs 2.34).
 - [x] Trivy config scan of the Dockerfile is clean, and the license check adds only `rpms.lock.yaml`.
+- [x] On kind (Kubernetes 1.37, rootless podman) with the midstream gateway and Kubernetes driver from the commit in [Status](#status), and a workspace volume that honors `fsGroup` (setgid `/sandbox`), running as UID 10001 with no passwd entry: `openshell profile lint` and import of the example profile, provider credential injection and egress through the profile alone, first-run onboarding, a headless `agent exec` turn and an interactive TUI turn against a llama.cpp model and against a stub reasoning model. The private agent directory is 0700 and no directory under `~/.openclaw` keeps setgid.
 
 Not verified:
 
-- [ ] Any OpenShell sandbox run, including provider credential injection and `openshell profile lint` of the example profile.
-- [ ] Kubernetes and OpenShift (PVC seeding with no `/sandbox`, SCC arbitrary UID, exec env path) and RHCOS 9 legacy mode.
-- [ ] Agent turns, the TUI and the Control UI.
-- [ ] `os.userInfo()` without a passwd entry.
+- [ ] OpenShift (SCC arbitrary UID, CSI-backed workspace volumes) and RHCOS 9 legacy mode.
+- [ ] The Control UI.
+- [ ] `os.userInfo()` in `status` and session commands without a passwd entry.
 
 Once the component is onboarded, the Konflux PR pipeline is the first full build of this Dockerfile on both arches. It runs the in-build checks (the hermetic npm and rpm install, the OpenClaw version pin check, which only reads `package.json`, the glibc ceiling lint and the permissions check) plus Konflux's scans. It does not run `smoke-test.sh`, so after each OpenClaw or base bump, re-run `build-local.sh openclaw` on a host or CI runner without such an EDR policy, or add a Konflux IntegrationTestScenario that runs `smoke-test.sh` against the built image.
 

@@ -11,6 +11,7 @@ case ":${PATH:-}:" in
   *) PATH="/usr/local/bin${PATH:+:${PATH}}"; export PATH ;;
 esac
 
+: "${TMPDIR:=/tmp}"; export TMPDIR
 : "${OPENCLAW_NO_AUTO_UPDATE:=1}"; export OPENCLAW_NO_AUTO_UPDATE
 : "${DO_NOT_TRACK:=1}"; export DO_NOT_TRACK
 : "${OPENCLAW_DISABLE_BONJOUR:=1}"; export OPENCLAW_DISABLE_BONJOUR

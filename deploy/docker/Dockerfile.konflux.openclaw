@@ -80,7 +80,11 @@ RUN ln -s /usr/local/lib/openclaw/node_modules/openclaw/openclaw.mjs /usr/local/
 COPY --chmod=0755 deploy/konflux/openclaw/openclaw-start.sh /usr/local/bin/openclaw-start
 COPY --chmod=0644 deploy/konflux/openclaw/profile.sh /etc/profile.d/openclaw.sh
 
+# SQLite picks its temp directory by probing /var/tmp before /tmp with
+# access(), which Landlock does not mediate, so it chooses /var/tmp and then
+# fails to open files there. TMPDIR points it, and Node, at the writable /tmp.
 ENV HOME=/sandbox \
+    TMPDIR=/tmp \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     NPM_CONFIG_PREFIX=/sandbox/.npm-global \
     OPENCLAW_NO_AUTO_UPDATE=1 \
