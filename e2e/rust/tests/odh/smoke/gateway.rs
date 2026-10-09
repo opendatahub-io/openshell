@@ -11,10 +11,22 @@ use openshell_e2e::harness::output::strip_ansi;
 
 const STATUS_TIMEOUT: Duration = Duration::from_secs(15);
 
+fn status_summary(status: &str) -> &'static str {
+    if status.contains("Connected") {
+        "connected"
+    } else if status.contains("Disconnected") {
+        "disconnected"
+    } else if status.contains("Error") {
+        "error"
+    } else {
+        "unrecognized output"
+    }
+}
+
 #[tokio::test]
 async fn test_reachable() {
-    let mut clean_status = String::new();
     let mut status_ok = false;
+    let mut final_status = "no status output";
     for _ in 0..15 {
         let mut status_cmd = openshell_cmd();
         status_cmd
@@ -32,7 +44,8 @@ async fn test_reachable() {
             String::from_utf8_lossy(&status_out.stdout),
             String::from_utf8_lossy(&status_out.stderr),
         );
-        clean_status = strip_ansi(&status_text);
+        let clean_status = strip_ansi(&status_text);
+        final_status = status_summary(&clean_status);
 
         if status_out.status.success() && clean_status.contains("Connected") {
             status_ok = true;
@@ -44,6 +57,6 @@ async fn test_reachable() {
 
     assert!(
         status_ok,
-        "openshell status never became healthy:\n{clean_status}",
+        "openshell status never became healthy after 15 attempts (last status: {final_status})",
     );
 }
