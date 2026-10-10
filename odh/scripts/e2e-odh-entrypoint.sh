@@ -11,14 +11,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEPLOY_SCRIPT="${SCRIPT_DIR}/openshell-deploy-from-quay.sh"
 TEST_SCRIPT="${ROOT}/e2e/rust/tests/odh/run-odh-test-tier.sh"
+OIDC_SCRIPT="${SCRIPT_DIR}/run-odh-oidc.sh"
 TIER="${1:-smoke}"
 
 if [[ $# -gt 1 ]]; then
-	echo "Usage: $0 [smoke|tier1|tier2|tier3|odh|full]" >&2
+	echo "Usage: $0 [smoke|tier1|tier2|tier3|odh|full|oidc]" >&2
 	exit 2
 fi
 case "${TIER}" in
-	smoke|tier1|tier2|tier3|odh|full) ;;
+	smoke|tier1|tier2|tier3|odh|full|oidc) ;;
 	*) echo "ERROR: unknown test tier: ${TIER}" >&2; exit 2 ;;
 esac
 
@@ -29,6 +30,12 @@ fi
 if [[ ! -f "${KUBECONFIG}" ]]; then
 	echo "ERROR: kubeconfig not found at ${KUBECONFIG}" >&2
 	exit 1
+fi
+
+# OIDC owns two independently cleaned deployments: its RHBK fixture namespace
+# and the OpenShell namespace. Keep it outside the Rust-tier lifecycle below.
+if [[ "${TIER}" == oidc ]]; then
+	exec "${OIDC_SCRIPT}"
 fi
 
 cleanup_enabled=0

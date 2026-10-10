@@ -160,6 +160,7 @@ context you happen to have active elsewhere. This means:
 | `mise run e2e:odh:tier1` | Tier 1: mapped upstream tests + ODH `tier1::` + image provenance |
 | `mise run e2e:odh:tier2` | Tier 2: mapped upstream tests + ODH `tier2::` + image provenance |
 | `mise run e2e:odh:tier3` | Tier 3: mapped upstream tests + ODH `tier3::` + image provenance |
+| `mise run e2e:odh:oidc` | Isolated OpenShift Keycloak/OIDC authentication and workspace authorization validation |
 | `cargo nextest run --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh -E 'test(=module::test_name)'` | A single ODH test function |
 
 Example, running the Smoke tier against a real cluster:
@@ -179,6 +180,36 @@ too if your deployment doesn't use the defaults (`openshell`/`openshell`).
 The Quay deployment script sets
 `sandbox.image.pullPolicy=IfNotPresent`; other deployments must
 configure it themselves.
+
+### OpenShift Keycloak/OIDC validation
+
+`mise run e2e:odh:oidc` creates an isolated Keycloak, PostgreSQL database,
+OpenShell realm, TLS Route, and OpenShell deployment. It runs the existing
+Python OIDC authentication and workspace authorization suites against the
+OpenShift gateway, writes JUnit results to `results/e2e-odh-oidc.xml`, and
+removes the resources it created. It requires a kubeconfig whose current
+context can create the necessary OpenShift resources.
+
+```bash
+KUBECONFIG="$PWD/kubeconfig" \
+OPENSHELL_E2E_RHBK_NAMESPACE=openshell-e2e-keycloak \
+mise run e2e:odh:oidc
+```
+
+Set `OPENSHELL_E2E_RETAIN_ON_FAILURE=1` to preserve resources for debugging.
+When `OPENSHELL_E2E_RHBK_NAMESPACE` is unset, the runner installs an isolated
+Red Hat build of Keycloak Operator and removes its namespace during cleanup.
+Set `OPENSHELL_E2E_POSTGRES_IMAGE` to use a pinned or mirrored PostgreSQL
+image; it defaults to the pinned `registry.redhat.io/rhel9/postgresql-16`
+digest in the runner.
+For reproducible validation, provide the gateway, supervisor, and sandbox
+images from the same revision as the E2E image, preferably by immutable digest.
+
+The OpenShift lane also validates token lifecycle behavior: a valid refresh
+token yields a usable access token, an invalid refresh token is rejected, the
+gateway rejects an access token after its short per-run lifetime expires, and
+Keycloak rejects a refresh token after its temporary client session expires.
+The short lifetimes apply only to the temporary OpenShift Keycloak realm.
 
 ### SELinux-enforcing OCP validation
 
@@ -312,11 +343,12 @@ already deployed and configured for the CLI inside the container.
 
 The environment file must set `IMAGE_TAG` for the gateway, supervisor,
 and sandbox images, plus `ALLOWED_IMAGE_REGISTRY_PREFIXES` for the
-provenance test. By default, the deployment uses the
-`quay.io/opendatahub/odh-openshell-*` midstream repositories.
-Override `QUAY_NAMESPACE`, `GATEWAY_IMAGE`, `SUPERVISOR_IMAGE`, or
-`SANDBOX_IMAGE` when testing another repository. `NAMESPACE`, `RELEASE`,
-`ROUTE_HOST`, and `GATEWAY_NAME` control the deployment. The image writes
+provenance test. For a CI build, set `GATEWAY_IMAGE_DIGEST`,
+`SUPERVISOR_IMAGE_DIGEST`, and `SANDBOX_IMAGE_DIGEST` to pin all three runtime
+images to immutable outputs from one PipelineRun. Override `QUAY_NAMESPACE`,
+`GATEWAY_IMAGE`, `SUPERVISOR_IMAGE`, or `SANDBOX_IMAGE` when testing another
+repository. `NAMESPACE`, `RELEASE`, `ROUTE_HOST`, and `GATEWAY_NAME` control
+the deployment. The image writes
 `e2e-odh-<tier>.xml` and
 `e2e-odh-<tier>.html` to `results/`. Set
 `OPENSHELL_E2E_REPORT_NAME` to choose another basename. The JUnit report

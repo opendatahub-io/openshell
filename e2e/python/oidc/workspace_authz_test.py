@@ -1036,6 +1036,7 @@ class TestWorkspaceAuthorization:
         self,
         admin_ctx: Any,
         user_ctx: Any,
+        seed_provider: str,
     ) -> None:
         admin_stub, admin_md = admin_ctx
         user_stub, user_md, user_sub = user_ctx
@@ -1064,6 +1065,46 @@ class TestWorkspaceAuthorization:
                 WS,
                 user_sub,
                 "CreateProvider",
+            )
+
+            # UpdateProvider requires workspace admin even when the target
+            # provider exists in a workspace the caller is allowed to read.
+            with pytest.raises(grpc.RpcError) as exc_info:
+                user_stub.UpdateProvider(
+                    openshell_pb2.UpdateProviderRequest(
+                        workspace_scope=datamodel_pb2.WorkspaceSelector(workspace=WS),
+                        provider=datamodel_pb2.Provider(
+                            metadata=datamodel_pb2.ObjectMeta(
+                                name=seed_provider, workspace=WS
+                            ),
+                            type="claude-code",
+                            credentials={"ANTHROPIC_API_KEY": "updated"},
+                        ),
+                    ),
+                    metadata=user_md,
+                )
+            _assert_workspace_admin_denial(
+                exc_info.value,
+                WS,
+                user_sub,
+                "UpdateProvider",
+            )
+
+            # DeleteProvider must be denied for the same existing provider;
+            # this avoids passing only because a requested object is absent.
+            with pytest.raises(grpc.RpcError) as exc_info:
+                user_stub.DeleteProvider(
+                    openshell_pb2.DeleteProviderRequest(
+                        name=seed_provider,
+                        workspace_scope=datamodel_pb2.WorkspaceSelector(workspace=WS),
+                    ),
+                    metadata=user_md,
+                )
+            _assert_workspace_admin_denial(
+                exc_info.value,
+                WS,
+                user_sub,
+                "DeleteProvider",
             )
 
             # AddWorkspaceMember requires workspace admin

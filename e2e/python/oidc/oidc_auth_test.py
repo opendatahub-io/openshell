@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
+import urllib.error
 import urllib.parse
 from pathlib import Path
 
@@ -28,10 +30,13 @@ from .helpers import (
     KEYCLOAK_REALM,
     _gateway_endpoint,
     _mtls_dir,
+    extract_jwt_claims,
     extract_sub,
     get_token,
+    get_token_response,
     grpc_channel,
     keycloak_url,
+    refresh_token,
     stub_with_token,
 )
 
@@ -221,6 +226,77 @@ class TestScopes:
         assert exc_info.value.code() == grpc.StatusCode.PERMISSION_DENIED
 
 
+@pytest.mark.skipif(
+    os.environ.get("OPENSHELL_E2E_OIDC_SESSION_LIFECYCLE") != "1",
+    reason="OIDC session lifecycle tests are enabled by the OpenShift runner",
+)
+class TestSessionLifecycle:
+    """Verify refresh and expiry behavior against the deployed OIDC gateway."""
+
+    def test_refresh_token_produces_an_authorized_access_token(self) -> None:
+        initial = get_token_response(
+            "admin@test", "admin", scopes="openid openshell:all"
+        )
+        refreshed = refresh_token(str(initial["refresh_token"]))
+        refreshed_access_token = str(refreshed["access_token"])
+
+        assert extract_sub(refreshed_access_token) == extract_sub(
+            str(initial["access_token"])
+        )
+        stub, metadata = stub_with_token(refreshed_access_token)
+        stub.ListSandboxes(
+            openshell_pb2.ListSandboxesRequest(
+                workspace_scope=datamodel_pb2.WorkspaceSelector(workspace="default")
+            ),
+            metadata=metadata,
+        )
+
+    def test_invalid_refresh_token_is_rejected(self) -> None:
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            refresh_token("not-a-valid-refresh-token")
+        assert exc_info.value.code == 400
+
+    def test_expired_access_token_is_rejected_by_gateway(self) -> None:
+        response = get_token_response(
+            "admin@test", "admin", scopes="openid openshell:all"
+        )
+        access_token = str(response["access_token"])
+        expires_at = int(extract_jwt_claims(access_token)["exp"])
+        delay = expires_at - time.time() + 1
+
+        # A longer value means the per-run short-lifetime realm configuration
+        # was not applied; fail clearly rather than silently slowing CI down.
+        assert 0 < delay <= 30, "OIDC fixture did not issue a short-lived token"
+        time.sleep(delay)
+
+        stub, metadata = stub_with_token(access_token)
+        with pytest.raises(grpc.RpcError) as exc_info:
+            stub.ListSandboxes(
+                openshell_pb2.ListSandboxesRequest(
+                    workspace_scope=datamodel_pb2.WorkspaceSelector(workspace="default")
+                ),
+                metadata=metadata,
+            )
+        assert exc_info.value.code() == grpc.StatusCode.UNAUTHENTICATED
+
+    def test_refresh_token_after_client_session_expiry_is_rejected(self) -> None:
+        response = get_token_response(
+            "admin@test", "admin", scopes="openid openshell:all"
+        )
+        refresh_lifetime = int(response["refresh_expires_in"])
+
+        # The temporary OCP realm uses Client Session Max rather than an idle
+        # timeout: Keycloak can apply a cluster grace window to idle expiry.
+        assert 0 < refresh_lifetime <= 30, (
+            "OIDC fixture did not issue a short-lived refresh token"
+        )
+        time.sleep(refresh_lifetime + 1)
+
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            refresh_token(str(response["refresh_token"]))
+        assert exc_info.value.code == 400
+
+
 # ── Client Credentials Tests ─────────────────────────────────────────
 
 
@@ -233,7 +309,9 @@ class TestClientCredentials:
         auth = ClientCredentialsAuth(
             issuer=f"{keycloak_url()}/realms/{KEYCLOAK_REALM}",
             client_id="openshell-ci",
-            client_secret="ci-test-secret",
+            client_secret=os.environ.get(
+                "OPENSHELL_E2E_OIDC_CLIENT_SECRET", "ci-test-secret"
+            ),
         )
         ci_token = auth()
         ci_sub = extract_sub(ci_token)
