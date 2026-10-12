@@ -106,6 +106,8 @@ PORTFORWARD_LOG="${WORKDIR}/portforward.log"
 PORTFORWARD_HEALTH_PID=""
 PORTFORWARD_HEALTH_LOG="${WORKDIR}/portforward-health.log"
 HELM_INSTALLED=0
+KATA_RUNTIME_CLASS_NAME=""
+KATA_RUNTIME_CLASS_CREATED=0
 EXTERNAL_PG_FIXTURE_DEPLOYED=0
 EXTERNAL_PG_FIXTURE_SECRET=""
 EXTERNAL_PG_FIXTURE_MANIFEST="${ROOT}/e2e/kubernetes/postgres-fixture.yaml"
@@ -715,6 +717,16 @@ cleanup() {
     ENVOY_HELM_INSTALLED=0
   fi
 
+  if [ "${KATA_RUNTIME_CLASS_CREATED}" = "1" ]; then
+    if ! kctl delete runtimeclass "${KATA_RUNTIME_CLASS_NAME}" \
+      --ignore-not-found --wait=false --request-timeout=15s; then
+      echo "ERROR: could not delete the per-run RuntimeClass; remove it manually:" >&2
+      printf 'kubectl --context %q delete runtimeclass %q\n' \
+        "${KUBE_CONTEXT}" "${KATA_RUNTIME_CLASS_NAME}" >&2
+      if [ "${exit_code}" -eq 0 ]; then exit_code=1; fi
+    fi
+  fi
+
   if [ "${CLUSTER_CREATED_BY_US}" = "1" ] && [ -n "${CLUSTER_NAME}" ]; then
     if command -v k3d >/dev/null 2>&1 && k3d cluster list "${CLUSTER_NAME}" \
         >/dev/null 2>&1; then
@@ -724,6 +736,7 @@ cleanup() {
   fi
 
   rm -rf "${WORKDIR}" 2>/dev/null || true
+  exit "${exit_code}"
 }
 trap cleanup EXIT
 
@@ -1353,6 +1366,17 @@ fi
 # callers can keep activation disabled for negative coverage.
 if [ "${OPENSHELL_E2E_KUBE_IMAGE_UPDATES:-1}" = "1" ]; then
   helm_extra_args+=(--set 'gatewayConfig.openshell\.gateway.enable_sandbox_updates=true')
+fi
+if [ -n "${KATA_CONTAINERS_RUNTIME_CLASS:-}" ]; then
+  # Keep the administrator's shared class untouched. A hard kill can leave only
+  # this uniquely named copy; the name in the log identifies manual cleanup.
+  KATA_RUNTIME_CLASS_NAME="openshell-e2e-$("${PYTHON_BIN:-python3}" -c 'import uuid; print(uuid.uuid4().hex)')"
+  echo "Creating per-run RuntimeClass ${KATA_RUNTIME_CLASS_NAME} from ${KATA_CONTAINERS_RUNTIME_CLASS}"
+  kctl get runtimeclass "${KATA_CONTAINERS_RUNTIME_CLASS}" -o json \
+    | "${PYTHON_BIN:-python3}" "${ROOT}/e2e/support/runtime-class.py" "${KATA_RUNTIME_CLASS_NAME}" \
+    | kctl create -f -
+  KATA_RUNTIME_CLASS_CREATED=1
+  helm_extra_args+=(--set-string "server.defaultRuntimeClassName=${KATA_RUNTIME_CLASS_NAME}")
 fi
 if [ "${OPENSHELL_E2E_EXTERNAL_COMPUTE_DRIVER:-0}" = "1" ]; then
   if [ "${OPENSHELL_E2E_KUBE_BUILD_IMAGES}" != "1" ]; then
