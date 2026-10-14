@@ -18,8 +18,10 @@ client mTLS material is stored in a mode `0700` directory with mode `0600`
 files. The Rust tests consume the deployed gateway.
 
 The image also carries a fully prefetched Python 3.11 test environment and
-generated protobuf bindings, so later named Python test modes can execute
-without runtime dependency downloads.
+generated protobuf bindings, so the `sdk` and `gateway-e2e` Python test modes
+run without runtime dependency downloads. See
+[Python test modes](../../../e2e/rust/tests/odh/README.md#python-test-modes)
+for their invocation, reports, and environment gates.
 
 Konflux onboarding must use the `linux-m2xlarge/*` builders and retain the
 three Hermeto prefetch inputs: Cargo at `.` and `e2e/rust`, plus the locked
@@ -44,3 +46,37 @@ The image name is `odh-openshell-e2e`; Konflux automation generates the
 Tekton YAML files.
 Before merging, validate the local hermetic build on both `linux/amd64` and
 `linux/arm64` using `PLATFORM` with `deploy/konflux/build-local.sh e2e-odh`.
+
+## Dependency maintenance
+
+MintMaker, the Konflux Renovate service, maintains the image inputs:
+
+| Input | Source of truth | Updates |
+|---|---|---|
+| UBI base image | `FROM` lines in `deploy/docker/Dockerfile.konflux.e2e-odh` | Renovate tag and digest updates |
+| `oc`, Helm, cargo-nextest, uv | `# renovate:`-annotated `ARG <TOOL>_VERSION` lines in the Dockerfile | Renovate updates the Dockerfile and `generic-fetcher.yaml` in one PR, without automerge |
+| Rust | Digest-pinned `rust-rhel9` builder `FROM` line | Renovate tracks its tag and digest; updates require review and two-architecture hermetic builds |
+| RPMs | `rpms.in.yaml` and `rpms.lock.yaml` | MintMaker lock file maintenance |
+| Python test dependencies | `odh/requirements.in` and the hash-pinned `odh/requirements.txt` | Regenerate with the command in `requirements.in` |
+
+Renovate cannot recompute the SHA-256 checksums in `generic-fetcher.yaml`,
+so a tool update fails the hermetic build until they are refreshed. Download
+both architectures and rewrite the checksums with:
+
+```shell
+deploy/konflux/e2e-odh/sync-generic-fetcher.py --update <uv|oc|helm|nextest>
+```
+
+The Dockerfile `ARG` versions are the source of truth for the artifact URLs
+and filenames. Check that `generic-fetcher.yaml` matches them for both
+architectures, without network access, with:
+
+```shell
+mise run konflux:e2e-odh:check-pins
+```
+
+A UBI base update can change the available RPM versions. Regenerate
+`rpms.lock.yaml` with the command in `rpms.in.yaml` when the hermetic build
+reports a missing package, or wait for the next lock file maintenance PR.
+The uv version in the image is independent of the developer toolchain version
+in `mise.toml`.

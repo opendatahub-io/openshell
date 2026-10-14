@@ -25,7 +25,12 @@
 #   GATEWAY_IMAGE    full gateway image repository override
 #   GATEWAY_IMAGE_DIGEST optional gateway digest, overriding IMAGE_TAG for Helm
 #   SUPERVISOR_IMAGE full supervisor image repository override
+#   SUPERVISOR_IMAGE_DIGEST optional supervisor digest, overriding IMAGE_TAG for Helm
 #   SANDBOX_IMAGE    full sandbox image repository override
+#   SANDBOX_IMAGE_DIGEST optional sandbox runtime digest, overriding IMAGE_TAG for Helm
+#   WORKLOAD_IMAGE   optional default sandbox workload image repository override
+#   WORKLOAD_IMAGE_TAG optional workload image tag (default: latest)
+#   WORKLOAD_IMAGE_DIGEST optional workload image digest, overriding WORKLOAD_IMAGE_TAG
 #   NAMESPACE        target k8s namespace (default: openshell)
 #   RELEASE          Helm release name (default: openshell)
 #   ROUTE_HOST       gateway Route hostname (default: openshell.<apps domain>)
@@ -163,29 +168,132 @@ if [[ -z "${IMAGE_TAG:-}" ]]; then
 	IMAGE_TAG="${IMAGE_TAG:0:128}"
 fi
 
+validate_image_digest() {
+	local name="$1" digest="$2"
+	[[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]] || fail "${name} must be a lowercase sha256 digest"
+}
+
+validate_image_repository() {
+	local name="$1" repository="$2"
+	[[ "${repository}" =~ ^[a-z0-9][a-z0-9.-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+$ ]] \
+		|| fail "${name} must be a lowercase registry/repository reference without Helm separators"
+}
+
+validate_image_tag() {
+	local name="$1" tag="$2"
+	[[ "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] \
+		|| fail "${name} must be a valid image tag without Helm separators"
+}
+
+validate_image_tag IMAGE_TAG "${IMAGE_TAG}"
+
+# An image override may include its immutable digest directly
+# (registry/repository@sha256:...). Helm requires the repository and digest
+# as separate values, so split it before constructing the chart arguments.
+# An explicit *_IMAGE_DIGEST takes precedence only when it agrees with the
+# inline digest; silently choosing one could deploy a different image than the
+# caller intended.
+normalize_image_override() {
+	local image_var="$1" digest_var="$2"
+	local image="${!image_var}" digest repository explicit_digest
+	if [[ "${image}" != *@* ]]; then
+		return
+	fi
+	repository="${image%@*}"
+	digest="${image##*@}"
+	[[ -n "${repository}" && "${repository}" != *"@"* ]] \
+		|| fail "${image_var} must contain one repository and digest"
+	validate_image_digest "${image_var} digest" "${digest}"
+	explicit_digest="${!digest_var:-}"
+	if [[ -n "${explicit_digest}" && "${explicit_digest}" != "${digest}" ]]; then
+		fail "${image_var} digest conflicts with ${digest_var}"
+	fi
+	printf -v "${image_var}" '%s' "${repository}"
+	printf -v "${digest_var}" '%s' "${digest}"
+}
+
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-${QNS}/odh-openshell-gateway}"
 SUPERVISOR_IMAGE="${SUPERVISOR_IMAGE:-${QNS}/odh-openshell-supervisor}"
 SANDBOX_IMAGE="${SANDBOX_IMAGE:-${QNS}/odh-openshell-sandbox}"
-for image in "${GATEWAY_IMAGE}" "${SUPERVISOR_IMAGE}" "${SANDBOX_IMAGE}"; do
-	[[ "${image}" == */* ]] || fail "image repository must include a registry: ${image}"
-done
+normalize_image_override GATEWAY_IMAGE GATEWAY_IMAGE_DIGEST
+normalize_image_override SUPERVISOR_IMAGE SUPERVISOR_IMAGE_DIGEST
+normalize_image_override SANDBOX_IMAGE SANDBOX_IMAGE_DIGEST
+validate_image_repository GATEWAY_IMAGE "${GATEWAY_IMAGE}"
+validate_image_repository SUPERVISOR_IMAGE "${SUPERVISOR_IMAGE}"
+validate_image_repository SANDBOX_IMAGE "${SANDBOX_IMAGE}"
 GATEWAY_REGISTRY="${GATEWAY_IMAGE%%/*}"
 GATEWAY_REPOSITORY="${GATEWAY_IMAGE#*/}"
 SUPERVISOR_REGISTRY="${SUPERVISOR_IMAGE%%/*}"
 SUPERVISOR_REPOSITORY="${SUPERVISOR_IMAGE#*/}"
 SANDBOX_REGISTRY="${SANDBOX_IMAGE%%/*}"
 SANDBOX_REPOSITORY="${SANDBOX_IMAGE#*/}"
-IMAGE_DIGEST_ARGS=()
 GATEWAY_IMAGE_REF="${GATEWAY_IMAGE}:${IMAGE_TAG}"
-if [[ -n "${GATEWAY_IMAGE_DIGEST:-}" ]]; then
-	[[ "${GATEWAY_IMAGE_DIGEST}" == sha256:* ]] || fail "GATEWAY_IMAGE_DIGEST must start with sha256:"
-	IMAGE_DIGEST_ARGS+=(--set-string "gateway.image.digest=${GATEWAY_IMAGE_DIGEST}")
-	GATEWAY_IMAGE_REF="${GATEWAY_IMAGE}@${GATEWAY_IMAGE_DIGEST}"
+SUPERVISOR_IMAGE_REF="${SUPERVISOR_IMAGE}:${IMAGE_TAG}"
+SANDBOX_IMAGE_REF="${SANDBOX_IMAGE}:${IMAGE_TAG}"
+WORKLOAD_IMAGE_REF=""
+if [[ -n "${WORKLOAD_IMAGE:-}" ]]; then
+	normalize_image_override WORKLOAD_IMAGE WORKLOAD_IMAGE_DIGEST
+	validate_image_repository WORKLOAD_IMAGE "${WORKLOAD_IMAGE}"
+	WORKLOAD_IMAGE_TAG="${WORKLOAD_IMAGE_TAG:-latest}"
+	validate_image_tag WORKLOAD_IMAGE_TAG "${WORKLOAD_IMAGE_TAG}"
+	WORKLOAD_IMAGE_REF="${WORKLOAD_IMAGE}:${WORKLOAD_IMAGE_TAG}"
+elif [[ -n "${WORKLOAD_IMAGE_DIGEST:-}" || -n "${WORKLOAD_IMAGE_TAG:-}" ]]; then
+	fail "WORKLOAD_IMAGE is required when setting WORKLOAD_IMAGE_TAG or WORKLOAD_IMAGE_DIGEST"
 fi
-
 if [[ -z "${ROUTE_HOST:-}" ]]; then
 	APPS="$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')"
 	ROUTE_HOST="openshell.${APPS}"
+fi
+
+HELM_ARGS=(
+	upgrade --install "${RELEASE}" "${CHART}"
+	--namespace "${NAMESPACE}" --create-namespace
+	--set-string "gateway.image.registry=${GATEWAY_REGISTRY}"
+	--set-string "gateway.image.repository=${GATEWAY_REPOSITORY}"
+	--set-string "gateway.image.tag=${IMAGE_TAG}"
+	--set-string "supervisor.image.registry=${SUPERVISOR_REGISTRY}"
+	--set-string "supervisor.image.repository=${SUPERVISOR_REPOSITORY}"
+	--set-string "supervisor.image.tag=${IMAGE_TAG}"
+	--set-string "sandboxRuntime.image.registry=${SANDBOX_REGISTRY}"
+	--set-string "sandboxRuntime.image.repository=${SANDBOX_REPOSITORY}"
+	--set-string "sandboxRuntime.image.tag=${IMAGE_TAG}"
+	--set "sandbox.image.pullPolicy=IfNotPresent"
+	--set "podSecurityContext.fsGroup=null"
+	--set "securityContext.runAsUser=null"
+	--set "openshiftRoute.enabled=true"
+	--set "openshiftRoute.host=${ROUTE_HOST}"
+	--set "pkiInitJob.serverDnsNames[0]=${ROUTE_HOST}"
+	# The Route is passthrough: the gateway, rather than the router, owns TLS
+	# and client identity. Keep unauthenticated user promotion disabled so a
+	# caller without an mTLS identity cannot access protected user RPCs.
+	--set-string "openshiftRoute.annotations.haproxy\\.router\\.openshift\\.io/timeout=300s"
+	--set-string "openshiftRoute.annotations.haproxy\\.router\\.openshift\\.io/timeout-tunnel=300s"
+)
+if [[ -n "${WORKLOAD_IMAGE_REF}" ]]; then
+	HELM_ARGS+=(
+		--set-string "sandbox.image.repository=${WORKLOAD_IMAGE}"
+		--set-string "sandbox.image.tag=${WORKLOAD_IMAGE_TAG}"
+	)
+fi
+if [[ -n "${GATEWAY_IMAGE_DIGEST:-}" ]]; then
+	validate_image_digest GATEWAY_IMAGE_DIGEST "${GATEWAY_IMAGE_DIGEST}"
+	HELM_ARGS+=(--set-string "gateway.image.digest=${GATEWAY_IMAGE_DIGEST}")
+	GATEWAY_IMAGE_REF="${GATEWAY_IMAGE}@${GATEWAY_IMAGE_DIGEST}"
+fi
+if [[ -n "${SUPERVISOR_IMAGE_DIGEST:-}" ]]; then
+	validate_image_digest SUPERVISOR_IMAGE_DIGEST "${SUPERVISOR_IMAGE_DIGEST}"
+	HELM_ARGS+=(--set-string "supervisor.image.digest=${SUPERVISOR_IMAGE_DIGEST}")
+	SUPERVISOR_IMAGE_REF="${SUPERVISOR_IMAGE}@${SUPERVISOR_IMAGE_DIGEST}"
+fi
+if [[ -n "${SANDBOX_IMAGE_DIGEST:-}" ]]; then
+	validate_image_digest SANDBOX_IMAGE_DIGEST "${SANDBOX_IMAGE_DIGEST}"
+	HELM_ARGS+=(--set-string "sandboxRuntime.image.digest=${SANDBOX_IMAGE_DIGEST}")
+	SANDBOX_IMAGE_REF="${SANDBOX_IMAGE}@${SANDBOX_IMAGE_DIGEST}"
+fi
+if [[ -n "${WORKLOAD_IMAGE_DIGEST:-}" ]]; then
+	validate_image_digest WORKLOAD_IMAGE_DIGEST "${WORKLOAD_IMAGE_DIGEST}"
+	HELM_ARGS+=(--set-string "sandbox.image.digest=${WORKLOAD_IMAGE_DIGEST}")
+	WORKLOAD_IMAGE_REF="${WORKLOAD_IMAGE}@${WORKLOAD_IMAGE_DIGEST}"
 fi
 
 echo
@@ -200,8 +308,11 @@ echo "  Gateway name: ${GATEWAY_NAME}"
 echo "  Route host:   ${ROUTE_HOST}"
 echo "  Images:"
 echo "    - ${GATEWAY_IMAGE_REF}"
-echo "    - ${SUPERVISOR_IMAGE}:${IMAGE_TAG}"
-echo "    - ${SANDBOX_IMAGE}:${IMAGE_TAG}"
+echo "    - ${SUPERVISOR_IMAGE_REF}"
+echo "    - ${SANDBOX_IMAGE_REF}"
+if [[ -n "${WORKLOAD_IMAGE_REF}" ]]; then
+	echo "    - ${WORKLOAD_IMAGE_REF} (default sandbox workload)"
+fi
 echo "  Actions:"
 echo "    1. Replace namespace '${NAMESPACE}' if it exists"
 echo "    2. Create namespace"
@@ -245,25 +356,7 @@ oc create namespace "${NAMESPACE}" --dry-run=client -o yaml |
 	oc create -f -
 
 echo ">> Deploying OpenShell via Helm"
-helm upgrade --install "${RELEASE}" "${CHART}" \
-	--namespace "${NAMESPACE}" --create-namespace \
-	--set-string "gateway.image.registry=${GATEWAY_REGISTRY}" \
-	--set-string "gateway.image.repository=${GATEWAY_REPOSITORY}" \
-	--set-string "gateway.image.tag=${IMAGE_TAG}" \
-	--set-string "supervisor.image.registry=${SUPERVISOR_REGISTRY}" \
-	--set-string "supervisor.image.repository=${SUPERVISOR_REPOSITORY}" \
-	--set-string "supervisor.image.tag=${IMAGE_TAG}" \
-	--set-string "sandboxRuntime.image.registry=${SANDBOX_REGISTRY}" \
-	--set-string "sandboxRuntime.image.repository=${SANDBOX_REPOSITORY}" \
-	--set-string "sandboxRuntime.image.tag=${IMAGE_TAG}" \
-	--set "sandbox.image.pullPolicy=IfNotPresent" \
-	--set "podSecurityContext.fsGroup=null" \
-	--set "securityContext.runAsUser=null" \
-	--set "openshiftRoute.enabled=true" \
-	--set "openshiftRoute.host=${ROUTE_HOST}" \
-	--set "pkiInitJob.serverDnsNames[0]=${ROUTE_HOST}" \
-	--set "server.auth.allowUnauthenticatedUsers=true" \
-	"${IMAGE_DIGEST_ARGS[@]}"
+helm "${HELM_ARGS[@]}"
 
 echo ">> Waiting for gateway rollout"
 if ! oc -n "${NAMESPACE}" rollout status "statefulset/${HELM_FULLNAME}" --timeout=300s; then

@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Upstream e2e/python tests that the ODH `gateway-e2e` mode reports as skipped
+# on OpenShift. Read by odh/scripts/pytest_odh_gates.py; see
+# e2e/rust/tests/odh/README.md.
+#
+# List exact node IDs without parametrization. A listed test that no longer
+# exists fails collection; remove its entry when upstream changes it. OIDC
+# tests keep their upstream OPENSHELL_E2E_OIDC gate and are owned by the ODH
+# OIDC lane, so they are not listed here.
+
+[[gate]]
+category = "docker-host"
+reason = "the fake inference endpoint listens on the test host and is reached through host.openshell.internal, which OpenShift sandbox pods cannot resolve"
+tests = [
+  "e2e/python/test_sandbox_providers.py::test_imported_openai_profile_allows_native_endpoint_with_attached_provider",
+  "e2e/python/test_sandbox_providers.py::test_imported_anthropic_profile_allows_native_endpoint_with_attached_provider",
+]
+
+[[gate]]
+category = "egress"
+reason = "requires sandbox egress to PyPI or GitHub, which downstream CI clusters do not guarantee"
+tests = [
+  "e2e/python/test_sandbox_venv.py::test_pip_install_in_sandbox",
+  "e2e/python/test_sandbox_venv.py::test_uv_pip_install_in_sandbox",
+  "e2e/python/test_sandbox_venv.py::test_uv_run_with_ephemeral_dependency",
+  "e2e/python/test_sandbox_providers.py::test_github_provider_allows_https_git_clone",
+]
+
+[[gate]]
+category = "workload-image"
+reason = "requires google-auth and requests inside the sandbox, which only the Docker e2e workload image (e2e/python/Dockerfile.workload) provides"
+tests = [
+  "e2e/python/test_sandbox_providers.py::test_google_metadata_sdk_discovery",
+]

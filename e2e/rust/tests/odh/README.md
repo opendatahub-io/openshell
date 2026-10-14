@@ -168,7 +168,7 @@ Example, running the Smoke tier against a real cluster:
 umask 077
 oc --kubeconfig ~/.kube/config config view --minify --flatten > kubeconfig
 chmod 600 kubeconfig
-ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/" \
+ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/,ghcr.io/astral-sh/" \
   mise run e2e:odh:smoke
 ```
 
@@ -219,14 +219,13 @@ has no scenarios, so skipping image provenance makes it fail.
 ## Image provenance verification
 
 `smoke::image_provenance::test_sandbox_gateway_supervisor_images` creates a
-sandbox, then verifies that its image, the gateway's image, and the
-supervisor image (read from the rendered gateway config, since the
-supervisor never runs as its own pod) all came from an authorized
-registry, and that no container — including ephemeral containers — has
-regressed away from `imagePullPolicy: IfNotPresent`.
+sandbox, then verifies the gateway pod, sandbox runtime bootstrap init
+container, and supervisor companion pod all came from an authorized registry,
+and that no container — including ephemeral containers — has regressed away
+from `imagePullPolicy: IfNotPresent`.
 
 ```bash
-ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/" \
+ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/,ghcr.io/astral-sh/" \
   cargo test --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh \
   -- smoke::image_provenance::
 ```
@@ -242,6 +241,8 @@ ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/" \
   - `nvcr.io/nvidia/base/` — the Helm chart's current default workload
     image (`server.sandboxImage`). Include the registry prefix for any
     other workload image selected by the deployment.
+  - `ghcr.io/astral-sh/` — the ODH E2E harness's default tool-capable
+    workload fixture (`uv`) when a test does not select another workload.
 
   A prefix without a trailing `/` is rejected outright, since it could
   otherwise match a lookalike host (e.g. `registry.redhat.io` would also
@@ -249,6 +250,21 @@ ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/" \
 - `NAMESPACE`/`RELEASE` env vars default to `openshell`/`openshell`.
 - The check is a registry-prefix allowlist, not an exact image/digest match.
   It checks each observed image against the configured allowed prefixes.
+  The rendered sandbox runtime image is checked too when the deployment
+  overrides it.
+- When the deployment pins an image by digest, through `GATEWAY_IMAGE_DIGEST`,
+  `SUPERVISOR_IMAGE_DIGEST`, `SANDBOX_IMAGE_DIGEST`, or a `repo@sha256:...`
+  reference in the equivalent image override, the test also requires the
+  corresponding running container to retain that exact immutable reference
+  and to report a resolved `imageID`: the gateway container, the supervisor
+  companion container, and the sandbox bootstrap init container. A resolved
+  ID can be the platform-specific manifest selected from a multi-architecture
+  index, so it need not be identical to the requested index digest. A rendered
+  value or Pod spec without a resolved ID is not sufficient. This catches
+  nodes running stale mutable-tag caches.
+  Images without a digest keep the allowlist-only behavior.
+- Every verified reference, with the resolved `imageID` reported by each pod,
+  is written to `results/e2e-odh-runtime-images.json` as run evidence.
 - The `imagePullPolicy: IfNotPresent` check applies to every container,
   including the sandbox pod's. The Quay deployment script sets
   `sandbox.image.pullPolicy=IfNotPresent`; other deployments must set it
@@ -315,7 +331,8 @@ and sandbox images, plus `ALLOWED_IMAGE_REGISTRY_PREFIXES` for the
 provenance test. By default, the deployment uses the
 `quay.io/opendatahub/odh-openshell-*` midstream repositories.
 Override `QUAY_NAMESPACE`, `GATEWAY_IMAGE`, `SUPERVISOR_IMAGE`, or
-`SANDBOX_IMAGE` when testing another repository. `NAMESPACE`, `RELEASE`,
+`SANDBOX_IMAGE` when testing another repository. Set the corresponding
+`*_IMAGE_DIGEST` variable to pin it immutably. `NAMESPACE`, `RELEASE`,
 `ROUTE_HOST`, and `GATEWAY_NAME` control the deployment. The image writes
 `e2e-odh-<tier>.xml` and
 `e2e-odh-<tier>.html` to `results/`. Set
@@ -324,11 +341,96 @@ is produced by one nextest invocation per tier.
 
 Konflux automation creates the Tekton YAML files for the e2e image.
 
+## Python test modes
+
+`odh/scripts/run-odh-python-tests.sh` is the focused Python test runner. It
+takes one mode and writes its own JUnit report with an HTML companion to
+`results/` (or `OPENSHELL_E2E_RESULTS_DIR`). The runner itself never deploys
+or tears down a gateway. The image's standard
+`odh/scripts/e2e-odh-entrypoint.sh` entrypoint dispatches to it, so
+`gateway-e2e` uses the same deploy, provider-profile import, and teardown
+lifecycle as the Rust tiers.
+
+| Mode | What runs | Cluster | Report |
+|---|---|---|---|
+| `sdk` | Python SDK unit tests in `python/openshell/`, excluding the `gpu` marker | Not required | `e2e-odh-python-sdk.xml` |
+| `gateway-e2e` | `e2e/python` with `pytest-xdist` (`E2E_PARALLEL`, default 5) | Deployed and selected gateway | `e2e-odh-python-gateway-e2e.xml` |
+
+`gateway-e2e` resolves the gateway the same way the CLI does: from
+`OPENSHELL_GATEWAY`, or else the active gateway. It fails before running
+pytest when neither is set. Both modes propagate test failures, fail when no
+tests are selected or no JUnit report is written, and forward SIGINT and
+SIGTERM to pytest. The `sdk` mode leaves out tests that check packaging and
+local gateway fixtures rather than the SDK, and that read repository files the
+image does not carry: `python/release_tooling_test.py`,
+`python/wheel_verifier_test.py`, and, under `python/openshell/`,
+`release_formula_test.py`, `rpm_gateway_config_migration_test.py`, and
+`gateway_config_fixture_test.py`. The image carries the `sdk/conformance/`
+fixtures that the SDK tests read.
+
+Run the modes locally with:
+
+```shell
+mise run e2e:odh:python:sdk
+mise run e2e:odh:python:gateway
+```
+
+The image carries a prefetched Python environment and generated protobuf
+bindings, so both modes run without network access to package indexes. Use the
+image's normal entrypoint; do not override it with the internal Python runner:
+
+```shell
+podman run --rm \
+  -v /path/to/reports:/home/odh/openshell-e2e-odh/results:Z,U \
+  quay.io/opendatahub/odh-openshell-e2e:odh-stable sdk
+```
+
+For `gateway-e2e`, pass the same `KUBECONFIG`, image references, and deployment
+variables as the Rust `odh` mode. The entrypoint deploys the gateway, imports
+the example provider profiles, runs the Python suite, and tears the deployment
+down. Set `OPENSHELL_E2E_DEPLOY_GATEWAY=0` only when a compatible gateway is
+already deployed and selected locally.
+
+The default ODH sandbox workload is intentionally unchanged. To test a
+Python-capable workload without changing gateway, supervisor, or sandbox runtime
+images, set `WORKLOAD_IMAGE` and pin it with `WORKLOAD_IMAGE_DIGEST`; the deploy
+script maps those values only to Helm's `sandbox.image`. For example, an OCP
+cluster authorized to pull the image can use
+`registry.redhat.io/ubi9/python-312`. This supplies Python itself, but not the
+upstream workload's extra libraries or `/sandbox/.venv`; retain explicit gates
+for tests that require those capabilities.
+
+### Environment gates
+
+Some upstream `e2e/python` tests assume the local Docker gateway. The
+`gateway-e2e` mode loads `odh/scripts/pytest_odh_gates.py`, which reports the
+tests listed in `odh/python-gates.toml` as skipped with their category and
+reason, so unsupported coverage never appears as a pass. Upstream test files
+are not edited.
+
+| Category | Tests | Reason |
+|---|---|---|
+| `docker-host` | `test_sandbox_providers.py`: the OpenAI and Anthropic native-endpoint tests | The fake endpoint listens on the test host behind `host.openshell.internal` |
+| `egress` | `test_sandbox_venv.py`: pip, `uv pip`, and `uv run` installs; `test_sandbox_providers.py`: GitHub clone | Downstream CI clusters do not guarantee egress to PyPI or GitHub |
+| `workload-image` | `test_sandbox_providers.py::test_google_metadata_sdk_discovery` | Requires packages that only `e2e/python/Dockerfile.workload` provides |
+
+The OIDC tests under `e2e/python/oidc/` keep their upstream
+`OPENSHELL_E2E_OIDC` gate and belong to the ODH OIDC lane. GPU tests are
+deselected with `-m "not gpu"`, as in upstream; no `e2e/python` test currently
+carries that marker.
+
+Gates list exact node IDs without parametrization. Before running tests, the
+runner validates the list in a serial collection-only pass, so a gated test
+that no longer exists fails the mode with exit code 2; remove its entry when
+upstream renames or deletes it. Remove a gate once its test can run on
+OpenShift.
+
 ## Rebase guidance
 
 - **Fork-only paths:** this directory (`e2e/rust/tests/odh/`),
   `tasks/test-odh.toml`, the new e2e image files under
-  `deploy/konflux/e2e-odh/`, `deploy/docker/`, and `odh/scripts/`.
+  `deploy/konflux/e2e-odh/`, `deploy/docker/`, and `odh/`. The e2e image
+  Renovate managers live in the fork-only `renovate.json`.
 - **Shared files:** the image adds to `.config/nextest.toml`,
   `deploy/konflux/build-local.sh`, and `.dockerignore`. Review these edits
   whenever upstream changes those files. The fork also carries the
