@@ -35,8 +35,9 @@ Image repository, tag, and digest overrides can vary between local and image
 runs; phase selection and gateway configuration come from the shared plan.
 
 The image also carries a fully prefetched Python 3.11 test environment and
-generated protobuf bindings, so later named Python test modes can execute
-without runtime dependency downloads.
+generated protobuf bindings. The `python` entrypoint mode uses that environment
+to run the supported upstream Python gateway E2E on OpenShift without runtime
+dependency downloads.
 
 Konflux onboarding must use the `linux-m2xlarge/*` builders and retain the
 three Hermeto prefetch inputs: Cargo at `.` and `e2e/rust`, plus the locked

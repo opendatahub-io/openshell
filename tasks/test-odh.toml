@@ -19,6 +19,11 @@ description = "Run ODH scenarios and managed-workspace tests in their gateway mo
 depends = ["build:openshell-cli"]
 run = "odh/scripts/e2e-odh-entrypoint.sh odh"
 
+["e2e:odh:python"]
+description = "Run supported upstream Python gateway E2E against an OpenShift deployment"
+depends = ["build:openshell-cli"]
+run = "odh/scripts/e2e-odh-entrypoint.sh python"
+
 ["e2e:odh:full"]
 description = "Run all feature-enabled e2e binaries across shared and managed gateway modes"
 depends = ["build:openshell-cli"]
