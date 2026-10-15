@@ -99,6 +99,12 @@ nextest_args=(
 	--no-tests fail
 	-E "${filter}"
 )
+# The failover test is ignored by default because it deletes a gateway pod.
+# Run it only after the caller has explicitly opted into destructive HA
+# coverage; `all` preserves the rest of the selected tier.
+if [[ "${OPENSHELL_ODH_HA_FAILOVER:-0}" == "1" ]]; then
+	nextest_args+=(--run-ignored all)
+fi
 if [[ -n "${OPENSHELL_E2E_NEXTEST_ARCHIVE:-}" ]]; then
 	nextest_args+=(
 		--archive-file "${OPENSHELL_E2E_NEXTEST_ARCHIVE}"

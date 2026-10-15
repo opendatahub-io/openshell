@@ -8,7 +8,66 @@
 //! command construction here keeps every test targeting the same cluster and
 //! reporting failures the same way.
 
+use std::process::Stdio;
+use std::time::Duration;
+
 use serde_json::Value;
+use tokio::io::AsyncWriteExt as _;
+
+/// Maximum duration for one ODH `oc` invocation.
+pub const OC_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Output from an `oc` invocation.
+pub struct OcOutput {
+    pub success: bool,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+impl OcOutput {
+    pub fn from_output(output: &std::process::Output) -> Self {
+        Self {
+            success: output.status.success(),
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    /// A safe, allowlisted description for assertion failures.
+    ///
+    /// Command output may contain Kubernetes objects, credentials, or response
+    /// bodies. Keep it available only for parsing and never include it in test
+    /// failure output.
+    pub fn status_summary(&self) -> String {
+        match self.exit_code {
+            Some(code) => format!("exit status: {code}"),
+            None => "terminated by signal".to_string(),
+        }
+    }
+
+    /// Returns whether stdout contains an exact, allowlisted result line.
+    ///
+    /// This permits callers to consume a deliberately emitted protocol marker
+    /// without exposing arbitrary command output in diagnostics.
+    pub fn has_stdout_line(&self, expected: &str) -> bool {
+        self.stdout.lines().any(|line| line.trim() == expected)
+    }
+
+    /// Returns whether `oc` identified this request as an API `NotFound`.
+    ///
+    /// `oc get --raw` writes Kubernetes API errors to stderr. Keep that stream
+    /// private so it cannot leak into assertion output, but retain it to
+    /// distinguish the expected absence of an API endpoint from real failures.
+    pub fn is_not_found(&self) -> bool {
+        !self.success && self.stderr.contains("Error from server (NotFound)")
+    }
+
+    pub fn json(&self) -> Result<Value, serde_json::Error> {
+        serde_json::from_str(&self.stdout)
+    }
+}
 
 /// Builds an `oc` command targeting the active e2e cluster.
 ///
@@ -27,23 +86,183 @@ pub fn oc_command() -> tokio::process::Command {
     cmd
 }
 
+/// Runs `oc <args>`, optionally writing `input` to standard input.
+///
+/// Captures command output without emitting it. Retains stdout only for
+/// internal parsing; never include command output in test failure messages,
+/// since it may contain sensitive cluster data.
+pub async fn oc(args: &[&str], input: Option<&str>) -> OcOutput {
+    oc_with_timeout(args, input, OC_COMMAND_TIMEOUT).await
+}
+
+/// Runs `oc <args>` with an explicit outer command timeout.
+///
+/// Use this for `oc` subcommands which have their own longer timeout, so the
+/// harness does not abort them before their requested deadline. Most callers
+/// should use [`oc`], which retains the standard short timeout.
+pub async fn oc_with_timeout(
+    args: &[&str],
+    input: Option<&str>,
+    command_timeout: Duration,
+) -> OcOutput {
+    let mut cmd = oc_command();
+    cmd.args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    let output = tokio::time::timeout(command_timeout, async {
+        let mut child = cmd.spawn().expect(
+            "failed to run `oc` — required for ODH cluster-state checks; ensure it is in PATH \
+             and KUBECONFIG targets the cluster",
+        );
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .expect("piped stdin")
+                .write_all(input.as_bytes())
+                .await
+                .expect("write manifest to oc");
+        }
+        child.wait_with_output().await.expect("wait for oc")
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "oc {args:?} timed out after {} seconds",
+            command_timeout.as_secs()
+        )
+    });
+    OcOutput::from_output(&output)
+}
+
+/// Returns whether the active cluster exposes the `OpenShift` Route API.
+///
+/// ODH-only tests use this to skip cleanly on non-OpenShift clusters while
+/// preserving the standard tier entry points.
+pub async fn is_openshift() -> Result<bool, String> {
+    let output = oc(&["get", "--raw", "/apis/route.openshift.io/v1"], None).await;
+    if output.success {
+        return Ok(true);
+    }
+    if output.is_not_found() {
+        return Ok(false);
+    }
+    Err(format!(
+        "unable to determine whether the cluster is OpenShift ({})",
+        output.status_summary()
+    ))
+}
+
 /// Runs `oc <args>` and parses stdout as JSON.
 ///
 /// Panics with a descriptive message if `oc` cannot be launched, exits
 /// non-zero, or does not return valid JSON — use it for `-o json` queries
 /// whose failure should fail the test.
 pub async fn oc_json(args: &[&str]) -> Value {
-    let output = oc_command().args(args).output().await.expect(
-        "failed to run `oc` — required for ODH cluster-state checks; ensure it is in PATH \
-         and KUBECONFIG targets the cluster",
-    );
+    let output = oc(args, None).await;
     assert!(
-        output.status.success(),
-        "oc {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        output.success,
+        "oc JSON query failed ({})",
+        output.status_summary()
     );
-    serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|e| panic!("oc {args:?} did not return valid JSON: {e}"))
+    output
+        .json()
+        .unwrap_or_else(|_| panic!("oc JSON query returned invalid JSON"))
+}
+
+#[cfg(test)]
+mod oc_output_tests {
+    use super::OcOutput;
+
+    #[test]
+    fn status_summary_does_not_include_command_output() {
+        let output = OcOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: "token=secret".to_string(),
+            stderr: "Error from server (Forbidden): token=secret".to_string(),
+        };
+
+        assert_eq!(output.status_summary(), "exit status: 1");
+    }
+
+    #[test]
+    fn has_stdout_line_requires_an_exact_line() {
+        let output = OcOutput {
+            success: true,
+            exit_code: Some(0),
+            stdout: "prefix\nRESULT\nRESULT-extra".to_string(),
+            stderr: String::new(),
+        };
+
+        assert!(output.has_stdout_line("RESULT"));
+        assert!(!output.has_stdout_line("RESULT-extra-extra"));
+    }
+
+    #[test]
+    fn recognizes_only_the_oc_not_found_response() {
+        let not_found = OcOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr:
+                "Error from server (NotFound): the server could not find the requested resource"
+                    .to_string(),
+        };
+        let forbidden = OcOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: "Error from server (Forbidden): User cannot get path".to_string(),
+        };
+
+        assert!(not_found.is_not_found());
+        assert!(!forbidden.is_not_found());
+    }
+}
+
+const DEFAULT_DEPLOYMENT_NAME: &str = "openshell";
+
+/// Resolves the namespace containing gateway resources for the ODH deployment.
+///
+/// The names match the standard ODH and Kubernetes e2e configuration
+/// variables.
+pub fn gateway_namespace() -> String {
+    std::env::var("NAMESPACE")
+        .or_else(|_| std::env::var("OPENSHELL_E2E_KUBE_NAMESPACE"))
+        .unwrap_or_else(|_| DEFAULT_DEPLOYMENT_NAME.to_string())
+}
+
+/// Resolves the namespace containing Sandbox custom resources and workload Pods.
+///
+/// Sandbox resources normally share the gateway namespace. Set
+/// `SANDBOX_NAMESPACE` when the compute driver uses a separate namespace.
+pub fn sandbox_namespace() -> String {
+    std::env::var("SANDBOX_NAMESPACE").unwrap_or_else(|_| gateway_namespace())
+}
+
+/// Resolves the Helm release name used by the ODH deployment under test.
+pub fn release() -> String {
+    std::env::var("RELEASE")
+        .or_else(|_| std::env::var("OPENSHELL_E2E_KUBE_RELEASE"))
+        .unwrap_or_else(|_| DEFAULT_DEPLOYMENT_NAME.to_string())
+}
+
+/// Returns whether a Kubernetes Pod JSON object is Running and Ready.
+pub fn pod_is_ready(pod: &Value) -> bool {
+    pod["status"]["phase"].as_str() == Some("Running")
+        && pod["status"]["conditions"]
+            .as_array()
+            .is_some_and(|conditions| {
+                conditions.iter().any(|condition| {
+                    condition["type"].as_str() == Some("Ready")
+                        && condition["status"].as_str() == Some("True")
+                })
+            })
 }
 
 /// Resolve the supervisor Pod paired with a named Sandbox resource.
@@ -203,8 +422,31 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        pod_node_and_uid, pod_uid_cgroup_form, sandbox_id_from_json, supervisor_pod_from_json,
+        pod_is_ready, pod_node_and_uid, pod_uid_cgroup_form, sandbox_id_from_json,
+        supervisor_pod_from_json,
     };
+
+    #[test]
+    fn recognizes_only_running_ready_pods() {
+        assert!(pod_is_ready(&json!({
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "True"}]
+            }
+        })));
+        assert!(!pod_is_ready(&json!({
+            "status": {
+                "phase": "Pending",
+                "conditions": [{"type": "Ready", "status": "True"}]
+            }
+        })));
+        assert!(!pod_is_ready(&json!({
+            "status": {
+                "phase": "Running",
+                "conditions": [{"type": "Ready", "status": "False"}]
+            }
+        })));
+    }
 
     #[test]
     fn resolves_sandbox_id_from_named_sandbox() {
