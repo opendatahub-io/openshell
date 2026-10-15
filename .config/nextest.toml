@@ -39,6 +39,12 @@ final-status-level = "fail"
 failure-output = "immediate-final"
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+[profile.e2e-odh-oidc]
+fail-fast = false
+status-level = "pass"
+final-status-level = "fail"
+failure-output = "immediate-final"
+
 # Relative to the profile store dir (`e2e/rust/target/nextest/e2e-odh/`).
 [profile.e2e-odh.junit]
 path = "../../../../../results/e2e-odh.xml"
