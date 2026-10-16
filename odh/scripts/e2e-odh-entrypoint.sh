@@ -15,12 +15,16 @@ MERGE_SCRIPT="${OPENSHELL_E2E_REPORT_MERGER:-${SCRIPT_DIR}/merge-e2e-odh-reports
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TIER="${1:-}"
 if [[ -z "${TIER}" || $# -ne 1 ]]; then
-	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full>" >&2
+	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full|python>" >&2
 	exit 2
 fi
 
-plan_json="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" "${TIER}" "${TIERS_FILE}")"
-phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"] for p in json.load(sys.stdin)["phases"]))')"
+if [[ "${TIER}" == python ]]; then
+	phase_lines="python|shared"
+else
+	plan_json="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" "${TIER}" "${TIERS_FILE}")"
+	phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"] for p in json.load(sys.stdin)["phases"]))')"
+fi
 phase_count=0
 while IFS= read -r _; do ((phase_count+=1)); done <<< "${phase_lines}"
 deploy_enabled="${OPENSHELL_E2E_DEPLOY_GATEWAY:-1}"
@@ -153,6 +157,51 @@ run_child() {
 	child_pid=""
 	return "${result}"
 }
+run_python_e2e() {
+	local report="$1" python_test_bin gate_output status=0
+	if [[ -n "${OPENSHELL_E2E_PYTHON:-}" ]]; then
+		# An explicit interpreter override is relative to the caller.
+		python_test_bin="${OPENSHELL_E2E_PYTHON}"
+		if [[ "${python_test_bin}" != /* ]]; then
+			python_test_bin="$(cd "$(dirname "${python_test_bin}")" && pwd -P)/$(basename "${python_test_bin}")"
+		fi
+	elif [[ -n "${UV_PROJECT_ENVIRONMENT:-}" ]]; then
+		# uv resolves a relative project environment from the workspace root.
+		python_test_bin="${UV_PROJECT_ENVIRONMENT}/bin/python"
+		if [[ "${python_test_bin}" != /* ]]; then
+			python_test_bin="${ROOT}/${python_test_bin}"
+		fi
+	else
+		python_test_bin="${ROOT}/.venv/bin/python"
+	fi
+	if [[ ! -x "${python_test_bin}" ]]; then
+		echo "ERROR: Python E2E interpreter not found at ${python_test_bin}" >&2
+		return 2
+	fi
+	export PYTHONPATH="${ROOT}/python:${SCRIPT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+	export OPENSHELL_ODH_PYTHON_GATES="${ROOT}/odh/python-gates.toml"
+	if ! gate_output="$(cd "${ROOT}" && OPENSHELL_ODH_PYTHON_GATES_STRICT=1 \
+		OPENSHELL_E2E_OIDC=0 \
+		"${python_test_bin}" -m pytest -p no:cacheprovider -p no:xdist -p pytest_odh_gates \
+		-o "python_files=test_*.py *_test.py" --collect-only -q e2e/python 2>&1)"; then
+		echo "ERROR: Python E2E gate preflight failed" >&2
+		printf '%s\n' "${gate_output}" >&2
+		return 2
+	fi
+	echo "==> Running ODH Python gateway E2E"
+	(cd "${ROOT}" && OPENSHELL_E2E_OIDC=0 \
+		"${python_test_bin}" -m pytest -p no:cacheprovider -p pytest_odh_gates \
+		-o "python_files=test_*.py *_test.py" -m "not gpu" -n "${E2E_PARALLEL:-5}" \
+		e2e/python --junitxml "${report}") || status=$?
+	if [[ "${status}" == 5 ]]; then
+		echo "ERROR: Python gateway E2E selected no tests" >&2
+	fi
+	if [[ ! -f "${report}" ]]; then
+		echo "ERROR: Python gateway E2E did not write a JUnit report" >&2
+		[[ "${status}" != 0 ]] || status=1
+	fi
+	return "${status}"
+}
 trap cleanup EXIT
 trap 'stop_child TERM 130' INT
 trap 'stop_child TERM 143' TERM
@@ -184,7 +233,11 @@ for phase_line in ${phase_lines}; do
 			fi
 		fi
 		if [[ "${phase_test_status}" == 0 ]]; then
-			run_child "${TEST_SCRIPT}" "${TIER}" "${phase}" "${phase_report}" || phase_test_status=$?
+			if [[ "${TIER}" == python ]]; then
+				run_child run_python_e2e "${phase_report}" || phase_test_status=$?
+			else
+				run_child "${TEST_SCRIPT}" "${TIER}" "${phase}" "${phase_report}" || phase_test_status=$?
+			fi
 		fi
 	else
 		echo "ERROR: deployment/preflight failed for ${TIER}/${phase} (${phase_deploy_status})" >&2
