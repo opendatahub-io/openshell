@@ -1,0 +1,40 @@
+# Midstream cluster-free deploy contract checks. Runs the digest/Helm
+# regression suite for the Quay deploy script without a cluster, so PRs
+# touching the deploy path get automated validation. Kept separate from
+# branch-checks.yml so ODH does not depend on NVIDIA self-hosted runners.
+
+name: ODH Deploy Contract
+
+on:
+  pull_request:
+    paths:
+      - odh/scripts/**
+      - e2e/support/gateway-common.sh
+      - .github/workflows/odh-deploy-contract.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: odh-deploy-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-contract:
+    name: Cluster-free deploy script contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The deploy plan resolver imports tomllib (Python 3.11+); pin the
+      # interpreter so the check does not depend on the runner default.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Run the deploy digest contract suite
+        run: bash odh/scripts/tests/test-openshell-deploy-from-quay.sh
