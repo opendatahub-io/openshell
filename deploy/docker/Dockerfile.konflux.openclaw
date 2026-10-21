@@ -1,0 +1,119 @@
+# syntax=docker/dockerfile:1.4
+
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# OpenClaw reference harness image for OpenShell sandboxes (hermetic build).
+#
+# This is an unsupported reference composition, not RHOAI product content. It
+# runs the OpenClaw agent (https://github.com/openclaw/openclaw) inside an
+# OpenShell sandbox. See deploy/konflux/openclaw/README.md for scope and
+# verification status.
+#
+# Requires prefetched dependencies via Hermeto (npm, rpm). The npm inputs
+# (package.json, package-lock.json) are a byte-identical copy of Red Hat's
+# internal AIPCC agentic OpenClaw image's npm closure, so both images share
+# one npm lineage; this image runs it on UBI Node 24 instead of Node 26. The
+# only RPM is crypto-policies-scripts, which keeps this repo's DEFAULT:PQ
+# convention. See deploy/konflux/openclaw/ for prefetch configs.
+#
+# Local build:  ./deploy/konflux/build-local.sh openclaw
+#
+# No RUN heredocs and no RUN --mount: build-local.sh awk-injects
+# `. /cachi2/cachi2.env &&` after every `RUN ` to source the hermetic
+# environment, so every RUN must start at column 0 with `RUN ` and use
+# `&& \` continuations only.
+
+# Both stages use the same base and OpenClaw version; bump them only here.
+ARG NODEJS_IMAGE=registry.access.redhat.com/ubi9/nodejs-24-minimal:9.8-1791925262@sha256:cfca5c8d4d7babc8b74f408db216c2fd4dec872f319c1579e001dcceb51d3058
+ARG OPENCLAW_VERSION=2026.9.5
+
+# ---------------------------------------------------------------------------
+# Build stage: install OpenClaw from the prefetched npm closure
+# ---------------------------------------------------------------------------
+FROM ${NODEJS_IMAGE} AS builder
+
+ARG OPENCLAW_VERSION
+ARG GLIBC_MAX=2.34
+
+USER 0
+
+COPY deploy/konflux/openclaw/package.json deploy/konflux/openclaw/package-lock.json /usr/local/lib/openclaw/
+COPY deploy/konflux/openclaw/check-glibc.sh /usr/local/libexec/check-glibc.sh
+
+# Install strictly from the prefetched closure (--offline), refuse any
+# lifecycle script not explicitly allow-listed in package.json
+# (--strict-allow-scripts), confirm the pinned OpenClaw version landed, gate
+# on the glibc ceiling of any native addon, then make the tree world-readable
+# so it works from any container UID (the final stage runs as 1000:1000).
+RUN cd /usr/local/lib/openclaw && \
+    npm ci --offline --strict-allow-scripts --no-audit --no-fund --cache /tmp/npm-cache && \
+    rm -rf /tmp/npm-cache && \
+    test "$(node -p 'require("./node_modules/openclaw/package.json").version')" = "${OPENCLAW_VERSION}" && \
+    bash /usr/local/libexec/check-glibc.sh /usr/local/lib/openclaw/node_modules "${GLIBC_MAX}" && \
+    chmod -R a+rX /usr/local/lib/openclaw && \
+    test -z "$(find /usr/local/lib/openclaw ! -perm -o=r -print -quit)"
+
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+FROM ${NODEJS_IMAGE}
+
+ARG OPENCLAW_VERSION
+
+USER 0
+
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+        crypto-policies-scripts \
+    && microdnf clean all
+
+# Enable post-quantum cryptography support in the RHEL system policy. Node's
+# shared OpenSSL 3.5.8 reads this policy, so a TLS 1.3 handshake negotiates
+# X25519MLKEM768 instead of X25519.
+RUN update-crypto-policies --set DEFAULT:PQ
+
+RUN groupadd -g 1000 sandbox && useradd -u 1000 -g 1000 -M -d /sandbox -s /bin/bash sandbox
+
+COPY --from=builder /usr/local/lib/openclaw /usr/local/lib/openclaw
+RUN ln -s /usr/local/lib/openclaw/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw
+
+COPY --chmod=0755 deploy/konflux/openclaw/openclaw-start.sh /usr/local/bin/openclaw-start
+COPY --chmod=0644 deploy/konflux/openclaw/profile.sh /etc/profile.d/openclaw.sh
+
+# SQLite picks its temp directory by probing /var/tmp before /tmp with
+# access(), which Landlock does not mediate, so it chooses /var/tmp and then
+# fails to open files there. TMPDIR points it, and Node, at the writable /tmp.
+ENV HOME=/sandbox \
+    TMPDIR=/tmp \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    NPM_CONFIG_PREFIX=/sandbox/.npm-global \
+    OPENCLAW_NO_AUTO_UPDATE=1 \
+    DO_NOT_TRACK=1 \
+    OPENCLAW_DISABLE_BONJOUR=1 \
+    OPENCLAW_OFFLINE=1
+
+LABEL com.redhat.component="odh-openshell-sandbox-openclaw-container" \
+      name="opendatahub/odh-openshell-sandbox-openclaw" \
+      version="${OPENCLAW_VERSION}" \
+      summary="OpenClaw agent harness reference image for OpenShell sandboxes" \
+      description="Unsupported reference composition that runs the OpenClaw agent harness inside an OpenShell sandbox; not RHOAI product content" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.k8s.display-name="odh-openshell-sandbox-openclaw" \
+      io.k8s.description="odh-openshell-sandbox-openclaw" \
+      io.openshift.expose-services="" \
+      io.openshift.tags="openshell,sandbox,openclaw,agent" \
+      help="See the README for usage: https://github.com/opendatahub-io/openshell/blob/main/deploy/konflux/openclaw/README.md" \
+      url="https://github.com/opendatahub-io/openshell/blob/main/deploy/konflux/openclaw/README.md" \
+      io.openshell.sandbox.harness="openclaw" \
+      io.openshell.harness.version="${OPENCLAW_VERSION}" \
+      io.openshift.s2i.scripts-url="" \
+      io.s2i.scripts-url="" \
+      com.redhat.deployments-dir="" \
+      com.redhat.dev-mode="" \
+      com.redhat.dev-mode.port=""
+
+WORKDIR /
+
+USER 1000:1000
+
+CMD ["/usr/local/bin/openclaw-start"]

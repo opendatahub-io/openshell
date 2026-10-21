@@ -1,0 +1,113 @@
+# syntax=docker/dockerfile:1.4
+
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Gateway image for RHEL/Konflux (hermetic build).
+#
+# Multi-stage build that compiles openshell-gateway from source on UBI9.
+# Requires prefetched dependencies via Hermeto (cargo, rpm). The Rust
+# toolchain comes from the Red Hat rust-builder image, since UBI9 ships
+# rust 1.92.0, below the workspace MSRV.
+# The image ships Rust 1.99.0, newer than the 1.95.0 that rust-toolchain.toml
+# pins and CI tests. The rust-rhel9 1.95.0 tag has not been rebuilt since
+# 2026-05-19, so pinning it would ship builds from a stale base.
+# cargo-auditable is cargo-prefetched from crates.io so the gateway binary
+# embeds crate versions for image CVE scanners. See deploy/konflux/cargo-auditable.
+#
+# Local build:  ./deploy/konflux/build-local.sh gateway
+
+# ---------------------------------------------------------------------------
+# Build
+# ---------------------------------------------------------------------------
+FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.0@sha256:b00aaa63f7d6f5b857c170e4aed9d77f013f507ba97e72ebfcac48a7d3760310 AS builder
+
+# The builder image runs as 1001; cargo install needs root. It already
+# ships gcc, gcc-c++, make, cmake, openssl-devel, clang-devel, git and
+# gcc-toolset-15, so no dnf step.
+USER 0
+
+# gcc-toolset-15 provides the C++20 <format> header required by bundled Z3.
+# The builder ships it because clang-libs requires it, and clang already
+# uses it as its GCC installation.
+ENV PATH=/opt/rh/gcc-toolset-15/root/usr/bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/rh/gcc-toolset-15/root/usr/lib64:/opt/rh/gcc-toolset-15/root/usr/lib \
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ .cargo/
+
+# Install before the sources so application changes do not rebuild it.
+# The published lock's dev-dependencies are not vendored. Strip them and pin
+# the normal dependencies with the prefetch lock. Cargo reads source
+# replacement from the package directory, so copy the Hermeto config there.
+# Keep the version in lockstep
+# with deploy/konflux/cargo-auditable/Cargo.toml.
+ARG CARGO_AUDITABLE_VERSION=0.7.5
+COPY deploy/konflux/cargo-auditable/Cargo.lock /tmp/cargo-auditable-prefetch.lock
+RUN set -eu \
+    && cp -a "/cachi2/output/deps/cargo/cargo-auditable-${CARGO_AUDITABLE_VERSION}" /tmp/cargo-auditable \
+    && awk 'BEGIN { keep = 1 } /^\[dev-dependencies\./ { keep = 0 } keep' /tmp/cargo-auditable/Cargo.toml > /tmp/cargo-auditable/Cargo.toml.stripped \
+    && mv /tmp/cargo-auditable/Cargo.toml.stripped /tmp/cargo-auditable/Cargo.toml \
+    && grep -v -x 'resolver = "1"' /tmp/cargo-auditable/Cargo.toml > /tmp/cargo-auditable/Cargo.toml.resolver \
+    && mv /tmp/cargo-auditable/Cargo.toml.resolver /tmp/cargo-auditable/Cargo.toml \
+    && awk 'BEGIN { RS=""; ORS="\n\n" } /name = "konflux-prefetch-auditable"/ { next } /name = "cargo-auditable"/ { sub(/\nsource = "[^"]*"\n/, "\n"); sub(/\nchecksum = "[^"]*"\n/, "\n") } { print }' /tmp/cargo-auditable-prefetch.lock > /tmp/cargo-auditable/Cargo.lock \
+    && mkdir -p /tmp/cargo-auditable/.cargo \
+    && cp .cargo/config.toml /tmp/cargo-auditable/.cargo/config.toml \
+    && cargo install --offline --locked --path /tmp/cargo-auditable --root /usr/local \
+    && rm -rf /tmp/cargo-auditable /tmp/cargo-auditable-prefetch.lock
+
+COPY crates/ crates/
+COPY proto/ proto/
+COPY providers/ providers/
+
+# Version stamped into the binary via openshell-core::VERSION; tag builds
+# pass the git tag with the leading "v" stripped. Empty otherwise.
+ARG OPENSHELL_VERSION=""
+
+# The alias re-adds `in-tree-compute-drivers`, which a bare
+# `--no-default-features` would drop, leaving a gateway with no compute driver.
+
+RUN VER="${OPENSHELL_VERSION#v}" \
+    && if [ -n "$VER" ]; then export OPENSHELL_GIT_VERSION="$VER"; fi \
+    && cargo auditable build --release \
+        --package openshell-gateway \
+        --no-default-features \
+        --features defaults-without-telemetry,vendored-z3 && \
+    if ! readelf -S /build/target/release/openshell-gateway | grep -q '\.dep-v0'; then \
+        echo "openshell-gateway is missing cargo-auditable .dep-v0 metadata" >&2; exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:7fbeae18dc9476399f565e68255f602a3374ea8614ba3d14843565131a13ff93
+
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+        ca-certificates \
+        crypto-policies-scripts \
+    && microdnf clean all
+
+# Enable post-quantum cryptography support in the RHEL system policy.
+RUN update-crypto-policies --set DEFAULT:PQ
+
+COPY --from=builder --chmod=0555 \
+    /build/target/release/openshell-gateway \
+    /usr/local/bin/openshell-gateway
+
+LABEL com.redhat.component="odh-openshell-gateway-container" \
+      description="gRPC/HTTP control-plane server for OpenShell sandboxed AI agent runtimes" \
+      summary="gRPC/HTTP control-plane server for OpenShell sandboxed AI agent runtimes" \
+      name="rhoai/odh-openshell-gateway-rhel9" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.openshift.expose-services="8080:http" \
+      io.k8s.display-name="odh-openshell-gateway" \
+      io.k8s.description="odh-openshell-gateway" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
+
+USER 1000:1000
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/openshell-gateway"]
+CMD ["--bind-address", "0.0.0.0", "--port", "8080"]

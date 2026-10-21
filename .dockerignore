@@ -4,6 +4,8 @@
 
 # Rust build artifacts (use BuildKit cache mounts instead)
 target
+**/target
+**/node_modules
 
 # Python
 __pycache__
