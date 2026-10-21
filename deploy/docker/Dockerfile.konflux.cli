@@ -1,0 +1,129 @@
+# syntax=docker/dockerfile:1.4
+
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# CLI image for RHEL/Konflux (hermetic build).
+#
+# Multi-stage build that compiles the openshell CLI from source on UBI9,
+# dynamically linked against glibc, so the build has no dependency on musl.
+#
+# The CLI must not be linked statically against glibc: a static glibc binary
+# still reads the host's /etc/nsswitch.conf and dlopen()s NSS modules such as
+# myhostname, resolve, systemd and sss, which pulls the host's libc.so.6 into
+# the process and crashes hostname lookups (RHAI-1927). Linking dynamically
+# uses the host's own libc and NSS, so host resolvers such as myhostname
+# (*.localhost), resolve and sss keep working; pinning NSS the way the static
+# sandbox does would drop them. The trade-off: the binary needs glibc 2.34 or
+# newer on the host (RHEL 9+, Fedora, current Debian and Ubuntu) and no longer
+# runs on older-glibc hosts such as RHEL 8, or on musl hosts.
+#
+# Requires prefetched dependencies via Hermeto (cargo, rpm). The Rust
+# toolchain comes from the Red Hat rust-builder image, since UBI9 ships
+# rust 1.92.0, below the workspace MSRV.
+# The image ships Rust 1.99.0, newer than the 1.95.0 that rust-toolchain.toml
+# pins and CI tests. The rust-rhel9 1.95.0 tag has not been rebuilt since
+# 2026-05-19, so pinning it would ship builds from a stale base.
+# cargo-auditable is cargo-prefetched from crates.io so the CLI binary embeds
+# crate versions for image CVE scanners. See deploy/konflux/cargo-auditable.
+#
+# Local build:  ./deploy/konflux/build-local.sh cli
+
+# ---------------------------------------------------------------------------
+# Build stage: compile CLI (dynamically linked glibc binary)
+# ---------------------------------------------------------------------------
+FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.0@sha256:b00aaa63f7d6f5b857c170e4aed9d77f013f507ba97e72ebfcac48a7d3760310 AS builder
+
+# The builder image runs as 1001; cargo install needs root. It already
+# ships gcc, gcc-c++, make, cmake, openssl-devel and git, so no dnf step.
+USER 0
+
+# Record the host target triple. The builder image ships only the GNU
+# rust-std for the host, so no musl std is needed.
+RUN echo "RUST_TARGET=$(rustc -vV | sed -n 's/^host: //p')" > /tmp/build-env
+
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ .cargo/
+
+# Install before the sources so application changes do not rebuild it.
+# The published lock's dev-dependencies are not vendored. Strip them and pin
+# the normal dependencies with the prefetch lock. Cargo reads source
+# replacement from the package directory, so copy the Hermeto config there.
+# Keep the version in lockstep
+# with deploy/konflux/cargo-auditable/Cargo.toml.
+ARG CARGO_AUDITABLE_VERSION=0.7.5
+COPY deploy/konflux/cargo-auditable/Cargo.lock /tmp/cargo-auditable-prefetch.lock
+RUN set -eu \
+    && cp -a "/cachi2/output/deps/cargo/cargo-auditable-${CARGO_AUDITABLE_VERSION}" /tmp/cargo-auditable \
+    && awk 'BEGIN { keep = 1 } /^\[dev-dependencies\./ { keep = 0 } keep' /tmp/cargo-auditable/Cargo.toml > /tmp/cargo-auditable/Cargo.toml.stripped \
+    && mv /tmp/cargo-auditable/Cargo.toml.stripped /tmp/cargo-auditable/Cargo.toml \
+    && grep -v -x 'resolver = "1"' /tmp/cargo-auditable/Cargo.toml > /tmp/cargo-auditable/Cargo.toml.resolver \
+    && mv /tmp/cargo-auditable/Cargo.toml.resolver /tmp/cargo-auditable/Cargo.toml \
+    && awk 'BEGIN { RS=""; ORS="\n\n" } /name = "konflux-prefetch-auditable"/ { next } /name = "cargo-auditable"/ { sub(/\nsource = "[^"]*"\n/, "\n"); sub(/\nchecksum = "[^"]*"\n/, "\n") } { print }' /tmp/cargo-auditable-prefetch.lock > /tmp/cargo-auditable/Cargo.lock \
+    && mkdir -p /tmp/cargo-auditable/.cargo \
+    && cp .cargo/config.toml /tmp/cargo-auditable/.cargo/config.toml \
+    && cargo install --offline --locked --path /tmp/cargo-auditable --root /usr/local \
+    && rm -rf /tmp/cargo-auditable /tmp/cargo-auditable-prefetch.lock
+
+COPY crates/ crates/
+COPY proto/ proto/
+COPY providers/ providers/
+
+# Scope workspace to CLI crates only -- avoids pulling in server/sandbox
+# dependencies (aws-lc-sys, russh) that are unnecessary for the CLI.
+RUN sed -i 's|members = \["crates/\*"\]|members = ["crates/openshell-cli", "crates/openshell-core", "crates/openshell-bootstrap", "crates/openshell-policy", "crates/openshell-prover", "crates/openshell-providers", "crates/openshell-sdk", "crates/openshell-tui"]|' Cargo.toml
+
+# Version stamped into the binary via openshell-core::VERSION; tag builds
+# pass the git tag with the leading "v" stripped. Empty otherwise.
+ARG OPENSHELL_VERSION=""
+
+# Fail the build if the binary is static: see the header for why the CLI must
+# link glibc dynamically.
+RUN . /tmp/build-env && \
+    VER="${OPENSHELL_VERSION#v}" && \
+    if [ -n "$VER" ]; then export OPENSHELL_GIT_VERSION="$VER"; fi && \
+    cargo auditable build --release \
+        --target "${RUST_TARGET}" \
+        --package openshell-cli && \
+    mkdir -p /build/output && \
+    cp /build/target/${RUST_TARGET}/release/openshell /build/output/ && \
+    readelf -l /build/output/openshell > /tmp/program-headers && \
+    if ! grep -q 'Requesting program interpreter' /tmp/program-headers; then \
+        echo "openshell must be dynamically linked against glibc" >&2; exit 1; \
+    fi && \
+    if ! readelf -S /build/output/openshell | grep -q '\.dep-v0'; then \
+        echo "openshell is missing cargo-auditable .dep-v0 metadata" >&2; exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:7fbeae18dc9476399f565e68255f602a3374ea8614ba3d14843565131a13ff93
+
+RUN microdnf install -y --nodocs ca-certificates crypto-policies-scripts git-core \
+    && microdnf clean all
+
+# Enable post-quantum cryptography support in the RHEL system policy.
+RUN update-crypto-policies --set DEFAULT:PQ
+
+COPY --from=builder --chmod=0555 /build/output/openshell /usr/local/bin/openshell
+
+LABEL com.redhat.component="odh-openshell-cli-container" \
+      description="CLI for OpenShell sandboxed AI agent runtimes" \
+      summary="CLI for OpenShell sandboxed AI agent runtimes" \
+      name="rhoai/odh-openshell-cli-rhel9" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.openshift.expose-services="" \
+      io.k8s.display-name="odh-openshell-cli" \
+      io.k8s.description="odh-openshell-cli" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
+
+USER 1000:1000
+
+# Uploads need Git for repository discovery, even outside a Git work tree.
+RUN git --version
+
+ENTRYPOINT ["/usr/local/bin/openshell"]

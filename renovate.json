@@ -1,0 +1,20 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "enabledManagers": ["rpm-lockfile", "tekton", "custom.regex"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track the digest-pinned nodejs-24-minimal base of the OpenClaw image (npm inputs follow the AIPCC agentic image instead)",
+      "managerFilePatterns": ["/^deploy/docker/Dockerfile\\.konflux\\.openclaw$/"],
+      "matchStrings": ["ARG NODEJS_IMAGE=(?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Automerge non-major dependency updates",
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin", "pinDigest", "lockFileMaintenance"],
+      "automerge": true
+    }
+  ]
+}

@@ -1,0 +1,172 @@
+# syntax=docker/dockerfile:1.4
+
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Sandbox runtime image for RHEL/Konflux (hermetic build).
+#
+# Compute drivers copy or mount /openshell-sandbox from this image and run it
+# inside arbitrary agent workloads (Alpine, Debian, distroless, UBI), so it
+# MUST be a fully-static binary. It is built against glibc with
+# `-C target-feature=+crt-static` using Red Hat's glibc-static package
+# (CodeReady Builder), so the build has no dependency on musl.
+#
+# Static glibc still loads the NSS modules listed in the workload's
+# /etc/nsswitch.conf, and those crash a static binary (RHAI-1927). The build
+# links in deploy/konflux/sandbox/pin-nss.c, which limits NSS to the built-in
+# files and dns services at startup, matching upstream's musl behavior.
+#
+# Requires prefetched dependencies via Hermeto (cargo, rpm). The Rust
+# toolchain comes from the Red Hat rust-builder image, since UBI9 ships
+# rust 1.92.0, below the workspace MSRV.
+# The image ships Rust 1.99.0, newer than the 1.95.0 that rust-toolchain.toml
+# pins and CI tests. The rust-rhel9 1.95.0 tag has not been rebuilt since
+# 2026-05-19, so pinning it would ship builds from a stale base.
+# cargo-auditable is cargo-prefetched from crates.io so the sandbox binary
+# embeds crate versions for image CVE scanners. See deploy/konflux/cargo-auditable.
+#
+# Local build:  ./deploy/konflux/build-local.sh sandbox
+
+# ---------------------------------------------------------------------------
+# Build stage: compile sandbox runtime (fully-static glibc binary)
+# ---------------------------------------------------------------------------
+FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.0@sha256:b00aaa63f7d6f5b857c170e4aed9d77f013f507ba97e72ebfcac48a7d3760310 AS builder
+
+# The builder image runs as 1001; dnf and cargo install need root.
+USER 0
+
+# The builder image already ships gcc, gcc-c++, make, cmake, openssl-devel
+# and git; only the static glibc is missing.
+RUN dnf install -y --nodocs --setopt=install_weak_deps=0 \
+        glibc-static \
+    && dnf clean all
+
+# Record the host target triple. The builder image ships only the GNU
+# rust-std for the host, so no musl std is needed.
+RUN echo "RUST_TARGET=$(rustc -vV | sed -n 's/^host: //p')" > /tmp/build-env
+
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ .cargo/
+
+# Install before the sources so application changes do not rebuild it.
+# The published lock's dev-dependencies are not vendored. Strip them and pin
+# the normal dependencies with the prefetch lock. Cargo reads source
+# replacement from the package directory, so copy the Hermeto config there.
+# Keep the version in lockstep
+# with deploy/konflux/cargo-auditable/Cargo.toml.
+ARG CARGO_AUDITABLE_VERSION=0.7.5
+COPY deploy/konflux/cargo-auditable/Cargo.lock /tmp/cargo-auditable-prefetch.lock
+RUN set -eu \
+    && cp -a "/cachi2/output/deps/cargo/cargo-auditable-${CARGO_AUDITABLE_VERSION}" /tmp/cargo-auditable \
+    && awk 'BEGIN { keep = 1 } /^\[dev-dependencies\./ { keep = 0 } keep' /tmp/cargo-auditable/Cargo.toml > /tmp/cargo-auditable/Cargo.toml.stripped \
+    && mv /tmp/cargo-auditable/Cargo.toml.stripped /tmp/cargo-auditable/Cargo.toml \
+    && grep -v -x 'resolver = "1"' /tmp/cargo-auditable/Cargo.toml > /tmp/cargo-auditable/Cargo.toml.resolver \
+    && mv /tmp/cargo-auditable/Cargo.toml.resolver /tmp/cargo-auditable/Cargo.toml \
+    && awk 'BEGIN { RS=""; ORS="\n\n" } /name = "konflux-prefetch-auditable"/ { next } /name = "cargo-auditable"/ { sub(/\nsource = "[^"]*"\n/, "\n"); sub(/\nchecksum = "[^"]*"\n/, "\n") } { print }' /tmp/cargo-auditable-prefetch.lock > /tmp/cargo-auditable/Cargo.lock \
+    && mkdir -p /tmp/cargo-auditable/.cargo \
+    && cp .cargo/config.toml /tmp/cargo-auditable/.cargo/config.toml \
+    && cargo install --offline --locked --path /tmp/cargo-auditable --root /usr/local \
+    && rm -rf /tmp/cargo-auditable /tmp/cargo-auditable-prefetch.lock
+
+COPY crates/ crates/
+COPY proto/ proto/
+COPY deploy/konflux/sandbox/pin-nss.c deploy/konflux/sandbox/nss-probe.c ./
+
+# Version stamped into the binary via openshell-core::VERSION; tag builds
+# pass the git tag with the leading "v" stripped. Empty otherwise.
+ARG OPENSHELL_VERSION=""
+
+# `-C target-feature=+crt-static` links glibc statically, producing a
+# fully-static binary with no runtime libc dependency. It is static-PIE on
+# x86_64; rustc does not support static-PIE for aarch64-unknown-linux-gnu, so
+# the arm64 binary is static but not position-independent.
+#
+# No feature flags: openshell-sandbox has no default features and depends on
+# openshell-core without its default (telemetry) feature.
+#
+# `-C link-arg=/build/pin-nss.o` links the NSS pin (see the header). An object
+# file passed on the link line is always linked whole, so its constructor is
+# kept. rustc links with -nodefaultlibs and places link args after its own
+# -lc, so no libc.a scan follows pin-nss.o. Today its reference to
+# __nss_configure_lookup resolves only because std's lookups already pulled
+# that libc.a member in; `--undefined` is belt-and-braces that makes the
+# linker pull it regardless.
+#
+# Fail the build if the binary requests a dynamic loader: the runtime stage has
+# glibc, so a smoke test there would not catch a non-static binary. Also fail
+# if the NSS pin is missing, detected by its warning string.
+RUN . /tmp/build-env && \
+    VER="${OPENSHELL_VERSION#v}" && \
+    if [ -n "$VER" ]; then export OPENSHELL_GIT_VERSION="$VER"; fi && \
+    gcc -O2 -fPIE -Wall -Wextra -c /build/pin-nss.c -o /build/pin-nss.o && \
+    RUSTFLAGS="-C target-feature=+crt-static -C link-arg=/build/pin-nss.o -C link-arg=-Wl,--undefined=__nss_configure_lookup" \
+    cargo auditable build --release \
+        --target "${RUST_TARGET}" \
+        --package openshell-sandbox \
+        --bin openshell-sandbox && \
+    mkdir -p /build/output && \
+    cp /build/target/${RUST_TARGET}/release/openshell-sandbox /build/output/ && \
+    readelf -l /build/output/openshell-sandbox > /tmp/program-headers && \
+    if grep -q 'Requesting program interpreter' /tmp/program-headers; then \
+        echo "openshell-sandbox is not statically linked" >&2; exit 1; \
+    fi && \
+    if ! grep -qa 'failed to pin NSS database' /build/output/openshell-sandbox; then \
+        echo "openshell-sandbox is missing the NSS pin (pin-nss.c)" >&2; exit 1; \
+    fi && \
+    if ! readelf -S /build/output/openshell-sandbox | grep -q '\.dep-v0'; then \
+        echo "openshell-sandbox is missing cargo-auditable .dep-v0 metadata" >&2; exit 1; \
+    fi
+
+# Prove the pin works, not only that it is linked (see nss-probe.c). A fake
+# NSS module with no libc dependency answers every UID, standing in for
+# modules such as libnss_systemd on every architecture. Negative control: a
+# static probe without the pin must resolve an unknown UID through it. Then
+# the same probe linked with pin-nss.o must not consult it. The step uses
+# `set -eu` instead of an && chain so it can capture the unpinned exit code.
+RUN set -eu; \
+    gcc -O2 -Wall -Wextra -fPIC -shared -nostdlib -DNSS_PROBE_MODULE \
+        /build/nss-probe.c -o /usr/lib64/libnss_openshellprobe.so.2; \
+    gcc -O2 -Wall -Wextra -static /build/nss-probe.c -o /tmp/nss-probe-unpinned; \
+    gcc -O2 -Wall -Wextra -static /build/nss-probe.c /build/pin-nss.o \
+        -o /tmp/nss-probe-pinned; \
+    printf 'passwd: files openshellprobe\n' > /etc/nsswitch.conf; \
+    rc=0; /tmp/nss-probe-unpinned || rc=$?; \
+    if [ "$rc" -ne 1 ]; then \
+        echo "NSS probe negative control failed: unpinned probe exited $rc, expected 1 (fake module consulted)" >&2; exit 1; \
+    fi; \
+    rc=0; /tmp/nss-probe-pinned || rc=$?; \
+    if [ "$rc" -ne 0 ]; then \
+        echo "NSS pin check failed: pinned probe exited $rc, expected 0 (RHAI-1927)" >&2; exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+# ubi-micro with no extra RPMs: the Podman driver mounts this whole image into
+# every workload, so keep it small. Unlike the other Konflux images, it does
+# not set the DEFAULT:PQ crypto policy: the static binary uses its own TLS
+# stack and never reads the system policy.
+FROM registry.access.redhat.com/ubi9/ubi-micro:9.8@sha256:7a0454cbd9bd847e8f6a63b6f0254a6efbeb6e0ed71a5d824a4f6cccbe626650
+
+# Keep the binary root-owned for image-volume mounts and executable by the
+# sandbox runtime's non-root UID.
+COPY --from=builder --chmod=0555 /build/output/openshell-sandbox /openshell-sandbox
+
+LABEL com.redhat.component="odh-openshell-sandbox-container" \
+      description="Statically linked (glibc) sandbox runtime for OpenShell, injected into arbitrary agent workloads" \
+      summary="Statically linked (glibc) sandbox runtime for OpenShell, injected into arbitrary agent workloads" \
+      name="rhoai/odh-openshell-sandbox-rhel9" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.openshift.expose-services="" \
+      io.k8s.display-name="odh-openshell-sandbox" \
+      io.k8s.description="odh-openshell-sandbox" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
+
+# Drivers may override this identity to match the admitted workload. Keep the
+# standalone image non-root by default.
+USER 65532:65532
+
+ENTRYPOINT ["/openshell-sandbox"]

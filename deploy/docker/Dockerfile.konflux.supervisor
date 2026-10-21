@@ -1,0 +1,131 @@
+# syntax=docker/dockerfile:1.4
+
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Supervisor image for RHEL/Konflux (hermetic build).
+#
+# The supervisor runs in its own container, outside the agent workload. The
+# workload-side runtime ships separately in Dockerfile.konflux.sandbox. Because
+# it always runs from this image, the binary links dynamically against the
+# image's glibc, the same way upstream builds it.
+#
+# It must not be linked statically against glibc: static glibc still dlopen()s
+# the NSS modules listed in /etc/nsswitch.conf (this image ships systemd's
+# myhostname and systemd modules), which crashes a static binary (RHAI-1927).
+#
+# Requires prefetched dependencies via Hermeto (cargo, rpm). The Rust
+# toolchain comes from the Red Hat rust-builder image, since UBI9 ships
+# rust 1.92.0, below the workspace MSRV.
+# The image ships Rust 1.99.0, newer than the 1.95.0 that rust-toolchain.toml
+# pins and CI tests. The rust-rhel9 1.95.0 tag has not been rebuilt since
+# 2026-05-19, so pinning it would ship builds from a stale base.
+# cargo-auditable is cargo-prefetched from crates.io so the supervisor binary
+# embeds crate versions for image CVE scanners. See deploy/konflux/cargo-auditable.
+#
+# Local build:  ./deploy/konflux/build-local.sh supervisor
+
+# ---------------------------------------------------------------------------
+# Build stage: compile supervisor (dynamically linked glibc binary)
+# ---------------------------------------------------------------------------
+FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.0@sha256:b00aaa63f7d6f5b857c170e4aed9d77f013f507ba97e72ebfcac48a7d3760310 AS builder
+
+# The builder image runs as 1001; cargo install needs root. It already
+# ships gcc, gcc-c++, make, cmake, openssl-devel and git, so no dnf step.
+USER 0
+
+# Record the host target triple. The builder image ships only the GNU
+# rust-std for the host, so no musl std is needed.
+RUN echo "RUST_TARGET=$(rustc -vV | sed -n 's/^host: //p')" > /tmp/build-env
+
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ .cargo/
+
+# Install before the sources so application changes do not rebuild it.
+# The published lock's dev-dependencies are not vendored. Strip them and pin
+# the normal dependencies with the prefetch lock. Cargo reads source
+# replacement from the package directory, so copy the Hermeto config there.
+# Keep the version in lockstep
+# with deploy/konflux/cargo-auditable/Cargo.toml.
+ARG CARGO_AUDITABLE_VERSION=0.7.5
+COPY deploy/konflux/cargo-auditable/Cargo.lock /tmp/cargo-auditable-prefetch.lock
+RUN set -eu \
+    && cp -a "/cachi2/output/deps/cargo/cargo-auditable-${CARGO_AUDITABLE_VERSION}" /tmp/cargo-auditable \
+    && awk 'BEGIN { keep = 1 } /^\[dev-dependencies\./ { keep = 0 } keep' /tmp/cargo-auditable/Cargo.toml > /tmp/cargo-auditable/Cargo.toml.stripped \
+    && mv /tmp/cargo-auditable/Cargo.toml.stripped /tmp/cargo-auditable/Cargo.toml \
+    && grep -v -x 'resolver = "1"' /tmp/cargo-auditable/Cargo.toml > /tmp/cargo-auditable/Cargo.toml.resolver \
+    && mv /tmp/cargo-auditable/Cargo.toml.resolver /tmp/cargo-auditable/Cargo.toml \
+    && awk 'BEGIN { RS=""; ORS="\n\n" } /name = "konflux-prefetch-auditable"/ { next } /name = "cargo-auditable"/ { sub(/\nsource = "[^"]*"\n/, "\n"); sub(/\nchecksum = "[^"]*"\n/, "\n") } { print }' /tmp/cargo-auditable-prefetch.lock > /tmp/cargo-auditable/Cargo.lock \
+    && mkdir -p /tmp/cargo-auditable/.cargo \
+    && cp .cargo/config.toml /tmp/cargo-auditable/.cargo/config.toml \
+    && cargo install --offline --locked --path /tmp/cargo-auditable --root /usr/local \
+    && rm -rf /tmp/cargo-auditable /tmp/cargo-auditable-prefetch.lock
+
+COPY crates/ crates/
+COPY proto/ proto/
+
+# Version stamped into the binary via openshell-core::VERSION; tag builds
+# pass the git tag with the leading "v" stripped. Empty otherwise.
+ARG OPENSHELL_VERSION=""
+
+# The alias re-adds `bundled-ca-roots`, which a bare `--no-default-features`
+# would drop, keeping the supervisor on the same trust roots as upstream.
+#
+# The telemetry half is a no-op here: openshell-core/telemetry stays on
+# transitively via openshell-supervisor-{network,process}, and no supervisor
+# crate calls the emitter, so the endpoint is absent either way. Kept in
+# lockstep with the gateway, which is where compiling telemetry out has effect.
+#
+# Fail the build if the binary is static: see the header for why the
+# supervisor must link glibc dynamically.
+RUN . /tmp/build-env && \
+    VER="${OPENSHELL_VERSION#v}" && \
+    if [ -n "$VER" ]; then export OPENSHELL_GIT_VERSION="$VER"; fi && \
+    cargo auditable build --release \
+        --target "${RUST_TARGET}" \
+        --package openshell-supervisor \
+        --bin openshell-supervisor \
+        --no-default-features \
+        --features defaults-without-telemetry && \
+    mkdir -p /build/output && \
+    cp /build/target/${RUST_TARGET}/release/openshell-supervisor /build/output/ && \
+    readelf -l /build/output/openshell-supervisor > /tmp/program-headers && \
+    if ! grep -q 'Requesting program interpreter' /tmp/program-headers; then \
+        echo "openshell-supervisor must be dynamically linked against glibc" >&2; exit 1; \
+    fi && \
+    if ! readelf -S /build/output/openshell-supervisor | grep -q '\.dep-v0'; then \
+        echo "openshell-supervisor is missing cargo-auditable .dep-v0 metadata" >&2; exit 1; \
+    fi
+
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8@sha256:7fbeae18dc9476399f565e68255f602a3374ea8614ba3d14843565131a13ff93
+
+ARG TARGETARCH
+
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+        crypto-policies-scripts \
+    && microdnf clean all
+
+# Enable post-quantum cryptography support in the RHEL system policy.
+RUN update-crypto-policies --set DEFAULT:PQ
+
+# Copy the binary produced by the builder stage; it links against this image's
+# glibc.
+COPY --from=builder --chmod=0555 /build/output/openshell-supervisor /openshell-supervisor
+
+LABEL com.redhat.component="odh-openshell-supervisor-container" \
+      description="Sandbox supervisor for OpenShell, run outside the agent workload" \
+      summary="Sandbox supervisor for OpenShell, run outside the agent workload" \
+      name="rhoai/odh-openshell-supervisor-rhel9" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.openshift.expose-services="" \
+      io.k8s.display-name="odh-openshell-supervisor" \
+      io.k8s.description="odh-openshell-supervisor" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
+
+ENTRYPOINT ["/openshell-supervisor"]

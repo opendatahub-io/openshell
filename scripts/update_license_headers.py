@@ -73,6 +73,10 @@ SIDECAR_LICENSE_FILES: set[str] = {
 
 # Directories to skip entirely (relative to repo root).
 EXCLUDE_DIRS: set[str] = {
+    # Midstream-only agentic CI, Konflux, and Tekton files do not carry upstream NVIDIA headers.
+    ".agentic-ci",
+    ".tekton",
+    "deploy/konflux",
     "target",
     "e2e/rust/target",
     "plans",

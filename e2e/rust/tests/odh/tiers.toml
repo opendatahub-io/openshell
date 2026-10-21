@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# This upstream assertion expects unrestricted Secret reads in openshell, but
+# managed-mode RBAC deliberately limits reads to named source Secrets.
+# This assertion also expects a client certificate in the supervisor bootstrap
+# Secret, but the driver intentionally stages only the CA certificate there.
+# Remove each exclusion when its assertion matches the intended contract.
+[global_test_exclusions]
+workspace_namespace_managed = [
+  "managed_gateway_cannot_read_or_modify_workspace_secrets",
+  "managed_supervisor_reads_client_tls_from_its_bootstrap_secret",
+]
+
+[modes.shared]
+expected_helm_values = { gatewayConfig = { "openshell.gateway.auth" = { allow_unauthenticated_users = false }, "openshell.drivers.kubernetes" = { workspace_mode = "shared", image_pull_policy = "IfNotPresent", sandbox_runtime_image_pull_policy = "IfNotPresent", supervisor_image_pull_policy = "IfNotPresent" } } }
+
+[modes.managed]
+helm_values = ["deploy/helm/openshell/ci/values-workspace-managed.yaml"]
+expected_helm_values = { gatewayConfig = { "openshell.gateway.auth" = { allow_unauthenticated_users = false }, "openshell.drivers.kubernetes" = { workspace_mode = "managed", image_pull_policy = "IfNotPresent", sandbox_runtime_image_pull_policy = "IfNotPresent", supervisor_image_pull_policy = "IfNotPresent" } } }
+
+[smoke]
+description = "Component-level critical tests (5 min target)"
+# The standalone smoke binary was removed in favor of the portable CLI
+# conformance scenario. The ODH smoke filter covers this tier's own scenarios.
+upstream_tests = []
+odh_filter = "smoke::"
+
+[tier1]
+description = "High-priority tests excluding Smoke (15 min target)"
+upstream_tests = ["sandbox_lifecycle", "landlock", "user_namespaces"]
+odh_filter = "tier1::"
+
+[tier1.upstream_test_exclusions]
+sandbox_lifecycle = [
+  "canonical_main_disconnect_reconnect_replays_history_for_same_process",
+  "canonical_main_exit_255_is_not_retried_as_transport_failure",
+  "on_failure_policy_replaces_runtime_and_preserves_workspace",
+  "canonical_main_and_exec_receive_declared_environment",
+]
+
+[tier2]
+description = "Medium/low priority positive tests"
+# Corporate proxy needs a cluster-reachable fixture configured before Helm install.
+upstream_tests = ["workspace_lifecycle"]
+odh_filter = "tier2::"
+
+[tier2.managed]
+description = "Managed-workspace lifecycle tests"
+upstream_tests = ["workspace_namespace_managed"]
+
+[tier3]
+description = "Negative and destructive tests"
+upstream_tests = []
+odh_filter = "tier3::"
+
+[odh]
+description = "All ODH-specific tests"
+odh_only = true
+upstream_tests = []
+odh_filter = ""
+
+[odh.managed]
+description = "Managed-workspace tests"
+upstream_tests = ["workspace_namespace_managed"]
+odh_filter = ""
+
+[full]
+description = "All feature-enabled upstream and ODH tests except listed exclusions"
+upstream_tests = []
+odh_filter = ""
+all_binaries = true
+excluded_binaries = ["workspace_namespace_managed"]
+
+[full.upstream_test_exclusions]
+# Full OpenShift runs identified the failures and timeouts below.
+# Keep each exclusion exact so other tests in these binaries still run.
+live_policy_update = ["initial_sparse_policy_is_acknowledged_as_loaded"]
+no_proxy = ["sandbox_reaches_localhost_without_proxy_environment"]
+port_forward = ["port_forward_echo"]
+
+[full.managed]
+description = "Managed-workspace tests"
+upstream_tests = ["workspace_namespace_managed"]
+odh_filter = ""
