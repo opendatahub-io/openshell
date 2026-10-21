@@ -130,6 +130,11 @@ include the previously quarantined sandbox lifecycle tests.
 The upstream managed-workspace tests currently hard-code gateway identity
 assumptions, so the entrypoint temporarily defaults the gateway namespace and
 Helm release to `openshell`. The
+`managed_creates_namespace_with_labels` test is temporarily excluded globally
+because its SSH NetworkPolicy assertion hard-codes the gateway namespace as
+`openshell`, failing for custom namespaces such as `openshell-e2e-agentops`.
+Remove this exclusion when the upstream assertion uses the configured gateway
+namespace. The
 `managed_gateway_cannot_read_or_modify_workspace_secrets` test also checks
 generic Secret access although the source Secret Role is restricted to named
 Secrets. `managed_supervisor_reads_client_tls_from_its_bootstrap_secret` expects
@@ -214,7 +219,7 @@ both shared and managed phases to preserve managed-test compatibility; gateway
 registration and Route host remain run-scoped. Do not run ODH E2E invocations
 concurrently against the same cluster. Set `NAMESPACE`, `RELEASE`,
 `GATEWAY_NAME`, or `ROUTE_HOST` to preserve an exact custom value. Managed tests
-currently require the default `openshell` namespace and release.
+currently require the default `openshell` release and gateway identity.
 `OPENSHELL_GATEWAY` is set for phase commands so they target that invocation's
 gateway. Shared and managed phases in a tier reuse the same run identity and run
 sequentially, with teardown between phases. The shared deployment script applies

@@ -5,9 +5,13 @@
 # managed-mode RBAC deliberately limits reads to named source Secrets.
 # This assertion also expects a client certificate in the supervisor bootstrap
 # Secret, but the driver intentionally stages only the CA certificate there.
+# The namespace-label test hardcodes the SSH ingress peer namespace as openshell,
+# so it fails for custom gateway namespaces. Remove its exclusion after the
+# upstream assertion uses the configured gateway namespace.
 # Remove each exclusion when its assertion matches the intended contract.
 [global_test_exclusions]
 workspace_namespace_managed = [
+  "managed_creates_namespace_with_labels",
   "managed_gateway_cannot_read_or_modify_workspace_secrets",
   "managed_supervisor_reads_client_tls_from_its_bootstrap_secret",
 ]
