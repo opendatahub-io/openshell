@@ -18,6 +18,12 @@ struct NodeAudit {
     start_time: String,
 }
 
+#[derive(Clone, Copy)]
+enum EnforcementPolicy {
+    Required,
+    Optional,
+}
+
 /// Collects node-local `SELinux` AVCs for one ODH test scenario.
 pub struct SelinuxAudit {
     nodes: Vec<NodeAudit>,
@@ -31,7 +37,7 @@ impl SelinuxAudit {
             return Ok(None);
         }
         let nodes = ready_worker_nodes().await?;
-        verify_worker_enforcing(&nodes).await?;
+        verify_worker_enforcing(&nodes, EnforcementPolicy::Required).await?;
         Ok(Some(()))
     }
 
@@ -39,12 +45,24 @@ impl SelinuxAudit {
     /// An `OpenShift` cluster that cannot be audited fails the test because that
     /// indicates a missing qualification prerequisite rather than a skip case.
     pub async fn begin() -> Result<Option<Self>, String> {
+        Self::begin_with_policy(EnforcementPolicy::Required).await
+    }
+
+    /// Skip outside `OpenShift` or when a worker reports Permissive/Disabled.
+    /// Discovery, host-access, and unexpected-mode errors still fail.
+    pub async fn begin_if_enforcing() -> Result<Option<Self>, String> {
+        Self::begin_with_policy(EnforcementPolicy::Optional).await
+    }
+
+    async fn begin_with_policy(policy: EnforcementPolicy) -> Result<Option<Self>, String> {
         if !is_openshift().await? {
             return Ok(None);
         }
 
         let node_names = ready_worker_nodes().await?;
-        verify_worker_enforcing(&node_names).await?;
+        if !verify_worker_enforcing(&node_names, policy).await? {
+            return Ok(None);
+        }
 
         let mut audits = Vec::with_capacity(node_names.len());
         for node in node_names {
@@ -52,7 +70,7 @@ impl SelinuxAudit {
             let (start_date, start_time) = parse_audit_cutoff(&cutoff)
                 .ok_or_else(|| format!("invalid audit cutoff from node/{node}: {cutoff:?}"))?;
             audits.push(NodeAudit {
-                name: node.to_string(),
+                name: node,
                 start_date: start_date.to_string(),
                 start_time: start_time.to_string(),
             });
@@ -91,7 +109,7 @@ impl SelinuxAudit {
     }
 }
 
-async fn is_openshift() -> Result<bool, String> {
+pub(crate) async fn is_openshift() -> Result<bool, String> {
     let routes = oc_command()
         .args([
             "api-resources",
@@ -136,16 +154,19 @@ async fn ready_worker_nodes() -> Result<Vec<String>, String> {
     Ok(node_names)
 }
 
-async fn verify_worker_enforcing(nodes: &[String]) -> Result<(), String> {
+async fn verify_worker_enforcing(
+    nodes: &[String],
+    policy: EnforcementPolicy,
+) -> Result<bool, String> {
+    let mut enforcing = true;
     for node in nodes {
-        let enforcing = oc_debug_node(node, &["getenforce"]).await?;
-        if !parse_selinux_mode(&enforcing) {
-            return Err(format!(
-                "node/{node} SELinux mode was not exactly Enforcing: {enforcing:?}"
-            ));
-        }
+        let mode = oc_debug_node(node, &["getenforce"]).await?;
+        // Check every worker even after a permissive result: later discovery
+        // or access failures must not be hidden behind an environment skip.
+        enforcing &=
+            parse_selinux_mode(&mode, policy).map_err(|error| format!("node/{node} {error}"))?;
     }
-    Ok(())
+    Ok(enforcing)
 }
 
 fn stderr(output: &Output) -> String {
@@ -165,8 +186,14 @@ fn parse_ready_nodes(output: &str) -> Vec<&str> {
         .collect()
 }
 
-fn parse_selinux_mode(output: &str) -> bool {
-    output.trim() == "Enforcing"
+fn parse_selinux_mode(output: &str, policy: EnforcementPolicy) -> Result<bool, String> {
+    match output.trim() {
+        "Enforcing" => Ok(true),
+        "Permissive" | "Disabled" if matches!(policy, EnforcementPolicy::Optional) => Ok(false),
+        _ => Err(format!(
+            "SELinux mode was not exactly Enforcing: {output:?}"
+        )),
+    }
 }
 
 fn parse_audit_cutoff(output: &str) -> Option<(&str, &str)> {
@@ -181,7 +208,8 @@ fn audit_output_is_clean(output: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Output, audit_output_is_clean, parse_audit_cutoff, parse_ready_nodes, parse_selinux_mode,
+        EnforcementPolicy, Output, audit_output_is_clean, parse_audit_cutoff, parse_ready_nodes,
+        parse_selinux_mode,
     };
     use crate::odh_harness::oc::command_output;
     use std::process::ExitStatus;
@@ -196,9 +224,21 @@ mod tests {
 
     #[test]
     fn accepts_only_an_enforcing_selinux_mode() {
-        assert!(parse_selinux_mode("Enforcing\n"));
-        assert!(!parse_selinux_mode("Permissive\n"));
-        assert!(!parse_selinux_mode("Enforcing\nextra\n"));
+        assert!(parse_selinux_mode("Enforcing\n", EnforcementPolicy::Required).unwrap());
+        for mode in ["Permissive\n", "Disabled\n", "Enforcing\nextra\n", ""] {
+            assert!(parse_selinux_mode(mode, EnforcementPolicy::Required).is_err());
+        }
+    }
+
+    #[test]
+    fn optional_enforcement_skips_only_known_non_enforcing_modes() {
+        assert!(parse_selinux_mode("Enforcing\n", EnforcementPolicy::Optional).unwrap());
+        for mode in ["Permissive\n", "Disabled\n"] {
+            assert!(!parse_selinux_mode(mode, EnforcementPolicy::Optional).unwrap());
+        }
+        for mode in ["Enforcing\nextra\n", "permission denied", ""] {
+            assert!(parse_selinux_mode(mode, EnforcementPolicy::Optional).is_err());
+        }
     }
 
     #[test]

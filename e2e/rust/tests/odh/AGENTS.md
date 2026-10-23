@@ -10,10 +10,10 @@ Before adding or changing any test here, read `README.md` in this directory. It
 is the source of truth for:
 
 - the directory layout and how tiers map to test modules;
-- `tiers.toml` (tier → upstream `[[test]]` binaries + ODH module filter);
+- `tiers.toml` (validated gateway modes and ordered tier phases);
 - how to run each `mise run e2e:odh:*` task and the single-test invocation;
 - the image-provenance check and its required env vars
-  (`ALLOWED_IMAGE_REGISTRY_PREFIXES`, `NAMESPACE`, `RELEASE`, `SKIP_IMAGE_PROVENANCE`);
+  (`ALLOWED_IMAGE_REGISTRY_PREFIXES`, `NAMESPACE`, `RELEASE`);
 - the `KUBECONFIG` isolation gotcha for `mise` tasks;
 - the Konflux e2e image, its gateway lifecycle, and report artifacts;
 - rebase guidance for keeping this fork-only directory additive against
@@ -44,19 +44,21 @@ a rule and the README disagree, fix the drift rather than guessing.
 - Sign off every commit for DCO (`git commit --signoff`) and never reference AI
   agents in the message, per the root `AGENTS.md`.
 
-## Write verification as Rust tests, not bash
+## Keep verification in the right layer
 
 - Implement test and verification logic as Rust tests in the tier modules
   (`smoke/`, `tier1/`, `tier2/`, `tier3/`). Do not add bespoke bash runners to
   carry verification logic.
+- Infrastructure contract tests for the plan resolver, deploy script, phase
+  entrypoint, and report merger belong in `odh/scripts/tests/`.
 - Shelling out to `oc`/`kubectl` from a test is fine and already established
   (see `smoke/image_provenance.rs`). Node-level checks such as
   `oc debug node ... chroot /host ausearch` work the same from Rust — put them
   in a shared helper (see below), not a shell script.
 - Cluster/deployment setup (Helm values, in-cluster fixtures, proxies) is
-  environment setup, not a test. Keep it out of test bodies and the tier
-  runner. The e2e image entrypoint may deploy and tear down the gateway;
-  tests still assume an already-deployed, working gateway.
+  environment setup, not a test. Keep it out of test bodies and the phase test
+  runner. The shared local/image entrypoint deploys and tears down each mode;
+  Rust tests still assume an already-deployed, working gateway.
 
 ## Shared helpers
 
@@ -83,6 +85,10 @@ a rule and the README disagree, fix the drift rather than guessing.
   (`e2e:odh:smoke|tier1|tier2|tier3`, `e2e:odh`, and `e2e:odh:full`)
   stable. The OpenShift AI Shift-Left pipeline consumes those tiers as
   quality gates; the image entrypoint handles deployment around them.
+- Route local tasks and the image through
+  `odh/scripts/e2e-odh-entrypoint.sh`. Extend gateway modes with validated data
+  in `tiers.toml`; never add executable shell fragments to the plan. Only
+  single-phase tiers support `OPENSHELL_E2E_DEPLOY_GATEWAY=0`.
 
 ## Gate environment-specific tests, don't fork the task
 

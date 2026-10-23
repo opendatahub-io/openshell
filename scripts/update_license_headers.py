@@ -77,6 +77,7 @@ EXCLUDE_DIRS: set[str] = {
     ".agentic-ci",
     ".tekton",
     "deploy/konflux",
+    "deploy/rhoai",
     "target",
     "e2e/rust/target",
     "plans",

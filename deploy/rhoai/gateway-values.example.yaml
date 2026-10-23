@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 OpenShell contributors
+# SPDX-License-Identifier: Apache-2.0
+# Optional operational overrides. Copy beside your private config.json and add
+# its filename to gateway.values_files. Use sizes appropriate for your workload.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+# imagePullSecrets:
+#   - name: registry-credentials
+# server:
+#   workspaceStorageClass: block-storage
+#   sandboxImagePullSecrets:
+#     - name: registry-credentials

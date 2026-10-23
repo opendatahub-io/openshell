@@ -106,24 +106,26 @@ RUN OC_ARCH=$(case "${TARGETARCH}" in amd64) echo amd64;; arm64) echo arm64;; *)
     install -m 0555 "/tmp/uv-${UV_ARCH}-unknown-linux-gnu/uv" /usr/local/bin/uv
 
 WORKDIR /home/odh/openshell-e2e-odh
-COPY --chown=1000:1000 Cargo.toml Cargo.lock ./
-COPY --chown=1000:1000 pyproject.toml uv.lock ./
-COPY --chown=1000:1000 .cargo/ .cargo/
-COPY --chown=1000:1000 .config/ .config/
-COPY --chown=1000:1000 crates/ crates/
-COPY --chown=1000:1000 proto/ proto/
-COPY --from=builder --chown=1000:1000 /home/odh/openshell-e2e-odh/python/ python/
-COPY --chown=1000:1000 providers/ providers/
-COPY --chown=1000:1000 examples/ examples/
-COPY --chown=1000:1000 e2e/ e2e/
-COPY --chown=1000:1000 scripts/ scripts/
-COPY --chown=1000:1000 tasks/ tasks/
-COPY --chown=1000:1000 odh/ odh/
-COPY --chown=1000:1000 deploy/helm/openshell/ deploy/helm/openshell/
-COPY --chown=1000:1000 deploy/helm/openshell-workspace/ deploy/helm/openshell-workspace/
+# Shift-Left runs with --userns=keep-id --user 1001:1001. Keep the home and
+# test workspace writable for that identity, including CLI mTLS storage.
+COPY --chown=1001:1001 Cargo.toml Cargo.lock ./
+COPY --chown=1001:1001 pyproject.toml uv.lock ./
+COPY --chown=1001:1001 .cargo/ .cargo/
+COPY --chown=1001:1001 .config/ .config/
+COPY --chown=1001:1001 crates/ crates/
+COPY --chown=1001:1001 proto/ proto/
+COPY --from=builder --chown=1001:1001 /home/odh/openshell-e2e-odh/python/ python/
+COPY --chown=1001:1001 providers/ providers/
+COPY --chown=1001:1001 examples/ examples/
+COPY --chown=1001:1001 e2e/ e2e/
+COPY --chown=1001:1001 scripts/ scripts/
+COPY --chown=1001:1001 tasks/ tasks/
+COPY --chown=1001:1001 odh/ odh/
+COPY --chown=1001:1001 deploy/helm/openshell/ deploy/helm/openshell/
+COPY --chown=1001:1001 deploy/helm/openshell-workspace/ deploy/helm/openshell-workspace/
 
-RUN install -d -o 1000 -g 1000 results .kube /home/odh/.config/openshell && \
-    chown 1000:1000 /home/odh /home/odh/openshell-e2e-odh
+RUN install -d -o 1001 -g 1001 results .kube /home/odh/.config /home/odh/.config/openshell && \
+    chown 1001:1001 /home/odh /home/odh/openshell-e2e-odh
 
 # Fail the build if an expected test runtime tool is absent. In particular,
 # sandbox connection uses ssh, and future repository tests need git. cargo
@@ -153,6 +155,6 @@ LABEL com.redhat.component="odh-openshell-e2e-container" \
       io.k8s.display-name="odh-openshell-e2e" \
       io.k8s.description="odh-openshell-e2e"
 
-USER 1000:1000
+USER 1001:1001
 ENTRYPOINT ["/home/odh/openshell-e2e-odh/odh/scripts/e2e-odh-entrypoint.sh"]
 CMD ["smoke"]

@@ -158,7 +158,7 @@ The npm inputs come from AIPCC agentic commit dc756bc3 (OpenClaw 2026.9.5). AIPC
 
 ## Konflux
 
-odh-konflux-central owns the Tekton pipelines. Its onboarder sync opens a PR here that copies `pipelineruns/openshell/odh-openshell-sandbox-openclaw-*.yaml` over `.tekton/`, so change their params there and run the sync. Merges to `main` publish `odh-stable`, and each `v*-rhaiv.*` tag rebuilds the same pinned OpenClaw release under that tag; only the commit named in [Status](#status) is verified. The build is hermetic for linux/x86_64 and linux/arm64 with this prefetch input:
+Merges to `main` publish the image as `odh-stable` and with a tag matching the packaged OpenClaw version (currently `2026.9.5`). Before building, the pipeline checks that `package.json`, `package-lock.json`, and the Dockerfile pin agree and that OpenClaw has the matching upstream Git tag (`v2026.9.5`). The version tag is then applied to the same image digest as `odh-stable`. If the pins disagree or the upstream tag cannot be verified, the build stops before publishing. Updating OpenClaw requires updating the npm inputs and Dockerfile pin; the PipelineRun does not need a version edit. Consumers should pin by digest for reproducible deployments, or use `odh-stable` for the latest build. The build is hermetic for linux/x86_64 and linux/arm64 with this prefetch input:
 
 ```json
 [{"type": "npm", "path": "deploy/konflux/openclaw"}, {"type": "rpm", "path": "deploy/konflux/openclaw"}]

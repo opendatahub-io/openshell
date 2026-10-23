@@ -158,14 +158,19 @@ pub(crate) async fn oc_debug_node(node: &str, args: &[&str]) -> Result<String, S
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-async fn oc_get_json(args: &[&str]) -> Result<Value, String> {
+pub(crate) async fn oc_get_json(args: &[&str]) -> Result<Value, String> {
     let output = oc_command()
         .args(args)
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|error| format!("failed to run oc {args:?}: {error}"))?;
     if !output.status.success() {
-        return Err(format!("oc {args:?} failed: {}", command_output(&output)));
+        return Err(format!(
+            "oc {args:?} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("oc {args:?} returned invalid JSON: {error}"))
