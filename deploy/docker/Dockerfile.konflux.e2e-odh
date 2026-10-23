@@ -13,23 +13,33 @@
 # environment with awk. Every RUN must start at column 0 with `RUN ` and
 # use `&& \` continuations.
 
+# Tool versions are the source of truth for generic-fetcher.yaml. Renovate
+# updates annotated versions in both files; then run
+# `deploy/konflux/e2e-odh/sync-generic-fetcher.py --update all` to refresh the
+# amd64 and arm64 checksums.
+# renovate: datasource=docker depName=quay.io/openshift-release-dev/ocp-release extractVersion=^(?<version>4\.\d+\.\d+)-x86_64$
 ARG OC_VERSION=4.20.0
+# renovate: datasource=github-releases depName=helm/helm extractVersion=^v(?<version>.+)$
 ARG HELM_VERSION=4.2.0
+# renovate: datasource=github-releases depName=nextest-rs/nextest extractVersion=^cargo-nextest-(?<version>.+)$
 ARG NEXTEST_VERSION=0.9.143
+# renovate: datasource=github-releases depName=astral-sh/uv
+ARG UV_VERSION=0.13.1
 
 FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.0@sha256:b00aaa63f7d6f5b857c170e4aed9d77f013f507ba97e72ebfcac48a7d3760310 AS builder
 
 # The builder image runs as 1001 and already ships gcc, gcc-c++, make,
-# cmake, openssl-devel, git and tar, so no dnf step. Root writes /usr/local/bin.
+# cmake, openssl-devel, git and tar. Install Python for the locked E2E test
+# environment; root writes /usr/local/bin.
 USER 0
 
 ARG NEXTEST_VERSION
+ARG UV_VERSION
 ARG TARGETARCH
 ARG OPENSHELL_VERSION=""
 
-RUN dnf install -y --nodocs --setopt=install_weak_deps=0 python3.11 && \
-    dnf clean all
-
+RUN dnf install -y --nodocs --setopt=install_weak_deps=0 python3.11 \
+    && dnf clean all
 RUN RUST_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) exit 1;; esac) && \
     RUST_TRIPLE="${RUST_ARCH}-unknown-linux-gnu" && \
     tar xzf "/cachi2/output/deps/generic/cargo-nextest-${NEXTEST_VERSION}-${RUST_TRIPLE}.tar.gz" \
@@ -64,7 +74,7 @@ RUN VER="${OPENSHELL_VERSION#v}" && \
         --archive-file /opt/openshell/e2e-odh.tar.zst
 
 RUN UV_ARCH=$(case "${TARGETARCH}" in amd64) echo x86_64;; arm64) echo aarch64;; *) exit 1;; esac) && \
-    tar xzf "/cachi2/output/deps/generic/uv-${UV_ARCH}-unknown-linux-gnu.tar.gz" \
+    tar xzf "/cachi2/output/deps/generic/uv-${UV_VERSION}-${UV_ARCH}-unknown-linux-gnu.tar.gz" \
         -C /tmp && \
     install -m 0555 "/tmp/uv-${UV_ARCH}-unknown-linux-gnu/uv" /usr/local/bin/uv
 COPY odh/requirements.txt /tmp/requirements.txt
@@ -77,6 +87,7 @@ FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:25a147defd01e19674714f55d175
 
 ARG OC_VERSION
 ARG HELM_VERSION
+ARG UV_VERSION
 ARG TARGETARCH
 
 RUN dnf install -y --nodocs --setopt=install_weak_deps=0 \
@@ -101,7 +112,7 @@ RUN OC_ARCH=$(case "${TARGETARCH}" in amd64) echo amd64;; arm64) echo arm64;; *)
     tar xzf "/cachi2/output/deps/generic/helm-v${HELM_VERSION}-linux-${OC_ARCH}.tar.gz" \
         -C /tmp/helm && \
     install -m 0555 "/tmp/helm/linux-${OC_ARCH}/helm" /usr/local/bin/helm && \
-    tar xzf "/cachi2/output/deps/generic/uv-${UV_ARCH}-unknown-linux-gnu.tar.gz" \
+    tar xzf "/cachi2/output/deps/generic/uv-${UV_VERSION}-${UV_ARCH}-unknown-linux-gnu.tar.gz" \
         -C /tmp && \
     install -m 0555 "/tmp/uv-${UV_ARCH}-unknown-linux-gnu/uv" /usr/local/bin/uv
 
@@ -115,6 +126,7 @@ COPY --chown=1001:1001 .config/ .config/
 COPY --chown=1001:1001 crates/ crates/
 COPY --chown=1001:1001 proto/ proto/
 COPY --from=builder --chown=1001:1001 /home/odh/openshell-e2e-odh/python/ python/
+COPY --chown=1001:1001 sdk/conformance/ sdk/conformance/
 COPY --chown=1001:1001 providers/ providers/
 COPY --chown=1001:1001 examples/ examples/
 COPY --chown=1001:1001 e2e/ e2e/

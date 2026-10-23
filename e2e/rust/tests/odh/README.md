@@ -22,7 +22,7 @@ e2e/rust/tests/odh/
 ├── smoke/                     # Smoke tier: component-level critical tests
 │   ├── mod.rs
 │   ├── gateway.rs              # gateway reachability
-│   ├── image_provenance.rs     # sandbox/gateway/supervisor image registry + pull-policy check
+│   ├── image_provenance.rs     # deployed-image provenance: requested digests vs running pods, registry allowlist, pull-policy check, JSON evidence
 │   └── sandbox.rs              # sandbox create/exec/delete + supervisor presence check
 ├── tier1/                     # Tier 1: high-priority tests, excluding Smoke
 │   ├── mod.rs
@@ -269,17 +269,55 @@ with an empty report.
 ## Image provenance verification
 
 `smoke::image_provenance::test_sandbox_gateway_supervisor_images` creates a
-sandbox, then verifies that its image, the gateway's image, and the
-supervisor image (read from the rendered gateway config, since the
-supervisor never runs as its own pod) all came from an authorized
-registry, and that no container — including ephemeral containers — has
-regressed away from `imagePullPolicy: IfNotPresent`.
+sandbox, then verifies the images actually running on the cluster:
+
+- **The gateway pod** and the **supervisor companion pod** (the supervisor
+  runs as its own pod created by the Kubernetes driver; the rendered gateway
+  config is recorded as secondary evidence).
+- **The sandbox pod**, including its bootstrap container and ephemeral
+  containers.
+- When the deployment pins components by digest, each observed pod must run
+  **exactly the requested immutable reference**: the pod spec's image matches
+  the requested `repo@sha256:…`, and the resolved `imageID` contains an
+  immutable digest. For a multi-arch manifest list, the `imageID` may
+  identify the node's architecture-specific sub-manifest rather than the
+  requested index digest.
+- Workload and remaining images are checked against the
+  `ALLOWED_IMAGE_REGISTRY_PREFIXES` allowlist, and no container may regress
+  away from `imagePullPolicy: IfNotPresent`.
+
+The verified references are written to `results/e2e-odh-runtime-images.json`
+(next to the JUnit reports, honoring `OPENSHELL_E2E_RESULTS_DIR`), recording
+for each source the requested image, the resolved runtime `imageID`, and the
+gateway-configured images. Runtime image digests are required E2E evidence:
+failure to persist the evidence fails the test.
 
 ```bash
 ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/" \
   cargo test --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh \
   -- smoke::image_provenance::
 ```
+
+### Digest-pinning inputs
+
+The deploy script accepts a digest for every component; the provenance test
+verifies whichever are requested:
+
+- `GATEWAY_IMAGE_DIGEST`, `SUPERVISOR_IMAGE_DIGEST`, and
+  `SANDBOX_IMAGE_DIGEST` — pin the gateway, supervisor, and sandbox runtime
+  images. Each may also be embedded inline in `GATEWAY_IMAGE`,
+  `SUPERVISOR_IMAGE`, or `SANDBOX_IMAGE` as `repo@sha256:…`; an explicit
+  `*_IMAGE_DIGEST` that conflicts with an inline digest fails the deployment
+  before Helm runs.
+- `WORKLOAD_IMAGE`, `WORKLOAD_IMAGE_TAG`, and `WORKLOAD_IMAGE_DIGEST` —
+  optionally pin the default sandbox workload image. When unset, the
+  deployment leaves the chart's default untouched (no `sandbox.image.*`
+  values are set) and the workload is checked only against the registry
+  allowlist.
+- With no digest requested for a component, that component is checked only
+  against the registry allowlist.
+
+### Registry allowlist and pull policy
 
 - `ALLOWED_IMAGE_REGISTRY_PREFIXES` (required, comma-separated, each prefix
   must end in `/`) — no default, since an empty list would silently approve
@@ -291,7 +329,8 @@ ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/" \
   - `registry.redhat.io/` — RHOAI component images.
   - `nvcr.io/nvidia/base/` — the Helm chart's current default workload
     image (`server.sandboxImage`). Include the registry prefix for any
-    other workload image selected by the deployment.
+    other workload image selected by the deployment, e.g.
+    `ghcr.io/astral-sh/` when the Python E2E workload fixture is used.
 
   A prefix without a trailing `/` is rejected outright, since it could
   otherwise match a lookalike host (e.g. `registry.redhat.io` would also
@@ -301,8 +340,6 @@ ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/" \
   `GATEWAY_NAME` and `ROUTE_HOST` are run-scoped. Explicit values are used
   exactly as supplied; do not run concurrent invocations against the same
   cluster while using the default namespace and release.
-- The check is a registry-prefix allowlist, not an exact image/digest match.
-  It checks each observed image against the configured allowed prefixes.
 - The `imagePullPolicy: IfNotPresent` check applies to every container,
   including the sandbox pod's. The shared Quay deployment script sets the
   gateway, supervisor, and sandbox pull policies to `IfNotPresent`; manually
@@ -386,12 +423,26 @@ multi-phase tiers reject this option before cluster access.
 
 The environment file must set `IMAGE_TAG` for the gateway, supervisor,
 and sandbox images, plus `ALLOWED_IMAGE_REGISTRY_PREFIXES` for the
-provenance test. By default, the deployment uses the
+provenance test. `IMAGE_TAG` is required in the image because its source
+tree carries no Git branch metadata; when running the deployment from a
+source checkout, an unset `IMAGE_TAG` is derived from the current Git
+branch instead (sanitized and truncated to 128 characters). The tag is a
+preflight requirement even when every component uses a complete tagged or
+digest reference, and bare repositories inherit it. By default, the
+deployment uses the
 `quay.io/opendatahub/odh-openshell-*` midstream repositories.
 Override `QUAY_NAMESPACE`, `GATEWAY_IMAGE`, `SUPERVISOR_IMAGE`, or
 `SANDBOX_IMAGE` when testing another repository. Image variables accept a bare
 repository (which inherits `IMAGE_TAG`) or a complete tagged/digest reference.
-`GATEWAY_IMAGE_DIGEST` remains available to override the gateway digest.
+Each component can be pinned by digest with `GATEWAY_IMAGE_DIGEST`,
+`SUPERVISOR_IMAGE_DIGEST`, or `SANDBOX_IMAGE_DIGEST` (an inline
+`repo@sha256:…` reference works too and must agree with any explicit digest);
+the workload image can optionally be pinned with `WORKLOAD_IMAGE`,
+`WORKLOAD_IMAGE_TAG`, and `WORKLOAD_IMAGE_DIGEST` — these pins are forwarded
+to the deployment but are not yet verified at runtime: the provenance test
+checks the workload only against the registry-prefix allowlist. Requested
+gateway, supervisor, and sandbox-runtime digests are verified against the pods
+that actually run.
 `NAMESPACE`, `RELEASE`, `ROUTE_HOST`, and `GATEWAY_NAME` control the deployment
 and are exact when set;
 use distinct values across parallel invocations. The entrypoint exports

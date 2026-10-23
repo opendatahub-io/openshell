@@ -8,6 +8,68 @@
       "managerFilePatterns": ["/^deploy/docker/Dockerfile\\.konflux\\.openclaw$/"],
       "matchStrings": ["ARG NODEJS_IMAGE=(?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],
       "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the digest-pinned Rust builder base of the ODH e2e image",
+      "managerFilePatterns": ["/^deploy/docker/Dockerfile\\.konflux\\.e2e-odh$/"],
+      "matchStrings": ["FROM (?<depName>registry\\.redhat\\.io/rust-builder-image/rust-rhel9):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the digest-pinned UBI base of the ODH e2e image",
+      "managerFilePatterns": ["/^deploy/docker/Dockerfile\\.konflux\\.e2e-odh$/"],
+      "matchStrings": ["FROM (?<depName>registry\\.access\\.redhat\\.com/ubi9/ubi):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Track renovate-annotated tool versions of the ODH e2e image",
+      "managerFilePatterns": ["/^deploy/docker/Dockerfile\\.konflux\\.e2e-odh$/"],
+      "matchStrings": ["# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: extractVersion=(?<extractVersion>\\S+))?\\nARG [A-Z_]+_VERSION=(?<currentValue>\\S+)"],
+      "extractVersionTemplate": "{{#if extractVersion}}{{{extractVersion}}}{{else}}^(?<version>.+)${{/if}}"
+    },
+    {
+      "customType": "regex",
+      "description": "Keep ODH e2e generic-fetcher URLs and filenames in the same update as the Dockerfile versions",
+      "managerFilePatterns": ["/^deploy/konflux/e2e-odh/generic-fetcher\\.yaml$/"],
+      "matchStrings": [
+        "/download/(?<currentValue>\\d+\\.\\d+\\.\\d+)/uv-",
+        "filename: uv-(?<currentValue>\\d+\\.\\d+\\.\\d+)-"
+      ],
+      "depNameTemplate": "astral-sh/uv",
+      "datasourceTemplate": "github-releases"
+    },
+    {
+      "customType": "regex",
+      "description": "Keep ODH e2e generic-fetcher Helm artifacts in the same update as the Dockerfile version",
+      "managerFilePatterns": ["/^deploy/konflux/e2e-odh/generic-fetcher\\.yaml$/"],
+      "matchStrings": ["helm-v(?<currentValue>\\d+\\.\\d+\\.\\d+)-linux-"],
+      "depNameTemplate": "helm/helm",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Keep ODH e2e generic-fetcher cargo-nextest artifacts in the same update as the Dockerfile version",
+      "managerFilePatterns": ["/^deploy/konflux/e2e-odh/generic-fetcher\\.yaml$/"],
+      "matchStrings": ["cargo-nextest-(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "nextest-rs/nextest",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^cargo-nextest-(?<version>.+)$"
+    },
+    {
+      "customType": "regex",
+      "description": "Keep ODH e2e generic-fetcher OpenShift client artifacts in the same update as the Dockerfile version",
+      "managerFilePatterns": ["/^deploy/konflux/e2e-odh/generic-fetcher\\.yaml$/"],
+      "matchStrings": [
+        "/ocp/(?<currentValue>4\\.\\d+\\.\\d+)/",
+        "-rhel9-(?<currentValue>4\\.\\d+\\.\\d+)\\.tar"
+      ],
+      "depNameTemplate": "quay.io/openshift-release-dev/ocp-release",
+      "datasourceTemplate": "docker",
+      "extractVersionTemplate": "^(?<version>4\\.\\d+\\.\\d+)-x86_64$"
     }
   ],
   "packageRules": [
@@ -15,6 +77,19 @@
       "description": "Automerge non-major dependency updates",
       "matchUpdateTypes": ["minor", "patch", "digest", "pin", "pinDigest", "lockFileMaintenance"],
       "automerge": true
+    },
+    {
+      "description": "ODH e2e tool updates need recomputed generic-fetcher checksums, so never automerge them",
+      "matchFileNames": ["deploy/docker/Dockerfile.konflux.e2e-odh", "deploy/konflux/e2e-odh/generic-fetcher.yaml"],
+      "matchDepNames": ["astral-sh/uv", "helm/helm", "nextest-rs/nextest", "quay.io/openshift-release-dev/ocp-release"],
+      "automerge": false,
+      "prBodyNotes": ["Before merging, refresh the amd64/arm64 checksums with `deploy/konflux/e2e-odh/sync-generic-fetcher.py --update <uv|helm|nextest|oc>` and commit the result; the hermetic build fails until they match."]
+    },
+    {
+      "description": "ODH e2e base-image updates require review and a two-architecture hermetic build",
+      "matchFileNames": ["deploy/docker/Dockerfile.konflux.e2e-odh"],
+      "matchDepNames": ["registry.access.redhat.com/ubi9/ubi", "registry.redhat.io/rust-builder-image/rust-rhel9"],
+      "automerge": false
     }
   ]
 }

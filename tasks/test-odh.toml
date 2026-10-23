@@ -43,3 +43,9 @@ run = "odh/scripts/e2e-odh-entrypoint.sh tier2"
 description = "Run Tier 3: upstream + ODH, negative and destructive tests"
 depends = ["build:openshell-cli"]
 run = "odh/scripts/e2e-odh-entrypoint.sh tier3"
+
+["test:odh-deploy-digests"]
+description = "Test ODH deploy script image-digest plumbing without a cluster"
+run = "odh/scripts/tests/test-openshell-deploy-from-quay.sh"
+run_windows = "echo Skipping test:odh-deploy-digests: the Unix Quay deploy script does not apply on Windows."
+hide = true

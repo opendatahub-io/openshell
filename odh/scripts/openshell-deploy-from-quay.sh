@@ -25,7 +25,12 @@
 #   GATEWAY_IMAGE    gateway image reference (bare repository uses IMAGE_TAG)
 #   GATEWAY_IMAGE_DIGEST optional gateway digest override
 #   SUPERVISOR_IMAGE supervisor image reference (bare repository uses IMAGE_TAG)
+#   SUPERVISOR_IMAGE_DIGEST optional supervisor digest override
 #   SANDBOX_IMAGE    sandbox image reference (bare repository uses IMAGE_TAG)
+#   SANDBOX_IMAGE_DIGEST optional sandbox runtime digest override
+#   WORKLOAD_IMAGE   optional default sandbox workload image reference (bare repository uses WORKLOAD_IMAGE_TAG)
+#   WORKLOAD_IMAGE_TAG optional workload image tag (default: latest)
+#   WORKLOAD_IMAGE_DIGEST optional workload image digest override
 #   NAMESPACE        target k8s namespace (default: openshell)
 #   RELEASE          Helm release name (default: openshell)
 #   ROUTE_HOST       gateway Route hostname (default: openshell.<apps domain>)
@@ -187,14 +192,88 @@ fi
 GATEWAY_IMAGE="${GATEWAY_IMAGE:-${QNS}/odh-openshell-gateway}"
 SUPERVISOR_IMAGE="${SUPERVISOR_IMAGE:-${QNS}/odh-openshell-supervisor}"
 SANDBOX_IMAGE="${SANDBOX_IMAGE:-${QNS}/odh-openshell-sandbox}"
+
+# Helm receives image components through --set-string, so references must not
+# carry Helm map separators (',' or '=') that could inject additional values.
+validate_image_reference() {
+	local name="$1" image="$2" repository tag digest
+	repository="$(e2e_image_reference_repository "${image}")"
+	[[ "${repository}" =~ ^[a-z0-9][a-z0-9.-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+$ ]] ||
+		fail "${name} must be a lowercase registry/repository reference without Helm separators"
+	# An absent tag is valid (digest-pinned or registry default), but a tag
+	# delimiter must carry a tag: an empty one would silently fall back to
+	# the cluster's default tag instead of failing the typo.
+	local last_component="${image%%@*}"
+	last_component="${last_component##*/}"
+	if [[ "${last_component}" == *:* ]]; then
+		# Extract the tag from the last path component before any digest,
+		# not from e2e_image_reference_tag: that helper intentionally
+		# returns an empty string for references that carry a digest,
+		# which would reject the valid repo:tag@sha256:… form.
+		tag="${last_component##*:}"
+		[[ "${tag}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] ||
+			fail "${name} must carry a valid image tag without Helm separators"
+	fi
+	# Likewise, a digest delimiter must carry a valid sha256 digest: an
+	# empty digest would silently drop the pin and deploy an unpinned,
+	# mutable reference.
+	if [[ "${image}" == *@* ]]; then
+		digest="$(e2e_image_reference_digest "${image}")"
+		[[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]] ||
+			fail "${name} must carry a valid sha256 digest without Helm separators"
+	fi
+}
+
 GATEWAY_IMAGE_REF="$(e2e_resolve_image_reference "${GATEWAY_IMAGE}" "${IMAGE_TAG}")"
 SUPERVISOR_IMAGE_REF="$(e2e_resolve_image_reference "${SUPERVISOR_IMAGE}" "${IMAGE_TAG}")"
 SANDBOX_IMAGE_REF="$(e2e_resolve_image_reference "${SANDBOX_IMAGE}" "${IMAGE_TAG}")"
-if [[ -n "${GATEWAY_IMAGE_DIGEST:-}" ]]; then
-	[[ "${GATEWAY_IMAGE_DIGEST}" == sha256:* ]] || fail "GATEWAY_IMAGE_DIGEST must start with sha256:"
-	GATEWAY_IMAGE_REF="$(e2e_image_reference_repository "${GATEWAY_IMAGE_REF}")@${GATEWAY_IMAGE_DIGEST}"
+
+# Validate the resolved references: an operator-supplied IMAGE_TAG joins the
+# reference during resolution, and every component reaches Helm through
+# --set-string.
+validate_image_reference GATEWAY_IMAGE "${GATEWAY_IMAGE_REF}"
+validate_image_reference SUPERVISOR_IMAGE "${SUPERVISOR_IMAGE_REF}"
+validate_image_reference SANDBOX_IMAGE "${SANDBOX_IMAGE_REF}"
+
+# Apply an explicit <component>_IMAGE_DIGEST override to a resolved image
+# reference. A digest already embedded in the reference must agree with the
+# override; silently picking one could deploy a different image than intended.
+apply_image_digest() {
+	local digest_var="$1" ref_var="$2" digest ref
+	digest="${!digest_var:-}"
+	ref="${!ref_var}"
+	if [[ -z "${digest}" ]]; then
+		return 0
+	fi
+	[[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]] ||
+		fail "${digest_var} must be a lowercase sha256 digest (sha256:<64 hex digits>)"
+	if e2e_image_reference_has_digest "${ref}"; then
+		[[ "${ref}" == *"@${digest}" ]] ||
+			fail "${digest_var} conflicts with the digest already present in ${ref_var}: ${ref}"
+		return 0
+	fi
+	printf -v "${ref_var}" '%s@%s' "$(e2e_image_reference_repository "${ref}")" "${digest}"
+}
+
+apply_image_digest GATEWAY_IMAGE_DIGEST GATEWAY_IMAGE_REF
+apply_image_digest SUPERVISOR_IMAGE_DIGEST SUPERVISOR_IMAGE_REF
+apply_image_digest SANDBOX_IMAGE_DIGEST SANDBOX_IMAGE_REF
+
+# Optional default sandbox workload image. The chart applies it via
+# sandbox.image.*, separate from the sandboxRuntime runtime image.
+WORKLOAD_IMAGE_REF=""
+if [[ -n "${WORKLOAD_IMAGE:-}" ]]; then
+	validate_image_reference WORKLOAD_IMAGE "${WORKLOAD_IMAGE}"
+	WORKLOAD_IMAGE_TAG="${WORKLOAD_IMAGE_TAG:-latest}"
+	[[ "${WORKLOAD_IMAGE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] ||
+		fail "WORKLOAD_IMAGE_TAG must be a valid image tag without Helm separators"
+	WORKLOAD_IMAGE_REF="$(e2e_resolve_image_reference "${WORKLOAD_IMAGE}" "${WORKLOAD_IMAGE_TAG}")"
+	apply_image_digest WORKLOAD_IMAGE_DIGEST WORKLOAD_IMAGE_REF
+elif [[ -n "${WORKLOAD_IMAGE_TAG:-}" || -n "${WORKLOAD_IMAGE_DIGEST:-}" ]]; then
+	fail "WORKLOAD_IMAGE is required when setting WORKLOAD_IMAGE_TAG or WORKLOAD_IMAGE_DIGEST"
 fi
-for image_ref in "${GATEWAY_IMAGE_REF}" "${SUPERVISOR_IMAGE_REF}" "${SANDBOX_IMAGE_REF}"; do
+
+for image_ref in "${GATEWAY_IMAGE_REF}" "${SUPERVISOR_IMAGE_REF}" "${SANDBOX_IMAGE_REF}" ${WORKLOAD_IMAGE_REF:+"${WORKLOAD_IMAGE_REF}"}; do
 	[[ -n "$(e2e_image_reference_registry "${image_ref}")" ]] ||
 		fail "image reference must include a registry: ${image_ref}"
 done
@@ -222,6 +301,9 @@ echo "  Images:"
 echo "    - ${GATEWAY_IMAGE_REF}"
 echo "    - ${SUPERVISOR_IMAGE_REF}"
 echo "    - ${SANDBOX_IMAGE_REF}"
+if [[ -n "${WORKLOAD_IMAGE_REF}" ]]; then
+	echo "    - ${WORKLOAD_IMAGE_REF} (default sandbox workload)"
+fi
 echo "  Actions:"
 echo "    1. Replace namespace '${NAMESPACE}' if it exists"
 echo "    2. Create namespace"
@@ -296,9 +378,27 @@ append_image_helm_args() {
 		image_helm_args+=(--set-string "${component}.image.${value}")
 	done
 }
+# The chart's sandbox.image has no registry key: its repository value is the
+# full registry-qualified path (the chart default, nvcr.io/nvidia/base/ubuntu,
+# shows the convention). Pass the complete reference as the repository so the
+# rendered default sandbox image stays pullable, unlike the gateway,
+# supervisor, and sandboxRuntime components whose chart helpers render
+# registry and repository separately.
+append_workload_helm_args() {
+	local image_ref="$1" value
+	for value in \
+		"repository=$(e2e_image_reference_repository "${image_ref}")" \
+		"tag=$(e2e_image_reference_tag "${image_ref}")" \
+		"digest=$(e2e_image_reference_digest "${image_ref}")"; do
+		image_helm_args+=(--set-string "sandbox.image.${value}")
+	done
+}
 append_image_helm_args gateway "${GATEWAY_IMAGE_REF}"
 append_image_helm_args supervisor "${SUPERVISOR_IMAGE_REF}"
 append_image_helm_args sandboxRuntime "${SANDBOX_IMAGE_REF}"
+if [[ -n "${WORKLOAD_IMAGE_REF}" ]]; then
+	append_workload_helm_args "${WORKLOAD_IMAGE_REF}"
+fi
 helm upgrade --install "${RELEASE}" "${CHART}" \
 	--namespace "${NAMESPACE}" --create-namespace \
 	"${helm_value_args[@]}" \
