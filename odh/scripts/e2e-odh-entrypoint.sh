@@ -56,6 +56,20 @@ if [[ "${deploy_enabled}" != 0 ]]; then
 		echo "ERROR: kubeconfig not found at ${KUBECONFIG}" >&2
 		exit 1
 	fi
+
+	# Resolve once so every phase uses the same operator release. Explicit
+	# per-image overrides take precedence; stdout contains data, never shell code.
+	discovered_images="$("${PYTHON_BIN}" "${SCRIPT_DIR}/discover-e2e-images.py")"
+	while IFS=$'\t' read -r image_var image_ref; do
+		[[ -n "${image_var}" ]] || continue
+		case "${image_var}" in
+			GATEWAY_IMAGE|SANDBOX_IMAGE|SUPERVISOR_IMAGE)
+				export "${image_var}=${image_ref}"
+				echo ">> Discovered ${image_var}=${image_ref}"
+				;;
+			*) echo "ERROR: unexpected discovered image variable: ${image_var}" >&2; exit 1 ;;
+		esac
+	done <<< "${discovered_images}"
 fi
 
 status=0

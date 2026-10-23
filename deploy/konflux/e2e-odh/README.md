@@ -35,6 +35,10 @@ Gateway modes and tier phases are data in
 and the deploy script checks the deployed Helm values before the tests start.
 Image repository, tag, and digest overrides can vary between local and image
 runs; phase selection and gateway configuration come from the shared plan.
+The entrypoint discovers digest-pinned runtime images from the installed
+RHOAI/ODH operator CSV before deploying. Per-image environment overrides take
+precedence. See [runtime image selection](../../../e2e/rust/tests/odh/README.md#runtime-image-selection)
+for selection rules, permissions, and fallback behavior.
 
 The image also carries a fully prefetched Python 3.11 test environment and
 generated protobuf bindings, so later named Python test modes can execute
