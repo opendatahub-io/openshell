@@ -47,6 +47,7 @@ spec:
   - name: additional-tags
     value:
     - 'odh-pr-{{revision}}'
+    - 'rhoai-3.6'
   - name: pipeline-type
     value: pull-request
   pipelineRef:
