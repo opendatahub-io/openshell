@@ -3,7 +3,7 @@
 
 use std::process::Output;
 
-use super::oc::{oc_command, oc_debug_node};
+use super::oc::{is_openshift, oc_command, oc_debug_node};
 
 const OPEN_SHELL_EXECUTABLES: &[&str] = &[
     "/opt/openshell/bin/openshell-sandbox",
@@ -89,24 +89,6 @@ impl SelinuxAudit {
             ))
         }
     }
-}
-
-async fn is_openshift() -> Result<bool, String> {
-    let routes = oc_command()
-        .args([
-            "api-resources",
-            "--api-group=route.openshift.io",
-            "--no-headers",
-        ])
-        .output()
-        .await
-        .map_err(|error| format!("failed to run oc api-resources: {error}"))?;
-    if !routes.status.success() {
-        return Err(format!("oc api-resources failed: {}", stderr(&routes)));
-    }
-    Ok(String::from_utf8_lossy(&routes.stdout)
-        .lines()
-        .any(|line| line.split_whitespace().next() == Some("routes")))
 }
 
 async fn ready_worker_nodes() -> Result<Vec<String>, String> {
