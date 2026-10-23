@@ -88,14 +88,38 @@ cp deploy/rhoai/config.example.json "$HOME/.config/openshell-rhoai/config.json"
 Edit the copy. Replace both version placeholders with exact published SemVer
 chart versions, and set the namespace, kubeconfig context, DNS names, and OIDC
 claims. The two versions need not have the same patch number. The dashboard OCI
-reference currently points to its upstream publisher, not an ODH chart registry.
-Both chart references are configurable for mirrors.
+reference currently points to its upstream publisher, not an ODH chart registry,
+and that chart's default image is the upstream publisher's build. Both chart
+references are configurable for mirrors.
 
-For ODH images, select the development chart matching the upstream commit of
-the downstream build, then set `gateway.images` to the downstream registry,
-repositories, and image tags/digests. The installer does not infer that mapping
-or silently select a newer chart. Source version `0.0.0`, floating tags, and
-version ranges are rejected for installation.
+The example sets `dashboard.images.dashboard` to the ODH build,
+`quay.io/opendatahub/odh-openshell-dashboard`. Konflux builds it from each commit
+of the ODH dashboard fork's `main` and tags it with that commit's full SHA. Replace
+the digest placeholder with the digest of a build whose source matches the
+dashboard chart version, and do not use the moving `odh-stable` tag:
+
+| Dashboard chart | ODH fork commit | Image digest |
+|---|---|---|
+| `0.1.2` | `ae76c31` | `sha256:cfb3b592c5909c7c1a5d5622f98a20bf8c503554d53b3441abb189140254450b` |
+| `0.1.1` | `03995be` | `sha256:77c7434a172800ce561b2910b4964728f28ada39d77f26d7039be60ed3663ece` |
+
+Builds from fork commit `1c45566` onward add the dashboard's entitlement page,
+which reads the user role the installer passes as `oidc.userRole`. Chart `0.1.2`
+and later pass it to the dashboard. Chart `0.1.1` does not, so a newer build on
+it refuses users whose only role is `user_role` unless that role is named `user`.
+
+The example also sets `gateway.images` to the ODH builds of the gateway,
+supervisor, and sandbox runtime (`quay.io/opendatahub/odh-openshell-gateway`,
+`odh-openshell-supervisor`, and `odh-openshell-sandbox`). They are tagged
+`v<OpenShell version>-rhaiv.<N>`. Use the gateway chart of the same OpenShell
+version, and replace each placeholder with the digest of that tag; for example
+chart `0.1.3` with `v0.1.3-rhaiv.3`. For an ODH build from an unreleased commit,
+select the development chart matching the upstream commit of the downstream build.
+Without `gateway.images`, the chart installs its upstream publisher's images.
+`gateway.images.sandbox`, the default image for sandboxes that name none, stays
+on the chart default; ODH publishes no replacement. The installer does not infer
+either mapping or silently select a newer chart. Source version `0.0.0`, floating
+tags, and version ranges are rejected for installation.
 
 Save the browser client's secret to `dashboard-client-secret.txt` beside the JSON,
 using a trusted editor or your secret manager. Restrict its permissions to `0600`.

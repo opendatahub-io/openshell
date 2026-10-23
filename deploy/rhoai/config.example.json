@@ -5,13 +5,37 @@
     "chart": "oci://ghcr.io/nvidia/openshell/helm-chart",
     "version": "REPLACE_WITH_EXACT_GATEWAY_VERSION",
     "values_files": [],
-    "host": "gateway.apps.example.com"
+    "host": "gateway.apps.example.com",
+    "images": {
+      "gateway": {
+        "registry": "quay.io",
+        "repository": "opendatahub/odh-openshell-gateway",
+        "digest": "REPLACE_WITH_VERIFIED_GATEWAY_IMAGE_DIGEST"
+      },
+      "supervisor": {
+        "registry": "quay.io",
+        "repository": "opendatahub/odh-openshell-supervisor",
+        "digest": "REPLACE_WITH_VERIFIED_SUPERVISOR_IMAGE_DIGEST"
+      },
+      "sandboxRuntime": {
+        "registry": "quay.io",
+        "repository": "opendatahub/odh-openshell-sandbox",
+        "digest": "REPLACE_WITH_VERIFIED_SANDBOX_RUNTIME_IMAGE_DIGEST"
+      }
+    }
   },
   "dashboard": {
     "chart": "oci://ghcr.io/gkrumbach07/openshell-dashboard/helm-chart/openshell-dashboard",
     "version": "REPLACE_WITH_EXACT_DASHBOARD_VERSION",
     "values_files": [],
-    "host": "dashboard.apps.example.com"
+    "host": "dashboard.apps.example.com",
+    "images": {
+      "dashboard": {
+        "registry": "quay.io",
+        "repository": "opendatahub/odh-openshell-dashboard",
+        "digest": "REPLACE_WITH_VERIFIED_DASHBOARD_IMAGE_DIGEST"
+      }
+    }
   },
   "oidc": {
     "provider": "oidc",

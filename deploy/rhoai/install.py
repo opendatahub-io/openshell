@@ -337,6 +337,7 @@ def chart_values(config):
             "audience": oidc["audience"],
             "rolesClaim": oidc["roles_claim"],
             "adminRole": oidc["admin_role"],
+            "userRole": oidc["user_role"],
             "codeChallengeMethod": "S256",
             "allowedGroups": oidc.get("allowed_groups", []),
             "allowedRoles": oidc.get("allowed_roles", []),
