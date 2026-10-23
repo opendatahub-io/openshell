@@ -52,6 +52,17 @@ class VerifyTests(unittest.TestCase):
     def test_allowed_and_denied_access(self):
         self.run_verify(self.response)
 
+    def test_other_gateway_token_forbidden_does_not_prove_audience_isolation(self):
+        def response(url, token=None, **kwargs):
+            if token == "other-token":
+                # A shared-issuer, multi-audience token authenticated, but lacks
+                # this gateway's required role. That is not audience rejection.
+                return 403, None
+            return self.response(url, token, **kwargs)
+
+        with self.assertRaisesRegex(ValueError, "1 authorization check"):
+            self.run_verify(response)
+
     def test_false_positive_authorization_results_fail(self):
         for failure in (
             "admin",

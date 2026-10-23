@@ -548,6 +548,9 @@ class Installer:
             for resource in scoped
             for verb in ("create", "patch")
         ]
+        # Helm updates its release Secret to record installation/upgrade status.
+        # --history-max also makes Helm delete older release Secrets.
+        operations += [("update", "secrets", True), ("delete", "secrets", True)]
         operations += [
             (verb, resource, False)
             for resource in (
@@ -760,6 +763,8 @@ class Installer:
                 )
 
     def wait_for_route(self, release):
+        component = "gateway" if release == "openshell" else "dashboard"
+        host = self.config[component]["host"]
         seconds = (
             int(self.timeout[:-1]) * {"s": 1, "m": 60, "h": 3600}[self.timeout[-1]]
         )
@@ -770,6 +775,7 @@ class Installer:
                 condition.get("type") == "Admitted"
                 and condition.get("status") == "True"
                 for ingress in route.get("status", {}).get("ingress", [])
+                if ingress.get("host") == host
                 for condition in ingress.get("conditions", [])
             ):
                 return
@@ -792,7 +798,8 @@ class Installer:
                     },
                 }
             )
-        if not self.get("configmap", INSTALL_STATE):
+        state = self.get("configmap", INSTALL_STATE)
+        if not state:
             self.create(
                 {
                     "apiVersion": "v1",
@@ -806,20 +813,47 @@ class Installer:
                 }
             )
         else:
-            # Add identity metadata to legacy state only after preflight passed.
-            self.run(
-                [
-                    *self.kube,
-                    "-n",
-                    self.ns,
-                    "patch",
-                    "configmap",
-                    INSTALL_STATE,
-                    "--type=merge",
-                    "-p",
-                    json.dumps({"data": self.identity_state()}),
-                ]
+            # Another installer may have created or changed state since preflight.
+            require(
+                state["metadata"].get("labels", {}).get(OWNER) == OWNER_VALUE,
+                f"ConfigMap {INSTALL_STATE} already exists outside this installer",
             )
+            self.check_identity(state)
+            missing = {
+                key: value
+                for key, value in self.identity_state().items()
+                if key not in state.get("data", {})
+            }
+            if missing:
+                self.credentials(check_only=True)
+                version = state["metadata"].get("resourceVersion")
+                require(
+                    version, "Installer state has no resourceVersion; rerun preflight"
+                )
+                # Preserve recorded fields and reject concurrent writes rather
+                # than overwriting another installation's identity.
+                self.run(
+                    [
+                        *self.kube,
+                        "-n",
+                        self.ns,
+                        "patch",
+                        "configmap",
+                        INSTALL_STATE,
+                        "--type=merge",
+                        "-p",
+                        json.dumps(
+                            {
+                                "metadata": {"resourceVersion": version},
+                                "data": missing,
+                            }
+                        ),
+                    ]
+                )
+        # Publish our reservation before scanning again: overlapping preflights
+        # in other namespaces must not both activate the same OIDC identity.
+        # Keep reservations on failure so a conflicting installer cannot proceed.
+        self.check_identity(self.get("configmap", INSTALL_STATE))
         self.credentials()
         for index, release in enumerate(("openshell", "openshell-dashboard")):
             print(f"Installing {release} in {self.ns}...", flush=True)

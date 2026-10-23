@@ -105,10 +105,19 @@ The latter supplies a PEM CA bundle for a private OIDC issuer to both releases.
 
 Register `https://<dashboard host>/oauth2/callback` with your IdP. The browser
 client ID is separate from the gateway API audience. Generic OIDC uses
-`allowed_groups`; Keycloak can use `provider: "keycloak-oidc"` and `allowed_roles`
-such as `openshell-api:openshell-user`. These are alternatives, not assumptions
-about customer claim names. Without either UI filter, any authenticated IdP user
-can reach the UI, but the gateway still enforces its roles and workspace access.
+`allowed_groups`; Keycloak can use `provider: "keycloak-oidc"` and `allowed_roles`.
+These are alternatives, not assumptions about customer claim names.
+
+`allowed_roles` filters dashboard login independently of gateway authorization.
+To admit both admin-only and ordinary users, include both roles: for realm roles,
+use `"allowed_roles": ["openshell-admin", "openshell-user"]`. For client roles,
+prefix each role with the Keycloak client ID that defines it, for example
+`"allowed_roles": ["openshell-api-openshell-team:openshell-admin", "openshell-api-openshell-team:openshell-user"]`.
+Replace these example names with your IdP's role and client names. Users need
+at least one listed role, not both; listing only `openshell-user` excludes users
+who have only `openshell-admin`. Without either UI filter, any authenticated IdP
+user can reach the UI, but the gateway still enforces its roles and workspace access.
+
 Optional `oidc.scope` supplies space-separated OAuth scopes including `openid`
 (for example `openid email profile offline_access`). Request only scopes your
 IdP supports; include `groups` if your provider requires it for group claims.
@@ -155,6 +164,10 @@ Preflight rejects an issuer/audience or issuer/browser-client pair already
 recorded by another installer-managed namespace. It cannot discover registrations
 outside this installer, tokens with multiple audiences, or old installation
 state that has no identity metadata. Verify those cases with your IdP admin.
+Installation repeats the conflict check after recording its identity reservation
+and before running Helm. Overlapping installs can both stop with reservations
+preserved; inspect both namespaces and resolve the identity conflict explicitly
+before retrying.
 
 `--check` still downloads the pinned charts. It discards rendered manifests and
 does not validate connectivity, SCC admission, token claims, or runtime behavior.
@@ -169,8 +182,9 @@ uv run --script --python 3.12 deploy/rhoai/install.py \
 ```
 
 This renders both charts, checks the default and selected workspace storage
-classes, checks create/patch permissions for installation resources, verifies
-Agent Sandbox readiness, and detects release/identity conflicts. It reports the
+classes, checks create/patch permissions for installation resources and
+update/delete permissions for Helm release Secrets (including history pruning),
+verifies Agent Sandbox readiness, and detects release/identity conflicts. It reports the
 OpenShift version and node kernels and flags older kernels for runtime validation.
 It does not encode a Red Hat product support matrix or prove storage health,
 RBAC bind/escalate permissions, quota, SCC admission, or application compatibility.
@@ -208,7 +222,9 @@ state ConfigMap, a client/cookie Secret, and an optional OIDC CA ConfigMap.
 It installs the gateway first, checks the gateway CA Secret,
 and installs the dashboard with that CA and the internal gateway Service URL.
 Both releases use OpenShift-assigned UID/GID settings. It waits for Helm readiness
-and checks Route admission. Set `--timeout 15m` for a slower cluster.
+and checks Route admission for each configured hostname. Admission for an old
+dashboard hostname does not satisfy this check. Set `--timeout 15m` for a slower
+cluster.
 
 ## TLS and onboarding
 
@@ -258,7 +274,9 @@ with credentials or prints tokens/response bodies.
 
 Optional `--other-gateway-token-file` checks rejection of a token for another
 gateway. First confirm that token works on its intended gateway: an expired or
-otherwise invalid token cannot prove audience isolation. Optional
+otherwise invalid token cannot prove audience isolation. This check requires
+HTTP 401; HTTP 403 fails because it can indicate successful authentication
+followed by a role denial. Optional
 `--session-cookie-file` accepts the Cookie header value from an already logged-in
 browser and checks the public session endpoint. `--ca-file` adds a private Route
 CA to system trust. These checks do not automate browser login, grant/revoke,
@@ -286,6 +304,9 @@ The original gateway hostname is recorded in the `openshell-installer` ConfigMap
 Issuer, API audience, and browser client ID are recorded too; changing them
 requires an explicit identity migration. Legacy state is populated on a successful
 preflight followed by an install/rerun without rewriting existing identity values.
+Legacy updates use a resource-version precondition. If another run changes the
+state concurrently, installation stops without overwriting it; inspect the
+recorded identity and rerun preflight before retrying.
 Earlier installations recorded it on the namespace; reruns migrate that state
 without changing namespace metadata. Changing the recorded hostname is
 rejected because the certificate hook preserves existing certificates; migrate

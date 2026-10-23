@@ -179,10 +179,12 @@ def verify(
             token=user,
         )
     if other:
+        # A 403 can mean the token authenticated but lacks this gateway's role.
+        # Only authentication rejection establishes the expected token boundary.
         check(
             "other-gateway token is rejected",
             f"{base}/api/v1/workspaces",
-            (401, 403),
+            (401,),
             token=other,
         )
     if cookie:

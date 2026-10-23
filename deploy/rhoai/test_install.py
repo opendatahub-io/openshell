@@ -66,9 +66,14 @@ class FakeCluster(installer.Installer):
         ):
             raise RuntimeError("namespace not found")
         if "can-i" in args:
+            verb, resource = args[args.index("can-i") + 1 :][:2]
             return (
                 "no"
-                if self.denied_permission and self.denied_permission in args
+                if self.denied_permission
+                and (
+                    self.denied_permission in args
+                    or self.denied_permission == (verb, resource)
+                )
                 else "yes"
             )
         if "storageclasses" in args:
@@ -78,8 +83,14 @@ class FakeCluster(installer.Installer):
         if "--all-namespaces" in args:
             return json.dumps({"items": self.other_states})
         if "patch" in args:
-            self.objects[("configmap", installer.INSTALL_STATE)]["data"].update(
-                json.loads(args[args.index("-p") + 1])["data"]
+            state = self.objects[("configmap", installer.INSTALL_STATE)]
+            patch_data = json.loads(args[args.index("-p") + 1])
+            version = patch_data.get("metadata", {}).get("resourceVersion")
+            if version is not None and version != state["metadata"]["resourceVersion"]:
+                raise RuntimeError("Conflict: resourceVersion changed")
+            state.setdefault("data", {}).update(patch_data["data"])
+            state["metadata"]["resourceVersion"] = str(
+                int(state["metadata"]["resourceVersion"]) + 1
             )
             return ""
         if args[:2] == ["helm", "list"]:
@@ -96,7 +107,12 @@ class FakeCluster(installer.Installer):
             self.objects[("route", args[3])] = {
                 "status": {
                     "ingress": [
-                        {"conditions": [{"type": "Admitted", "status": "True"}]}
+                        {
+                            "host": self.config[
+                                "gateway" if args[3] == "openshell" else "dashboard"
+                            ]["host"],
+                            "conditions": [{"type": "Admitted", "status": "True"}],
+                        }
                     ]
                 }
             }
@@ -118,6 +134,7 @@ class FakeCluster(installer.Installer):
             key = (obj["kind"].lower(), obj["metadata"]["name"])
             if key in self.objects:
                 raise RuntimeError("already exists")
+            obj["metadata"]["resourceVersion"] = "1"
             self.objects[key] = obj
         return ""
 
@@ -265,6 +282,217 @@ class InstallTests(unittest.TestCase):
         cluster.config["oidc"]["audience"] = "different-api"
         with self.assertRaisesRegex(ValueError, "identity.*changed"):
             cluster.preflight()
+
+    def test_overlapping_namespace_installs_cannot_both_activate(self):
+        for overlap in (False, True):
+            with self.subTest(overlap=overlap):
+                first = self.cluster()
+                config = copy.deepcopy(first.config)
+                config["namespace"] = "other-team"
+                second = FakeCluster(config)
+                reservations = []
+                first.other_states = second.other_states = reservations
+                # Both runs pass preflight before either publishes its identity.
+                first.preflight()
+                second.preflight()
+                first_create, second_create = first.create, second.create
+
+                def publish_second(resource, create=second_create, states=reservations):
+                    create(resource)
+                    if resource["metadata"]["name"] == installer.INSTALL_STATE:
+                        states.append(copy.deepcopy(resource))
+
+                def publish_first(
+                    resource,
+                    create=first_create,
+                    states=reservations,
+                    overlap=overlap,
+                    other=second,
+                ):
+                    create(resource)
+                    if resource["metadata"]["name"] == installer.INSTALL_STATE:
+                        states.append(copy.deepcopy(resource))
+                        if overlap:
+                            with self.assertRaisesRegex(
+                                ValueError, "distinct per-gateway"
+                            ):
+                                other.install(["g", "d"], ["g", "d"])
+
+                with (
+                    patch.object(first, "preflight", return_value=None),
+                    patch.object(second, "preflight", return_value=None),
+                    patch.object(first, "create", side_effect=publish_first),
+                    patch.object(second, "create", side_effect=publish_second),
+                ):
+                    if overlap:
+                        with self.assertRaisesRegex(ValueError, "distinct per-gateway"):
+                            first.install(["g", "d"], ["g", "d"])
+                    else:
+                        first.install(["g", "d"], ["g", "d"])
+                        with self.assertRaisesRegex(ValueError, "distinct per-gateway"):
+                            second.install(["g", "d"], ["g", "d"])
+                self.assertEqual(len(reservations), 2)
+                for cluster in (first, second) if overlap else (second,):
+                    self.assertFalse(
+                        any(
+                            args[:2] == ["helm", "upgrade"] for args, _ in cluster.calls
+                        )
+                    )
+                    self.assertIn(
+                        ("configmap", installer.INSTALL_STATE), cluster.objects
+                    )
+
+    def test_state_created_after_preflight_preserves_successful_installation(self):
+        loser = self.cluster()
+        loser.objects[("namespace", loser.ns)] = {"metadata": {}}
+        config = copy.deepcopy(loser.config)
+        config["oidc"]["audience"] = "winning-audience"
+        winner = FakeCluster(config)
+        winner.objects = loser.objects
+        preflight = loser.preflight
+        successful = None
+
+        def competing_install():
+            nonlocal successful
+            namespace = preflight()
+            winner.install(["g", "d"], ["g", "d"])
+            successful = copy.deepcopy(winner.objects)
+            return namespace
+
+        with (
+            patch.object(loser, "preflight", side_effect=competing_install),
+            self.assertRaisesRegex(ValueError, "identity.*changed"),
+        ):
+            loser.install(["g", "d"], ["g", "d"])
+        self.assertEqual(winner.objects, successful)
+        self.assertFalse(
+            any(args[:2] == ["helm", "upgrade"] for args, _ in loser.calls)
+        )
+        winner.preflight()
+
+    def legacy_state(self, cluster):
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        state = {
+            "metadata": {
+                "name": installer.INSTALL_STATE,
+                "namespace": cluster.ns,
+                "resourceVersion": "1",
+                "labels": {installer.OWNER: installer.OWNER_VALUE, "team": "research"},
+            },
+            "data": {
+                "gateway-host": cluster.config["gateway"]["host"],
+                "custom-field": "preserve-me",
+            },
+        }
+        cluster.objects[("configmap", installer.INSTALL_STATE)] = state
+        return state
+
+    def test_legacy_state_populates_only_missing_identity_fields(self):
+        cluster = self.cluster()
+        state = self.legacy_state(cluster)
+        state["data"]["oidc-issuer"] = cluster.config["oidc"]["issuer"]
+        cluster.install(["g", "d"], ["g", "d"])
+        self.assertEqual(
+            state["data"], {**cluster.identity_state(), "custom-field": "preserve-me"}
+        )
+        self.assertEqual(state["metadata"]["labels"]["team"], "research")
+        patches = [
+            json.loads(args[args.index("-p") + 1])
+            for args, _ in cluster.calls
+            if "patch" in args and "can-i" not in args
+        ]
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(patches[0]["metadata"], {"resourceVersion": "1"})
+        self.assertEqual(set(patches[0]["data"]), {"oidc-audience", "oidc-client-id"})
+        cluster.calls.clear()
+        cluster.install(["g", "d"], ["g", "d"])
+        self.assertFalse(
+            any("patch" in args and "can-i" not in args for args, _ in cluster.calls)
+        )
+
+    def test_concurrent_legacy_state_update_is_not_overwritten(self):
+        cluster = self.cluster()
+        state = self.legacy_state(cluster)
+        run = cluster.run
+        concurrent = None
+
+        def change_before_patch(args, payload=None):
+            nonlocal concurrent
+            if "patch" in args and "can-i" not in args:
+                state["metadata"]["resourceVersion"] = "2"
+                state["data"]["oidc-audience"] = "other-audience"
+                concurrent = copy.deepcopy(state)
+            return run(args, payload)
+
+        with (
+            patch.object(cluster, "run", side_effect=change_before_patch),
+            self.assertRaisesRegex(RuntimeError, "Conflict"),
+        ):
+            cluster.install(["g", "d"], ["g", "d"])
+        self.assertEqual(state, concurrent)
+        self.assertNotIn(("secret", installer.OIDC_SECRET), cluster.objects)
+        self.assertFalse(
+            any(args[:2] == ["helm", "upgrade"] for args, _ in cluster.calls)
+        )
+
+    def test_state_ownership_change_after_preflight_is_rejected(self):
+        cluster = self.cluster()
+        state = self.legacy_state(cluster)
+        preflight = cluster.preflight
+
+        def change_owner():
+            namespace = preflight()
+            state["metadata"]["labels"][installer.OWNER] = "someone-else"
+            return namespace
+
+        before = copy.deepcopy(state["data"])
+        with (
+            patch.object(cluster, "preflight", side_effect=change_owner),
+            self.assertRaisesRegex(ValueError, "outside this installer"),
+        ):
+            cluster.install(["g", "d"], ["g", "d"])
+        self.assertEqual(state["data"], before)
+
+    def test_legacy_migration_rechecks_credentials_before_writing_state(self):
+        cluster = self.cluster()
+        state = self.legacy_state(cluster)
+        before = copy.deepcopy(state)
+        preflight = cluster.preflight
+
+        def change_credentials():
+            namespace = preflight()
+            cluster.objects[("secret", installer.OIDC_SECRET)] = {
+                "data": {
+                    "client-secret": base64.b64encode(
+                        b"another-client-secret"
+                    ).decode(),
+                    "cookie-secret": base64.b64encode(b"cookie").decode(),
+                }
+            }
+            return namespace
+
+        with (
+            patch.object(cluster, "preflight", side_effect=change_credentials),
+            self.assertRaisesRegex(ValueError, "rotate"),
+        ):
+            cluster.install(["g", "d"], ["g", "d"])
+        self.assertEqual(state, before)
+        self.assertFalse(
+            any(args[:2] == ["helm", "upgrade"] for args, _ in cluster.calls)
+        )
+
+    def test_secret_storage_permissions_are_required_before_any_mutation(self):
+        for verb in ("update", "delete"):
+            with self.subTest(verb=verb):
+                cluster = self.cluster()
+                cluster.denied_permission = (verb, "secrets")
+                before = copy.deepcopy(cluster.objects)
+                with self.assertRaisesRegex(ValueError, f"{verb} secrets"):
+                    cluster.install(["g", "d"], ["g", "d"])
+                self.assertEqual(cluster.objects, before)
+                self.assertFalse(
+                    any(args[:2] == ["helm", "upgrade"] for args, _ in cluster.calls)
+                )
 
     def test_uninstalled_other_release_history_does_not_block_install(self):
         cluster = self.cluster()
@@ -561,7 +789,8 @@ class InstallTests(unittest.TestCase):
             self.assertNotIn("a-secret-that", " ".join(args))
             self.assertIn("test-context", args)
             self.assertNotIn("--atomic", args)
-            self.assertNotIn("delete", args)
+            if "can-i" not in args:
+                self.assertNotIn("delete", args)
         data = cluster.objects[("secret", installer.OIDC_SECRET)]["data"]
         self.assertEqual(
             base64.b64decode(data["client-secret"]),
@@ -688,7 +917,10 @@ class InstallTests(unittest.TestCase):
         self.assertIn(("secret", installer.OIDC_SECRET), cluster.objects)
         self.assertIn(("secret", "openshell-client-tls"), cluster.objects)
         self.assertFalse(
-            any("delete" in args or "uninstall" in args for args, _ in cluster.calls)
+            any(
+                "uninstall" in args or ("delete" in args and "can-i" not in args)
+                for args, _ in cluster.calls
+            )
         )
 
     def test_route_admission_waits_and_times_out(self):
@@ -696,7 +928,12 @@ class InstallTests(unittest.TestCase):
         cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
         admitted = {
             "status": {
-                "ingress": [{"conditions": [{"type": "Admitted", "status": "True"}]}]
+                "ingress": [
+                    {
+                        "host": cluster.config["gateway"]["host"],
+                        "conditions": [{"type": "Admitted", "status": "True"}],
+                    }
+                ]
             }
         }
         with (
@@ -710,6 +947,32 @@ class InstallTests(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "not admitted"),
         ):
             cluster.wait_for_route("openshell")
+
+    def test_dashboard_route_waits_for_configured_host_admission(self):
+        cluster = self.cluster()
+        old = {
+            "host": "old-dashboard.example.com",
+            "conditions": [{"type": "Admitted", "status": "True"}],
+        }
+        current = {
+            "host": cluster.config["dashboard"]["host"],
+            "conditions": [{"type": "Admitted", "status": "False"}],
+        }
+        stale = {"status": {"ingress": [old, current]}}
+        admitted = copy.deepcopy(stale)
+        admitted["status"]["ingress"][1]["conditions"][0]["status"] = "True"
+        with (
+            patch.object(cluster, "get", side_effect=[stale, admitted]),
+            patch.object(installer.time, "sleep") as sleep,
+        ):
+            cluster.wait_for_route("openshell-dashboard")
+            sleep.assert_called_once()
+        with (
+            patch.object(cluster, "get", return_value=stale),
+            patch.object(installer.time, "monotonic", side_effect=[0, 601]),
+            self.assertRaisesRegex(ValueError, "not admitted"),
+        ):
+            cluster.wait_for_route("openshell-dashboard")
 
     def test_render_failure_prevents_cluster_access(self):
         path = self.root / "config.json"

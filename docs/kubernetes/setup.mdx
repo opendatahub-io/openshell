@@ -101,8 +101,12 @@ sandbox lifecycle, and terminal access on your target cluster before sharing the
 deployment; chart rendering does not establish RHOAI qualification.
 The installer accepts operational Helm values files and custom OIDC scopes, and
 provides a read-only cluster preflight and token-based authorization verifier.
+Preflight requires permission to update and delete Secrets for Helm release
+storage and history pruning.
 Provision distinct OIDC audiences and browser clients for separate gateways;
 namespace separation alone does not establish identity isolation.
+The installer rechecks identity conflicts after recording its reservation and
+before starting Helm. Resolve conflicting reservations before retrying an install.
 
 <Steps>
 
