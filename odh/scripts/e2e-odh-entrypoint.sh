@@ -21,6 +21,26 @@ fi
 
 plan_json="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" "${TIER}" "${TIERS_FILE}")"
 phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"] for p in json.load(sys.stdin)["phases"]))')"
+case "${TIER}" in
+	tier3)
+		if [[ "${OPENSHELL_ODH_HA_FAILOVER:-0}" == 1 ]]; then
+			phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"] for p in json.load(sys.stdin)["phases"] if p["name"] == "ha"))')"
+		else
+			phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"] for p in json.load(sys.stdin)["phases"] if p["name"] != "ha"))')"
+		fi
+		;;
+	odh|full)
+		# The normal all-tests phases must not run the ignored destructive test.
+		# Add its dedicated HA deployment only when explicitly requested.
+		if [[ "${OPENSHELL_ODH_HA_FAILOVER:-0}" != 1 ]]; then
+			phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"] for p in json.load(sys.stdin)["phases"] if p["name"] != "ha"))')"
+		fi
+		;;
+esac
+[[ -n "${phase_lines}" ]] || {
+	echo "ERROR: ${TIER} did not resolve the required phase" >&2
+	exit 1
+}
 phase_count=0
 while IFS= read -r _; do ((phase_count+=1)); done <<< "${phase_lines}"
 deploy_enabled="${OPENSHELL_E2E_DEPLOY_GATEWAY:-1}"
@@ -219,11 +239,21 @@ for phase_line in ${phase_lines}; do
 	((phase_index+=1))
 done
 
-run_child "${PYTHON_BIN}" "${MERGE_SCRIPT}" "${TIER}" "${phase_reports[@]}" || {
-	merge_status=$?
-	echo "ERROR: failed to merge ODH phase reports" >&2
-	[[ "${status}" != 0 ]] || status="${merge_status}"
-}
+available_phase_reports=()
+for phase_report in "${phase_reports[@]}"; do
+	if [[ -f "${phase_report}" ]]; then
+		available_phase_reports+=("${phase_report}")
+	fi
+done
+if (( ${#available_phase_reports[@]} > 0 )); then
+	run_child "${PYTHON_BIN}" "${MERGE_SCRIPT}" "${TIER}" "${available_phase_reports[@]}" || {
+		merge_status=$?
+		echo "ERROR: failed to merge ODH phase reports" >&2
+		[[ "${status}" != 0 ]] || status="${merge_status}"
+	}
+else
+	echo "WARNING: no phase reports were produced; skipping report merge" >&2
+fi
 if [[ -f "${merged_report}" ]]; then
 	if command -v xsltproc >/dev/null 2>&1; then
 		xsltproc --stringparam title "e2e-odh-${TIER}" "${ROOT}/scripts/junit-to-html.xsl" "${merged_report}" > "${html_report}" || echo "WARNING: failed to render HTML report" >&2

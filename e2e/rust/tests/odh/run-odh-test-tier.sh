@@ -65,7 +65,18 @@ if old not in text:
     raise SystemExit("ODH nextest JUnit path setting not found")
 destination.write_text(text.replace(old, f'path = "{report}"'))
 PY
-nextest_args=(--profile e2e-odh --config-file "${config_file}" --no-tests fail -E "${filter}")
+nextest_args=(
+	--profile e2e-odh
+	--config-file "${config_file}"
+	--no-tests fail
+	-E "${filter}"
+)
+# The failover test is ignored by default because it deletes a gateway pod.
+# Only its dedicated HA phase may enable ignored tests: all-tests shared and
+# managed phases must not run it against their non-HA gateway deployments.
+if [[ "${PHASE}" == "ha" && "${OPENSHELL_ODH_HA_FAILOVER:-0}" == "1" ]]; then
+	nextest_args+=(--run-ignored all)
+fi
 if [[ -n "${OPENSHELL_E2E_NEXTEST_ARCHIVE:-}" ]]; then
 	nextest_args+=(--archive-file "${OPENSHELL_E2E_NEXTEST_ARCHIVE}" --workspace-remap "${ROOT}/e2e/rust")
 else
