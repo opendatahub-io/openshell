@@ -99,6 +99,8 @@ confirm_action() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${REPO_ROOT}/e2e/support/gateway-common.sh"
+# shellcheck source=e2e/support/route-auth.sh
+source "${REPO_ROOT}/e2e/support/route-auth.sh"
 CHART="${REPO_ROOT}/deploy/helm/openshell"
 PLAN_RESOLVER="${REPO_ROOT}/e2e/rust/tests/odh/tier_plan.py"
 TIERS_FILE="${REPO_ROOT}/e2e/rust/tests/odh/tiers.toml"
@@ -461,21 +463,14 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 auth_check_dir="$(mktemp -d)"
-auth_check_request="${auth_check_dir}/request"
-auth_check_headers="${auth_check_dir}/headers"
 auth_check_status="${auth_check_dir}/status"
 auth_check_error="${auth_check_dir}/error"
-printf '\000\000\000\000\000' > "${auth_check_request}"
 
 probe_list_sandboxes() {
 	local curl_timeout="$1"
-	curl --disable --silent --show-error --noproxy '*' --http2 \
-		--cacert "${MTLS_DIR}/ca.crt" \
-		--output /dev/null --dump-header "${auth_check_headers}" \
-		--write-out '%{http_code}' --connect-timeout 10 --max-time "${curl_timeout}" \
-		--header 'content-type: application/grpc' --header 'te: trailers' \
-		--data-binary "@${auth_check_request}" \
-		"https://${ROUTE_HOST}/openshell.v1.OpenShell/ListSandboxes" \
+	e2e_route_auth_probe "https://${ROUTE_HOST}" "${MTLS_DIR}/ca.crt" "${auth_check_dir}" \
+		openshell.v1.OpenShell/ListSandboxes --noproxy '*' \
+		--connect-timeout 10 --max-time "${curl_timeout}" \
 		> "${auth_check_status}" 2> "${auth_check_error}"
 }
 
@@ -489,11 +484,9 @@ while (( SECONDS < route_deadline )); do
 	curl_timeout=10
 	if (( remaining < curl_timeout )); then curl_timeout="${remaining}"; fi
 	if probe_list_sandboxes "${curl_timeout}"; then
-		auth_check_http_status="$(cat "${auth_check_status}")"
-		route_grpc_status=""
-		if [[ -f "${auth_check_headers}" ]]; then
-			route_grpc_status="$(awk 'tolower($1) == "grpc-status:" { gsub("\\r", "", $2); status = $2 } END { print status }' "${auth_check_headers}")"
-		fi
+		route_status="$(cat "${auth_check_status}")"
+		auth_check_http_status="${route_status%%:*}"
+		route_grpc_status="${route_status#*:}"
 		if [[ "${auth_check_http_status}" == 200 ]] &&
 			[[ "${route_grpc_status}" == 16 ]]; then
 			route_ready=1

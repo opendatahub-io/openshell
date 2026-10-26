@@ -181,6 +181,13 @@ discover_e2e_images() {
 	printf '%s' "${resolved}"
 }
 
+# shellcheck source=e2e/support/reports.sh
+source "${ROOT}/e2e/support/reports.sh"
+# Packaged Kubernetes execution uses the upstream gateway lifecycle directly.
+if [[ "${1:-}" == kubernetes && $# == 1 ]]; then
+	unset OPENSHELL_GATEWAY_ENDPOINT
+	exec bash "${SCRIPT_DIR}/kubernetes-image.sh"
+fi
 PLAN_RESOLVER="${ROOT}/e2e/rust/tests/odh/tier_plan.py"
 TIERS_FILE="${ROOT}/e2e/rust/tests/odh/tiers.toml"
 DEPLOY_SCRIPT="${OPENSHELL_E2E_DEPLOY_SCRIPT:-${SCRIPT_DIR}/openshell-deploy-from-quay.sh}"
@@ -189,7 +196,7 @@ MERGE_SCRIPT="${OPENSHELL_E2E_REPORT_MERGER:-${SCRIPT_DIR}/merge-e2e-odh-reports
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TIER="${1:-}"
 if [[ -z "${TIER}" || $# -ne 1 ]]; then
-	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full>" >&2
+	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full|kubernetes>" >&2
 	exit 2
 fi
 
@@ -415,11 +422,5 @@ run_child "${PYTHON_BIN}" "${MERGE_SCRIPT}" "${TIER}" "${phase_reports[@]}" || {
 	echo "ERROR: failed to merge ODH phase reports" >&2
 	[[ "${status}" != 0 ]] || status="${merge_status}"
 }
-if [[ -f "${merged_report}" ]]; then
-	if command -v xsltproc >/dev/null 2>&1; then
-		xsltproc --stringparam title "e2e-odh-${TIER}" "${ROOT}/scripts/junit-to-html.xsl" "${merged_report}" > "${html_report}" || echo "WARNING: failed to render HTML report" >&2
-	else
-		echo "WARNING: xsltproc not found; HTML report unavailable" >&2
-	fi
-fi
+e2e_render_html "${merged_report}" "e2e-odh-${TIER}" "${html_report}"
 exit "${status}"
