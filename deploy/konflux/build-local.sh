@@ -43,6 +43,9 @@ cp -p "${REPO_ROOT}/.cargo/config.toml" "${CONFIG_BACKUP_DIR}/root-config.toml"
 if [[ -f "${REPO_ROOT}/e2e/rust/.cargo/config.toml" ]]; then
     cp -p "${REPO_ROOT}/e2e/rust/.cargo/config.toml" "${CONFIG_BACKUP_DIR}/e2e-config.toml"
 fi
+if [[ -f "${REPO_ROOT}/tests/suites/conformance/.cargo/config.toml" ]]; then
+    cp -p "${REPO_ROOT}/tests/suites/conformance/.cargo/config.toml" "${CONFIG_BACKUP_DIR}/conformance-config.toml"
+fi
 cleanup() {
     local i
     for ((i = 0; i < ${#RESTORE_FILES[@]}; i += 2)); do
@@ -56,6 +59,12 @@ cleanup() {
         rmdir "${REPO_ROOT}/e2e/rust/.cargo" 2>/dev/null || true
     fi
     rm -rf "${REPO_ROOT}/deploy/konflux/cargo-auditable/.cargo"
+    if [[ -f "${CONFIG_BACKUP_DIR}/conformance-config.toml" ]]; then
+        cp -p "${CONFIG_BACKUP_DIR}/conformance-config.toml" "${REPO_ROOT}/tests/suites/conformance/.cargo/config.toml"
+    else
+        rm -f "${REPO_ROOT}/tests/suites/conformance/.cargo/config.toml"
+        rmdir "${REPO_ROOT}/tests/suites/conformance/.cargo" 2>/dev/null || true
+    fi
     for p in "${CLEANUP_PATHS[@]}"; do
         rm -rf "$p"
     done
@@ -101,6 +110,7 @@ build_image() {
             prefetch_input="[
             {\"path\": \".\", \"type\": \"cargo\"},
             {\"path\": \"e2e/rust\", \"type\": \"cargo\"},
+            {\"path\": \"tests/suites/conformance\", \"type\": \"cargo\"},
             {\"path\": \"odh\", \"type\": \"pip\", \"requirements_files\": [\"requirements.txt\"], \"binary\": {\"packages\": \":all:\", \"arch\": \"x86_64,aarch64\", \"os\": \"linux\", \"py_version\": 311, \"py_impl\": \"cp\"}},
             {\"path\": \"${konfig_dir}\", \"type\": \"rpm\"},
             {\"path\": \"${konfig_dir}\", \"type\": \"generic\", \"lockfile\": \"generic-fetcher.yaml\"}
@@ -208,6 +218,8 @@ build_image() {
             --workspace-remap /home/odh/openshell-e2e-odh/e2e/rust \
             --config-file /home/odh/openshell-e2e-odh/.config/nextest.toml \
             --profile e2e-odh --message-format json > /dev/null
+        podman run --rm --network none --platform "${PLATFORM}" --entrypoint bash "${image_name}" \
+            odh/scripts/kubernetes-image.sh --check
     else
         podman run --rm --platform "${PLATFORM}" "openshell-${component}-konflux" --help 2>&1 | sed -n 1,3p
     fi

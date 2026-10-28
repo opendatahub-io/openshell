@@ -10,7 +10,7 @@
 # `sandbox connect` path (round-trip-heavy SSH over SPDY), so the harness drives
 # the gateway through a passthrough OpenShift Route with mTLS instead. This
 # overlay turns TLS back on (values-skaffold.yaml disables it), enables the Route,
-# and promotes the cert-verified caller to a dev principal.
+# and authenticates users from their verified client certificates.
 #
 # Image pull policy: force `Always` so runs against the `latest` upstream image
 # actually use it, instead of a stale copy cached on the cluster nodes.
@@ -20,14 +20,10 @@
 # supplies `openshiftRoute.host` and `pkiInitJob.serverDnsNames[0]` via --set at
 # install time (both are the cluster-derived Route hostname).
 #
-# Security: this is NOT an open gateway. `server.tls.clientCaSecretName` defaults
-# to `openshell-server-client-ca` and there is no OIDC, so `require_client_auth`
-# is true and mTLS is MANDATORY at the TLS handshake — a caller with only the
-# Route URL and no client certificate is rejected before any RPC. The passthrough
-# Route terminates TLS at the gateway pod, so this holds end-to-end.
-# `allow_unauthenticated_users` only promotes the already cert-verified caller to a
-# dev principal at the app layer (mtls_auth is unsupported with the Kubernetes
-# driver). Both are required together; the client certificate is the access gate.
+# User RPCs require mTLS authentication. Certificates remain optional at the
+# TLS handshake so supervisors can authenticate with sandbox bearer tokens.
+# The harness verifies a protected RPC succeeds with the user certificate and
+# returns UNAUTHENTICATED without credentials over the passthrough Route.
 gateway:
   image:
     pullPolicy: Always
@@ -37,7 +33,9 @@ server:
 
 gatewayConfig:
   openshell.gateway.auth:
-    allow_unauthenticated_users: true
+    allow_unauthenticated_users: false
+  openshell.gateway.mtls_auth:
+    enabled: true
   openshell.drivers.kubernetes:
     sandbox_runtime_image_pull_policy: always
     supervisor_image_pull_policy: always

@@ -7,6 +7,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export OPENSHELL_BIN="${OPENSHELL_BIN:-${ROOT}/target/debug/openshell}"
+# Packaged Kubernetes execution uses the upstream gateway lifecycle directly.
+if [[ "${1:-}" == kubernetes && $# == 1 ]]; then
+	exec bash "${SCRIPT_DIR}/kubernetes-image.sh"
+fi
 PLAN_RESOLVER="${ROOT}/e2e/rust/tests/odh/tier_plan.py"
 TIERS_FILE="${ROOT}/e2e/rust/tests/odh/tiers.toml"
 DEPLOY_SCRIPT="${OPENSHELL_E2E_DEPLOY_SCRIPT:-${SCRIPT_DIR}/openshell-deploy-from-quay.sh}"
@@ -15,7 +19,7 @@ MERGE_SCRIPT="${OPENSHELL_E2E_REPORT_MERGER:-${SCRIPT_DIR}/merge-e2e-odh-reports
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TIER="${1:-}"
 if [[ -z "${TIER}" || $# -ne 1 ]]; then
-	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full>" >&2
+	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full|kubernetes>" >&2
 	exit 2
 fi
 

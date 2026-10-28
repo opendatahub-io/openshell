@@ -43,3 +43,12 @@ run = "odh/scripts/e2e-odh-entrypoint.sh tier2"
 description = "Run Tier 3: upstream + ODH, negative and destructive tests"
 depends = ["build:openshell-cli"]
 run = "odh/scripts/e2e-odh-entrypoint.sh tier3"
+
+["test:odh-image"]
+description = "Check packaged Kubernetes dispatch and OpenShift Route authentication"
+run = """
+bash odh/scripts/tests/test-route-auth.sh
+uv run --no-project python odh/scripts/tests/test_kubernetes_image.py
+"""
+run_windows = "echo Skipping test:odh-image: Unix cluster wrappers do not apply on Windows."
+hide = true
