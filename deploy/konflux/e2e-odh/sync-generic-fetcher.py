@@ -200,6 +200,19 @@ def check(versions: dict[str, str], artifacts: list[Artifact]) -> list[str]:
 
 
 RETRY_ATTEMPTS = 3
+MAX_RETRY_AFTER_SECONDS = 60
+
+
+def retry_delay(retry_after: str | None, attempt: int) -> int:
+    """Return a bounded Retry-After delay or the exponential fallback."""
+    fallback_delay = 2 ** (attempt - 1)
+    if not retry_after or not retry_after.isascii() or not retry_after.isdecimal():
+        return fallback_delay
+
+    significant_digits = retry_after.lstrip("0")
+    if len(significant_digits) > len(str(MAX_RETRY_AFTER_SECONDS)):
+        return MAX_RETRY_AFTER_SECONDS
+    return min(int(significant_digits or "0"), MAX_RETRY_AFTER_SECONDS)
 
 
 def _with_retry(url: str, consume, what: str):
@@ -228,11 +241,7 @@ def _with_retry(url: str, consume, what: str):
             if isinstance(last_error, urllib.error.HTTPError)
             else None
         )
-        delay = (
-            int(retry_after)
-            if retry_after and retry_after.isdigit()
-            else 2 ** (attempt - 1)
-        )
+        delay = retry_delay(retry_after, attempt)
         print(
             f"{url}: {last_error}; attempt {attempt}/{RETRY_ATTEMPTS} failed "
             f"while {what}, retrying in {delay}s",
