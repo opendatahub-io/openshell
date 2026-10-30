@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import sys
 import unittest
+from contextlib import redirect_stderr
 from email.message import Message
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 from urllib.error import HTTPError
 
 
@@ -58,47 +60,128 @@ class _Opener:
         return response
 
 
+def _rate_limited(retry_after: str | None = None) -> HTTPError:
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return HTTPError(
+        "https://example.test/artifact", 429, "rate limited", headers, None
+    )
+
+
+def _sha256_with_responses(responses: list[_Response | Exception]):
+    opener = _Opener(responses)
+    with (
+        patch.object(
+            sync_generic_fetcher.urllib.request,
+            "build_opener",
+            return_value=opener,
+        ),
+        patch.object(sync_generic_fetcher.time, "sleep") as sleep,
+    ):
+        checksum = sync_generic_fetcher.sha256_of("https://example.test/artifact")
+    return checksum, sleep
+
+
 class SyncGenericFetcherTests(unittest.TestCase):
     def test_sha256_of_retries_with_a_fresh_hash(self) -> None:
         complete = b"the complete retry response"
-        opener = _Opener(
+        checksum, _ = _sha256_with_responses(
             [
                 _Response([b"partial first response", OSError("interrupted")]),
                 _Response([complete, b""]),
             ]
         )
-        with (
-            patch.object(
-                sync_generic_fetcher.urllib.request,
-                "build_opener",
-                return_value=opener,
-            ),
-            patch.object(sync_generic_fetcher.time, "sleep"),
-        ):
-            checksum = sync_generic_fetcher.sha256_of("https://example.test/artifact")
 
         self.assertEqual(checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}")
 
     def test_retry_after_is_honored_for_rate_limiting(self) -> None:
-        headers = Message()
-        headers["Retry-After"] = "7"
-        rate_limited = HTTPError(
-            "https://example.test/artifact", 429, "rate limited", headers, None
-        )
-        complete = b"complete retry response"
-        opener = _Opener([rate_limited, _Response([complete, b""])])
-        with (
-            patch.object(
-                sync_generic_fetcher.urllib.request,
-                "build_opener",
-                return_value=opener,
-            ),
-            patch.object(sync_generic_fetcher.time, "sleep") as sleep,
+        for retry_after, expected_delay in (
+            ("0", 0),
+            ("00", 0),
+            ("007", 7),
+            ("7", 7),
+            ("10", 10),
+            ("60", 60),
+            ("60 ", 60),
+            ("0" * 10_000 + "7", 7),
         ):
-            checksum = sync_generic_fetcher.sha256_of("https://example.test/artifact")
+            with self.subTest(retry_after=retry_after[:8]):
+                complete = b"complete retry response"
+                checksum, sleep = _sha256_with_responses(
+                    [_rate_limited(retry_after), _Response([complete, b""])]
+                )
+
+                self.assertEqual(
+                    checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}"
+                )
+                sleep.assert_called_once_with(expected_delay)
+
+    def test_retry_after_is_capped_for_rate_limiting(self) -> None:
+        for retry_after in ("61", "3600", "9" * 10_000):
+            with self.subTest(retry_after=retry_after[:4]):
+                complete = b"complete retry response"
+                checksum, sleep = _sha256_with_responses(
+                    [_rate_limited(retry_after), _Response([complete, b""])]
+                )
+
+                self.assertEqual(
+                    checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}"
+                )
+                sleep.assert_called_once_with(60)
+
+    def test_retry_after_falls_back_to_exponential_backoff_when_invalid(self) -> None:
+        for retry_after in (None, "later", "²", "\N{ARABIC-INDIC DIGIT SEVEN}"):
+            with self.subTest(retry_after=retry_after):
+                complete = b"complete retry response"
+                checksum, sleep = _sha256_with_responses(
+                    [_rate_limited(retry_after), _Response([complete, b""])]
+                )
+
+                self.assertEqual(
+                    checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}"
+                )
+                sleep.assert_called_once_with(1)
+
+    def test_retry_after_fallback_doubles_on_consecutive_retries(self) -> None:
+        complete = b"complete retry response"
+        checksum, sleep = _sha256_with_responses(
+            [_rate_limited(), _rate_limited(), _Response([complete, b""])]
+        )
 
         self.assertEqual(checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}")
-        sleep.assert_called_once_with(7)
+        self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_retry_after_invalid_fallback_doubles_on_consecutive_retries(self) -> None:
+        complete = b"complete retry response"
+        checksum, sleep = _sha256_with_responses(
+            [_rate_limited("later"), _rate_limited("later"), _Response([complete, b""])]
+        )
+
+        self.assertEqual(checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}")
+        self.assertEqual(sleep.call_args_list, [call(1), call(2)])
+
+    def test_retry_after_is_honored_after_a_fallback_retry(self) -> None:
+        complete = b"complete retry response"
+        checksum, sleep = _sha256_with_responses(
+            [_rate_limited(), _rate_limited("7"), _Response([complete, b""])]
+        )
+
+        self.assertEqual(checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}")
+        self.assertEqual(sleep.call_args_list, [call(1), call(7)])
+
+    def test_capped_retry_after_reports_the_requested_delay(self) -> None:
+        complete = b"complete retry response"
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _, sleep = _sha256_with_responses(
+                [_rate_limited("3600"), _Response([complete, b""])]
+            )
+
+        sleep.assert_called_once_with(60)
+        self.assertIn(
+            "retrying in 60s; server Retry-After was 3600s", stderr.getvalue()
+        )
 
     def test_published_checksum_requires_the_sidecar_asset_name(self) -> None:
         with (
