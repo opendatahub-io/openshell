@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -36,16 +37,26 @@ def merge(tier: str, paths: list[Path], results_dir: Path) -> Path:
         raise ValueError("no phase reports were available to merge")
     for suite in suites:
         cases.extend(suite.iter("testcase"))
+
+    def case_time(case: ET.Element) -> float:
+        try:
+            return float(case.get("time", "0"))
+        except ValueError:
+            return 0.0
+
     totals = {
         "tests": len(cases),
-        "failures": sum(1 for case in cases for child in case if child.tag == "failure"),
+        "failures": sum(
+            1 for case in cases for child in case if child.tag == "failure"
+        ),
         "errors": sum(1 for case in cases for child in case if child.tag == "error"),
         "skipped": sum(1 for case in cases for child in case if child.tag == "skipped"),
-        "time": f"{sum(float(case.get('time', '0')) for case in cases):.6f}",
+        "time": f"{sum(case_time(case) for case in cases):.6f}",
     }
     root = ET.Element("testsuites", {key: str(value) for key, value in totals.items()})
     for suite in suites:
         root.append(suite)
+    ET.indent(root, space="    ")
     xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
     results_dir.mkdir(parents=True, exist_ok=True)
     xml_path = results_dir / f"e2e-odh-{tier}-xunit.xml"
@@ -53,25 +64,30 @@ def merge(tier: str, paths: list[Path], results_dir: Path) -> Path:
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(xml_bytes)
-        os.replace(temporary, xml_path)
+        Path(temporary).replace(xml_path)
     except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        with contextlib.suppress(FileNotFoundError):
+            Path(temporary).unlink()
         raise
     return xml_path
 
 
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
-        print("Usage: merge-e2e-odh-reports.py <tier> <phase-report.xml>...", file=sys.stderr)
+        print(
+            "Usage: merge-e2e-odh-reports.py <tier> <phase-report.xml>...",
+            file=sys.stderr,
+        )
         return 2
     tier = argv[1]
     if not tier.replace("-", "").replace("_", "").isalnum():
         print(f"invalid tier name: {tier!r}", file=sys.stderr)
         return 2
-    results_dir = Path(os.environ.get("OPENSHELL_E2E_RESULTS_DIR", Path(__file__).resolve().parents[2] / "results"))
+    results_dir = Path(
+        os.environ.get(
+            "OPENSHELL_E2E_RESULTS_DIR", Path(__file__).resolve().parents[2] / "results"
+        )
+    )
     try:
         xml_path = merge(tier, [Path(arg) for arg in argv[2:]], results_dir)
     except (OSError, ET.ParseError, ValueError) as exc:

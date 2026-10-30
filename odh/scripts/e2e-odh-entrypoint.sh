@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${SCRIPT_DIR}/python-e2e-common.sh"
 export OPENSHELL_BIN="${OPENSHELL_BIN:-${ROOT}/target/debug/openshell}"
 
 # Retry transient discovery failures at most three times, with 1s/2s backoff.
@@ -189,14 +190,18 @@ MERGE_SCRIPT="${OPENSHELL_E2E_REPORT_MERGER:-${SCRIPT_DIR}/merge-e2e-odh-reports
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TIER="${1:-}"
 if [[ -z "${TIER}" || $# -ne 1 ]]; then
-	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full>" >&2
+	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full|python>" >&2
 	exit 2
 fi
 
 plan_json="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" "${TIER}" "${TIERS_FILE}")"
-phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"] for p in json.load(sys.stdin)["phases"]))')"
+phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"]+"|"+",".join(p["runners"]) for p in json.load(sys.stdin)["phases"]))')"
 phase_count=0
 while IFS= read -r _; do ((phase_count+=1)); done <<< "${phase_lines}"
+has_python_runner=0
+if printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; sys.exit(0 if any("python" in p["runners"] for p in json.load(sys.stdin)["phases"]) else 1)'; then
+	has_python_runner=1
+fi
 deploy_enabled="${OPENSHELL_E2E_DEPLOY_GATEWAY:-1}"
 if [[ "${deploy_enabled}" == 0 && "${phase_count}" -gt 1 ]]; then
 	echo "ERROR: OPENSHELL_E2E_DEPLOY_GATEWAY=0 only supports single-phase tiers; this tier uses multiple gateway modes" >&2
@@ -257,12 +262,29 @@ results_dir="${OPENSHELL_E2E_RESULTS_DIR:-${ROOT}/results}"
 mkdir -p "${results_dir}"
 results_dir="$(cd "${results_dir}" && pwd)"
 export OPENSHELL_E2E_RESULTS_DIR="${results_dir}"
-phase_reports=()
+report_files=()
+runner_report_path() {
+	local phase="$1" runner="$2"
+	case "${runner}" in
+		nextest) printf '%s/e2e-odh-%s-%s.xml\n' "${results_dir}" "${TIER}" "${phase}" ;;
+		python) printf '%s/e2e-odh-%s-%s-python.xml\n' "${results_dir}" "${TIER}" "${phase}" ;;
+		*)
+			echo "ERROR: unknown runner ${runner} for ${TIER}/${phase}" >&2
+			return 1
+			;;
+	esac
+}
 for phase_line in ${phase_lines}; do
 	phase="${phase_line%%|*}"
-	phase_report="${results_dir}/e2e-odh-${TIER}-${phase}.xml"
-	phase_reports+=("${phase_report}")
-	rm -f "${phase_report}" "${phase_report%.xml}.html"
+	phase_rest="${phase_line#*|}"
+	runners="${phase_rest#*|}"
+	IFS=',' read -r -a phase_runners <<< "${runners}"
+	for runner in "${phase_runners[@]}"; do
+		report_path="$(runner_report_path "${phase}" "${runner}")" || exit 2
+		report_files+=("${report_path}")
+		rm -f "${report_path}"
+		[[ "${runner}" != nextest ]] || rm -f "${report_path%.xml}.html"
+	done
 done
 merged_report="${results_dir}/e2e-odh-${TIER}-xunit.xml"
 html_report="${results_dir}/e2e-odh-${TIER}.html"
@@ -308,7 +330,14 @@ cleanup_managed_namespaces() {
 cleanup() {
 	local result=$?
 	trap - EXIT
-	trap '' INT TERM
+	trap '' INT TERM HUP
+	if [[ -n "${child_pid:-}" ]]; then
+		# Cluster teardown must not race a live test suite: stop the child
+		# tree first even when the EXIT trap fires without INT/TERM.
+		stop_child_tree TERM "${child_pid}"
+		wait "${child_pid}" 2>/dev/null || true
+		child_pid=""
+	fi
 	if [[ -n "${active_state}" ]]; then
 		if ! cleanup_managed_namespaces "${active_state}"; then
 			echo "ERROR: managed-workspace namespace cleanup failed" >&2
@@ -327,32 +356,117 @@ cleanup() {
 	fi
 	exit "${result}"
 }
+# Children run in their own process group (see run_child), so the
+# negative-PID kill reaches the whole tree: the Python tier executes
+# through a Bash wrapper whose interpreter and xdist workers are
+# grandchildren that a single-PID signal never reaches. Mirrors stop_child
+# TERM the child's process group, wait a bounded grace period, then KILL —
+# the e2e/run.sh stop_child pattern, with the group resumed first: a
+# stopped member cannot handle TERM and would otherwise burn the whole
+# grace period. Before setsid() creates that group, the unreaped launcher PID
+# is still this shell's direct child and can be signalled safely; once the
+# group exists, only group signals reach the whole execution tree.
+stop_child_tree() {
+	local signal="$1" pid="$2" _ group_ready=0
+	# os.setsid() runs in the launcher after fork. Briefly wait for its process
+	# group so an immediately arriving cancellation cannot miss the whole tree.
+	for _ in $(seq 1 20); do
+		if [[ "$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]')" == "${pid}" ]]; then
+			group_ready=1
+			break
+		fi
+		kill -0 "${pid}" 2>/dev/null || return 0
+		sleep 0.05
+	done
+	if [[ "${group_ready}" != 1 ]]; then
+		# The launcher is still a direct, unreaped child. Do not wait forever
+		# for a group that has not appeared: stop it before teardown can start.
+		kill -"${signal}" "${pid}" 2>/dev/null || true
+		return 0
+	fi
+	kill -CONT -- "-${pid}" 2>/dev/null || true
+	kill -"${signal}" -- "-${pid}" 2>/dev/null || true
+	for _ in $(seq 1 30); do
+		kill -0 -- "-${pid}" 2>/dev/null || return 0
+		sleep 1
+	done
+	kill -KILL -- "-${pid}" 2>/dev/null || true
+}
+
 stop_child() {
 	local signal="$1" code="$2"
-	trap '' INT TERM
+	trap '' INT TERM HUP
 	if [[ -n "${child_pid}" ]]; then
-		kill -"${signal}" "${child_pid}" 2>/dev/null || true
-		wait "${child_pid}" || true
+		stop_child_tree "${signal}" "${child_pid}"
+		wait "${child_pid}" 2>/dev/null || true
 		child_pid=""
 	fi
 	exit "${code}"
 }
+restore_signal_traps() {
+	trap 'stop_child TERM 130' INT
+	trap 'stop_child TERM 143' TERM
+	trap 'stop_child TERM 129' HUP
+}
 run_child() {
-	local result=0
-	"$@" &
+	local result=0 pending_signal=""
+	# Launch in a new session, the e2e/run.sh start_child pattern: the
+	# child never receives the terminal's SIGTTIN (a stdin-reading child
+	# in a job-control group would stop and hang the wait forever), and
+	# an SSH disconnect's SIGHUP reaches this entrypoint alone — where
+	# the traps below tear the whole tree down — instead of killing the
+	# children mid-flight with nothing left to clean up the cluster.
+	# Defer teardown while the launcher is being forked. A signal can otherwise
+	# reach the parent before $! is stored, leaving the launched process alive.
+	trap 'pending_signal=INT' INT
+	trap 'pending_signal=TERM' TERM
+	trap 'pending_signal=HUP' HUP
+	"${PYTHON_BIN}" -c $'import os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])' "$@" &
 	child_pid=$!
-	wait "${child_pid}" || result=$?
+	restore_signal_traps
+	case "${pending_signal}" in
+		INT) stop_child TERM 130 ;;
+		TERM) stop_child TERM 143 ;;
+		HUP) stop_child TERM 129 ;;
+	esac
+	wait "${child_pid}" 2>/dev/null || result=$?
 	child_pid=""
 	return "${result}"
 }
 trap cleanup EXIT
-trap 'stop_child TERM 130' INT
-trap 'stop_child TERM 143' TERM
-phase_index=0
+restore_signal_traps
+# An SSH disconnect delivers SIGHUP to this entrypoint only (the children
+# run in their own sessions): tear the tree down instead of leaving
+# orphans running against the cluster.
+trap 'stop_child TERM 129' HUP
+
+# Flags shared by the strict gate check and the real Python run so the two
+# cannot drift apart.
+# The python_files pattern is shared with run-python-e2e.sh through the
+# environment (an array cannot cross the exec boundary into the runner's
+# own session) so the strict gate check and the real run cannot drift.
+export OPENSHELL_E2E_PYTEST_PYTHON_FILES="test_*.py *_test.py"
+export PYTHON_BIN
+
+# When a phase runs the Python suite, verify its gates before any
+# deployment: a gates file referencing tests the current collection does
+# not contain must cost seconds, not a gateway deployment. The check is a
+# single-process collection on purpose — under xdist the strict failure
+# cannot surface cleanly (the worker crashes instead of reporting the
+# UsageError), which is also why the real run does not set STRICT itself.
+if [[ "${has_python_runner}" == 1 ]]; then
+	if ! run_child env OPENSHELL_E2E_OIDC=0 OPENSHELL_ODH_PYTHON_GATES_STRICT=1 \
+		"${SCRIPT_DIR}/run-python-e2e.sh" --collect-only; then
+		echo "ERROR: Python E2E preflight failed; see preceding output" >&2
+		exit 2
+	fi
+fi
+
 for phase_line in ${phase_lines}; do
 	phase="${phase_line%%|*}"
-	mode="${phase_line#*|}"
-	phase_report="${phase_reports[phase_index]}"
+	phase_rest="${phase_line#*|}"
+	mode="${phase_rest%%|*}"
+	runners="${phase_rest#*|}"
 	phase_deploy_status=0
 	phase_test_status=0
 	phase_managed_cleanup_status=0
@@ -376,7 +490,34 @@ for phase_line in ${phase_lines}; do
 			fi
 		fi
 		if [[ "${phase_test_status}" == 0 ]]; then
-			run_child "${TEST_SCRIPT}" "${TIER}" "${phase}" "${phase_report}" || phase_test_status=$?
+			# The runners come from the tier plan in execution order: the
+			# nextest selection writes the phase report, and the python
+			# runner shares the phase's deployment and appends its own
+			# report (the merge skips missing reports, so include it even
+			# on failure to surface what ran).
+			IFS=',' read -r -a phase_runners <<< "${runners}"
+			for runner in "${phase_runners[@]}"; do
+				if [[ "${phase_test_status}" != 0 ]]; then
+					echo "WARNING: skipping ${runner} runner for ${TIER}/${phase} after an earlier runner failed" >&2
+					break
+				fi
+				report_path="$(runner_report_path "${phase}" "${runner}")" || {
+					phase_test_status=$?
+					break
+				}
+				case "${runner}" in
+					nextest)
+						run_child "${TEST_SCRIPT}" "${TIER}" "${phase}" "${report_path}" || phase_test_status=$?
+						;;
+					python)
+						run_child "${SCRIPT_DIR}/run-python-e2e.sh" "${report_path}" || phase_test_status=$?
+						;;
+						*)
+						echo "ERROR: unknown runner ${runner} for ${TIER}/${phase}" >&2
+						phase_test_status=1
+						;;
+				esac
+			done
 		fi
 	else
 		echo "ERROR: deployment/preflight failed for ${TIER}/${phase} (${phase_deploy_status})" >&2
@@ -407,14 +548,23 @@ for phase_line in ${phase_lines}; do
 	if [[ "${status}" == 0 && "${phase_test_status}" != 0 ]]; then status="${phase_test_status}"; fi
 	if [[ "${status}" == 0 && "${phase_managed_cleanup_status}" != 0 ]]; then status="${phase_managed_cleanup_status}"; fi
 	if [[ "${teardown_failed}" == 1 ]]; then break; fi
-	((phase_index+=1))
 done
 
-run_child "${PYTHON_BIN}" "${MERGE_SCRIPT}" "${TIER}" "${phase_reports[@]}" || {
-	merge_status=$?
-	echo "ERROR: failed to merge ODH phase reports" >&2
-	[[ "${status}" != 0 ]] || status="${merge_status}"
-}
+report_available=0
+for report_path in "${report_files[@]}"; do
+	if [[ -f "${report_path}" ]]; then
+		report_available=1
+		break
+	fi
+done
+
+if [[ "${report_available}" == 1 ]]; then
+	run_child "${PYTHON_BIN}" "${MERGE_SCRIPT}" "${TIER}" "${report_files[@]}" || {
+		merge_status=$?
+		echo "ERROR: failed to merge ODH phase reports" >&2
+		[[ "${status}" != 0 ]] || status="${merge_status}"
+	}
+fi
 if [[ -f "${merged_report}" ]]; then
 	if command -v xsltproc >/dev/null 2>&1; then
 		xsltproc --stringparam title "e2e-odh-${TIER}" "${ROOT}/scripts/junit-to-html.xsl" "${merged_report}" > "${html_report}" || echo "WARNING: failed to render HTML report" >&2
