@@ -30,13 +30,15 @@ GATEWAY_HOST = "openshell.ai/installer-gateway-host"
 INSTALL_STATE = "openshell-installer"
 OIDC_SECRET = "openshell-dashboard-oidc"
 OIDC_CA = "openshell-oidc-ca"
+MIN_DASHBOARD_USER_ROLE_CHART = (0, 1, 2)
 VERSION = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
-    r"(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?P<prerelease>-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
     r"(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?"
     r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 )
 DNS = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 # Expose operational chart settings without allowing overlays to replace the
 # installer's identity, TLS, service naming, or namespace contract.
@@ -148,8 +150,13 @@ def load_config(path, namespace=None):
             isinstance(item["chart"], str) and item["chart"].startswith("oci://"),
             f"{name}.chart must be an OCI chart reference",
         )
+        version_match = (
+            VERSION.fullmatch(item["version"])
+            if isinstance(item["version"], str)
+            else None
+        )
         require(
-            isinstance(item["version"], str) and VERSION.fullmatch(item["version"]),
+            version_match,
             f"{name}.version must be exact SemVer (no latest or version ranges)",
         )
         require(
@@ -204,7 +211,7 @@ def load_config(path, namespace=None):
             )
             if image.get("digest"):
                 require(
-                    re.fullmatch(r"sha256:[0-9a-f]{64}", image["digest"]),
+                    DIGEST.fullmatch(image["digest"]),
                     f"{name}.images.{component}.digest must be sha256: followed by "
                     "64 lowercase hexadecimal characters",
                 )
@@ -286,21 +293,41 @@ def load_config(path, namespace=None):
                 f"Missing or empty oidc.{key}",
             )
             oidc[key] = str(source)
-    dashboard_release = config["dashboard"]["version"].split("+", 1)[0]
-    dashboard_core, prerelease_separator, _ = dashboard_release.partition("-")
-    dashboard_version = tuple(int(part) for part in dashboard_core.split("."))
-    before_role_chart = dashboard_version < (0, 1, 2) or (
-        dashboard_version == (0, 1, 2) and bool(prerelease_separator)
-    )
-    if before_role_chart and oidc["user_role"] != "user":
-        print(
-            "Warning: dashboard charts before 0.1.2 may not pass oidc.userRole. "
-            "Dashboard builds with the entitlement page may deny users with only "
-            f"the {oidc['user_role']!r} role. Pair chart 0.1.2 or later with a "
-            "matching image, or use a pre-entitlement dashboard build.",
-            file=sys.stderr,
-        )
     return config
+
+
+def warn_if_dashboard_user_role_missing(manifest, role, chart_version):
+    """Warn from the rendered chart, since development versions do not imply features."""
+    if role == "user":
+        return
+    try:
+        for resource in yaml.safe_load_all(manifest):
+            if not isinstance(resource, dict):
+                continue
+            if resource.get("kind") == "Pod":
+                pod = resource
+            elif resource.get("kind") in ("Deployment", "StatefulSet", "DaemonSet"):
+                pod = resource.get("spec", {}).get("template", {})
+            else:
+                continue
+            for container in pod.get("spec", {}).get("containers", []):
+                if any(
+                    env.get("name") == "USER_ROLE" and env.get("value") == role
+                    for env in container.get("env", [])
+                    if isinstance(env, dict)
+                ):
+                    return
+    except yaml.YAMLError:
+        # Helm output can include Secrets; do not include parser excerpts.
+        raise ValueError("Cannot inspect dashboard chart manifest") from None
+    minimum_chart = ".".join(str(part) for part in MIN_DASHBOARD_USER_ROLE_CHART)
+    print(
+        f"Warning: dashboard chart {chart_version} did not render USER_ROLE={role!r}. "
+        "Dashboard builds with the entitlement page may deny users with only "
+        f"that role. Pair chart {minimum_chart} or later with a matching image, "
+        "or use a pre-entitlement dashboard build.",
+        file=sys.stderr,
+    )
 
 
 def chart_values(config):
@@ -967,7 +994,7 @@ def main():
             value_file = root / f"{name}.json"
             value_file.write_text(json.dumps(values))
             release = ("openshell", "openshell-dashboard")[index]
-            installer.run(
+            manifest = installer.run(
                 [
                     "helm",
                     "template",
@@ -983,6 +1010,10 @@ def main():
                     "agents.x-k8s.io/v1beta1",
                 ]
             )
+            if name == "dashboard":
+                warn_if_dashboard_user_role_missing(
+                    manifest, config["oidc"]["user_role"], config[name]["version"]
+                )
             charts.append(chart)
             files.append(value_file)
         print(

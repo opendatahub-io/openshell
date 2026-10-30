@@ -174,10 +174,11 @@ class InstallTests(unittest.TestCase):
             ("gateway", "gateway"),
             ("gateway", "supervisor"),
             ("gateway", "sandboxRuntime"),
+            ("gateway", "sandbox"),
             ("dashboard", "dashboard"),
         ):
             with self.subTest(section=section, component=component):
-                self.config[section]["images"][component]["digest"] = (
+                self.config[section]["images"].setdefault(component, {})["digest"] = (
                     "REPLACE_WITH_VERIFIED_IMAGE_DIGEST"
                 )
                 with self.assertRaisesRegex(ValueError, "digest must be sha256"):
@@ -194,38 +195,50 @@ class InstallTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "digest must be sha256"):
                     self.load()
 
-    def test_empty_image_digest_allows_tag_fallback(self):
+    def test_empty_image_digest_is_accepted_and_passed_to_chart_values(self):
         image = self.config["gateway"]["images"]["gateway"]
         image["digest"] = ""
         image["tag"] = "v0.1.3-rhaiv.3"
         gateway, _ = installer.chart_values(self.load())
         self.assertEqual(gateway["gateway"]["image"], image)
 
-    def test_warns_when_old_dashboard_chart_cannot_pass_custom_user_role(self):
-        for version in ("0.1.1", "0.1.2-rc.1"):
+    def test_dashboard_role_warning_uses_rendered_chart_capability(self):
+        def manifest(role=None):
+            env = [{"name": "ADMIN_ROLE", "value": "openshell-admin"}]
+            if role is not None:
+                env.append({"name": "USER_ROLE", "value": role})
+            return json.dumps(
+                {
+                    "kind": "Deployment",
+                    "spec": {"template": {"spec": {"containers": [{"env": env}]}}},
+                }
+            )
+
+        for version in ("0.1.1", "0.0.0-dev.03995be"):
             with self.subTest(version=version):
-                self.config["dashboard"]["version"] = version
                 stderr = io.StringIO()
                 with redirect_stderr(stderr):
-                    self.load()
-                self.assertIn("charts before 0.1.2", stderr.getvalue())
-                self.assertIn("openshell-user", stderr.getvalue())
+                    installer.warn_if_dashboard_user_role_missing(
+                        manifest(), "openshell-user", version
+                    )
+                self.assertIn(version, stderr.getvalue())
+                self.assertIn(
+                    "did not render USER_ROLE='openshell-user'", stderr.getvalue()
+                )
 
-        self.config["dashboard"]["version"] = "0.1.1"
-        self.config["oidc"]["user_role"] = "user"
+        for version in ("0.1.2", "0.0.0-dev.e7fdd6b"):
+            with self.subTest(version=version):
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    installer.warn_if_dashboard_user_role_missing(
+                        manifest("openshell-user"), "openshell-user", version
+                    )
+                self.assertEqual(stderr.getvalue(), "")
+
         stderr = io.StringIO()
         with redirect_stderr(stderr):
-            self.load()
+            installer.warn_if_dashboard_user_role_missing(manifest(), "user", "0.1.1")
         self.assertEqual(stderr.getvalue(), "")
-
-        self.config["oidc"]["user_role"] = "openshell-user"
-        for version in ("0.1.2", "0.1.2+build.1"):
-            with self.subTest(version=version):
-                self.config["dashboard"]["version"] = version
-                stderr = io.StringIO()
-                with redirect_stderr(stderr):
-                    self.load()
-                self.assertEqual(stderr.getvalue(), "")
 
     def test_yaml_overlays_merge_in_order_and_preserve_managed_values(self):
         (self.root / "base.yaml").write_text(
@@ -434,16 +447,29 @@ class InstallTests(unittest.TestCase):
                 "repository": f"team/{component.lower()}",
                 "digest": f"sha256:{digit * 64}",
             }
+        self.config["gateway"]["images"]["sandbox"] = {
+            "repository": "team/base-sandbox",
+            "tag": "24.04",
+        }
         gateway, dashboard = installer.chart_values(self.load())
         for name, component, values in (
             ("gateway", "gateway", gateway),
             ("gateway", "supervisor", gateway),
             ("gateway", "sandboxRuntime", gateway),
+            ("gateway", "sandbox", gateway),
             ("dashboard", "dashboard", dashboard),
         ):
             self.assertEqual(
                 values[component]["image"], self.config[name]["images"][component]
             )
+
+    def test_sandbox_image_rejects_registry(self):
+        self.config["gateway"]["images"]["sandbox"] = {
+            "registry": "registry.example.com",
+            "repository": "team/base-sandbox",
+        }
+        with self.assertRaisesRegex(ValueError, "Unknown"):
+            self.load()
 
     def test_existing_admin_namespace_preserves_metadata_and_targets_releases(self):
         self.config["namespace"] = "research-team"
