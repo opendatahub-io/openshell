@@ -5,9 +5,15 @@
 # Fork-only file — see e2e/rust/tests/odh/README.md.
 #
 # Normal runs require oc authenticated to an OpenShift cluster with ODH/RHOAI
-# installed, IMAGE_TAG for the Quay images, and ALLOWED_IMAGE_REGISTRY_PREFIXES
-# for the image provenance test. The shared entrypoint deploys and tears down
-# each declared mode; see e2e/rust/tests/odh/README.md for no-deploy limits.
+# installed and ALLOWED_IMAGE_REGISTRY_PREFIXES for the image provenance test.
+# Runtime images default to the installed operator CSV; explicit image env vars
+# override discovery. Bare repository overrides require IMAGE_TAG (or Git
+# metadata). See e2e/rust/tests/odh/README.md for no-deploy limits.
+
+["test:odh-infra"]
+description = "Test ODH e2e image discovery and deployment contracts without a cluster"
+run = 'uv run --no-project "${OPENSHELL_E2E_TEST_BASH:-bash}" odh/scripts/tests/test_discover_e2e_images.sh'
+run_windows = "echo Skipping test:odh-infra: Unix ODH deployment scripts do not apply on Windows."
 
 ["build:openshell-cli"]
 description = "Build the OpenShell CLI for ODH e2e tests"

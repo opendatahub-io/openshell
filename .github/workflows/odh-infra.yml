@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: ODH Infrastructure Contracts
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/odh-infra.yml"
+      - "odh/scripts/**"
+      - "e2e/support/gateway-common.sh"
+      - "e2e/rust/tests/odh/tier_plan.py"
+      - "e2e/rust/tests/odh/tiers.toml"
+      - "deploy/helm/openshell/**"
+      - "tasks/test-odh.toml"
+      - "mise.toml"
+      - "mise.lock"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/odh-infra.yml"
+      - "odh/scripts/**"
+      - "e2e/support/gateway-common.sh"
+      - "e2e/rust/tests/odh/tier_plan.py"
+      - "e2e/rust/tests/odh/tiers.toml"
+      - "deploy/helm/openshell/**"
+      - "tasks/test-odh.toml"
+      - "mise.toml"
+      - "mise.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: odh-infra-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Discovery and deployment (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # macOS /bin/bash is 3.2; Ubuntu exercises modern Bash.
+      OPENSHELL_E2E_TEST_BASH: /bin/bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          install: false
+          experimental: true
+
+      - name: Install test runtimes
+        run: mise install --locked python uv
+
+      - name: Test discovery and deployment without a cluster
+        run: mise run --skip-tools test:odh-infra
