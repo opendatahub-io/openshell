@@ -1,11 +1,10 @@
-# Git
+# Version control
 .git
 .gitignore
+.jj
 
 # Rust build artifacts (use BuildKit cache mounts instead)
-target
 **/target
-**/node_modules
 
 # Python
 __pycache__
@@ -39,3 +38,6 @@ kubeconfig
 *.log
 *.tmp
 .DS_Store
+
+# Node
+**/node_modules
