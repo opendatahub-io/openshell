@@ -127,6 +127,8 @@ gh run list --json databaseId,status,headBranch,url --jq '.[] | {id: .databaseId
 
 For tmachine Kubernetes conformance failures, inspect the `tmachine-diagnostics-*` artifact. The K3s report includes Agent Sandbox controller state, leader leases, events, and current and previous controller logs. The conformance playbook checks reconciliation after guest boot with a temporary scheduling-gated Sandbox probe before running tests. Distinguish a failed controller probe from a failed conformance scenario; gateway connectivity and controller Deployment availability do not prove reconciliation works.
 
+For the `e2e-suites` lane (`.github/workflows/e2e-suites.yml`), the last lines of the job log give the runner's result: PASS, FAIL (exit 1) after the end of the nextest log (which names the failed tests), or ERROR (exit 2) with the step that broke. FAIL and ERROR also appear as annotations on the run's summary page. Then inspect the `e2e-results-<family>-<package>-<environment>-<installer>` artifact, which holds `junit.xml`, `nextest.log` and, after a failure, the guest's `diagnostics/`.
+
 `Pre-release` temporarily omits Codex Security from its `Security Scan` job.
 `Release` uses the passing prerelease qualification result. Other scanners and
 qualification gates still run. Use the standalone
@@ -169,8 +171,6 @@ the shared `check-protobuf-compatibility` action with `nix run .#check-protobuf-
 During `0.x`, a minor train permits compatibility findings
 as warnings; a patch train or no active train rejects them. Compare the current
 train's version with the latest stable release; commit messages are irrelevant.
-For the patch-train `v0.1.6-pre.N` exception, inspect the run summary and the
-qualification JSON's `exceptions` array; see `release-captain` for disposition.
 Compilation, baseline, and tool errors remain fatal. The `protobuf_compatibility` suite participates in
 the `release-tag-v1` qualification profile. Pre-release calls the reusable
 `release-qualification.yml` workflow after building, in parallel with publication. Release

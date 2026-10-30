@@ -345,7 +345,13 @@ start_gateway_portforward() {
       cat "${PORTFORWARD_LOG}" >&2 || true
       return 1
     fi
-    if curl -s -o /dev/null --connect-timeout 1 "http://127.0.0.1:${LOCAL_PORT}"; then
+    if [ "${OPENSHELL_E2E_KUBE_TLS:-0}" = "1" ]; then
+      # The TLS listener resets plaintext HTTP, so only check that the
+      # forward accepts TCP.
+      if (exec 3<>"/dev/tcp/127.0.0.1/${LOCAL_PORT}") 2>/dev/null; then
+        return 0
+      fi
+    elif curl -s -o /dev/null --connect-timeout 1 "http://127.0.0.1:${LOCAL_PORT}"; then
       return 0
     fi
     sleep 1
@@ -971,6 +977,38 @@ start_health_portforward() {
   return 1
 }
 
+# Shared supervisor pool members are TCP-ready before they attach to the
+# gateway, and the gateway refuses sandbox creates until a member attaches.
+wait_for_shared_supervisors() {
+  local selector="app.kubernetes.io/component=supervisor"
+  local elapsed=0 timeout=180 pods pod attached
+  pods="$(kctl -n "${NAMESPACE}" get pods -l "${selector}" -o name 2>/dev/null)"
+  [ -n "${pods}" ] || return 0
+
+  echo "Waiting for shared supervisor pool members to attach to the gateway..."
+  while [ "${elapsed}" -lt "${timeout}" ]; do
+    pods="$(kctl -n "${NAMESPACE}" get pods -l "${selector}" -o name 2>/dev/null)"
+    attached=1
+    for pod in ${pods}; do
+      if ! kctl -n "${NAMESPACE}" logs "${pod}" -c supervisor 2>/dev/null \
+        | grep -q "gateway accepted the supervisor host"; then
+        attached=0
+        break
+      fi
+    done
+    if [ -n "${pods}" ] && [ "${attached}" = "1" ]; then
+      # Placement reads the membership record the gateway writes after attach.
+      sleep 2
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo "ERROR: shared supervisor pool members did not attach within ${timeout}s" >&2
+  kctl -n "${NAMESPACE}" get pods -l "${selector}" -o wide >&2 || true
+  return 1
+}
+
 require_cmd helm
 require_cmd kubectl
 require_cmd curl
@@ -1555,6 +1593,7 @@ else
   fi
 
   start_health_portforward || exit 1
+  wait_for_shared_supervisors || exit 1
 
   export OPENSHELL_GATEWAY="${GATEWAY_NAME}"
   export OPENSHELL_E2E_DRIVER="kubernetes"

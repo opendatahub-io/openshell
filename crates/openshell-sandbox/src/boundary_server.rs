@@ -17,6 +17,7 @@ mod linux {
         BoundaryExec, BoundaryLoopbackConnector, BoundaryProcess, BoundaryTerminal, ExecSession,
     };
 
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     use std::fs::File;
     use std::io::{self, Read, Write};
     use std::mem::size_of;
@@ -4394,6 +4395,7 @@ mod linux {
                     provider_env,
                     ca_file_paths,
                     Some(boundary_runtime.clone()),
+                    spec.otlp_relay_active,
                 ))
                 .map_err(|error| format!("start process supervisor leaf: {error:?}"))?;
             let signaler = spawned.signaler();
@@ -5033,8 +5035,9 @@ mod linux {
     ) -> io::Result<rustls::ServerConfig> {
         openshell_crypto::tls::ensure_default_provider();
         let certificate_bytes = std::fs::read(&tls.certificate_chain_path)?;
-        let certificates = rustls_pemfile::certs(&mut certificate_bytes.as_slice())
-            .collect::<Result<Vec<_>, _>>()?;
+        let certificates = CertificateDer::pem_reader_iter(&mut certificate_bytes.as_slice())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         if certificates.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -5042,7 +5045,10 @@ mod linux {
             ));
         }
         let private_key_bytes = std::fs::read(&tls.private_key_path)?;
-        let private_key = rustls_pemfile::private_key(&mut private_key_bytes.as_slice())?
+        let private_key = PrivateKeyDer::pem_reader_iter(&mut private_key_bytes.as_slice())
+            .next()
+            .transpose()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -5396,6 +5402,7 @@ mod linux {
                 workdir: Some("/sandbox".to_string()),
                 timeout_secs: 0,
                 interactive: true,
+                otlp_relay_active: false,
             })
             .expect("resolve scratch command");
 
@@ -5556,7 +5563,8 @@ mod linux {
 
         fn test_client_config(tls: &SandboxTlsClientConfig) -> rustls::ClientConfig {
             let mut roots = rustls::RootCertStore::empty();
-            for certificate in rustls_pemfile::certs(&mut tls.trust_anchor_pem.as_bytes()) {
+            for certificate in CertificateDer::pem_reader_iter(&mut tls.trust_anchor_pem.as_bytes())
+            {
                 roots
                     .add(certificate.expect("parse test CA"))
                     .expect("add test CA");
@@ -8007,6 +8015,7 @@ mod linux {
                 workdir: None,
                 timeout_secs: 60,
                 interactive: false,
+                otlp_relay_active: false,
             };
 
             assert!(matches!(
@@ -8448,6 +8457,7 @@ mod linux {
                     workdir: None,
                     timeout_secs: 120,
                     interactive: false,
+                    otlp_relay_active: false,
                 },
                 None,
                 None,
@@ -8933,6 +8943,7 @@ mod linux {
                     workdir: None,
                     timeout_secs: 120,
                     interactive: false,
+                    otlp_relay_active: false,
                 },
                 None,
                 None,
@@ -9539,6 +9550,7 @@ mod linux {
                         workdir: None,
                         timeout_secs: 120,
                         interactive: false,
+                        otlp_relay_active: false,
                     },
                     None,
                     None,
@@ -9675,6 +9687,7 @@ mod linux {
                 workdir: None,
                 timeout_secs: 5,
                 interactive: false,
+                otlp_relay_active: false,
             };
             let wire_policy = SandboxPolicyWire::from(policy.clone());
             let process = Arc::new(
