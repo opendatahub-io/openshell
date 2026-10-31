@@ -11,7 +11,7 @@ import sys
 import unittest
 from email.message import Message
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 from urllib.error import HTTPError
 
 
@@ -80,13 +80,92 @@ class SyncGenericFetcherTests(unittest.TestCase):
         self.assertEqual(checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}")
 
     def test_retry_after_is_honored_for_rate_limiting(self) -> None:
-        headers = Message()
-        headers["Retry-After"] = "7"
-        rate_limited = HTTPError(
-            "https://example.test/artifact", 429, "rate limited", headers, None
+        for retry_after in ("7", "10"):
+            with self.subTest(retry_after=retry_after):
+                headers = Message()
+                headers["Retry-After"] = retry_after
+                rate_limited = HTTPError(
+                    "https://example.test/artifact", 429, "rate limited", headers, None
+                )
+                complete = b"complete retry response"
+                opener = _Opener([rate_limited, _Response([complete, b""])])
+                with (
+                    patch.object(
+                        sync_generic_fetcher.urllib.request,
+                        "build_opener",
+                        return_value=opener,
+                    ),
+                    patch.object(sync_generic_fetcher.time, "sleep") as sleep,
+                ):
+                    checksum = sync_generic_fetcher.sha256_of(
+                        "https://example.test/artifact"
+                    )
+
+                self.assertEqual(
+                    checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}"
+                )
+                sleep.assert_called_once_with(int(retry_after))
+
+    def test_retry_after_is_capped_for_rate_limiting(self) -> None:
+        for retry_after in ("3600", "9" * 10_000):
+            with self.subTest(retry_after=retry_after[:4]):
+                headers = Message()
+                headers["Retry-After"] = retry_after
+                rate_limited = HTTPError(
+                    "https://example.test/artifact", 429, "rate limited", headers, None
+                )
+                complete = b"complete retry response"
+                opener = _Opener([rate_limited, _Response([complete, b""])])
+                with (
+                    patch.object(
+                        sync_generic_fetcher.urllib.request,
+                        "build_opener",
+                        return_value=opener,
+                    ),
+                    patch.object(sync_generic_fetcher.time, "sleep") as sleep,
+                ):
+                    sync_generic_fetcher.sha256_of("https://example.test/artifact")
+
+                sleep.assert_called_once_with(60)
+
+    def test_retry_after_falls_back_to_exponential_backoff_when_invalid(self) -> None:
+        for retry_after in (None, "later", "²", "\N{ARABIC-INDIC DIGIT SEVEN}"):
+            with self.subTest(retry_after=retry_after):
+                headers = Message()
+                if retry_after is not None:
+                    headers["Retry-After"] = retry_after
+                rate_limited = HTTPError(
+                    "https://example.test/artifact",
+                    429,
+                    "rate limited",
+                    headers,
+                    None,
+                )
+                opener = _Opener(
+                    [rate_limited, _Response([b"complete retry response", b""])]
+                )
+                with (
+                    patch.object(
+                        sync_generic_fetcher.urllib.request,
+                        "build_opener",
+                        return_value=opener,
+                    ),
+                    patch.object(sync_generic_fetcher.time, "sleep") as sleep,
+                ):
+                    sync_generic_fetcher.sha256_of("https://example.test/artifact")
+
+                sleep.assert_called_once_with(1)
+
+    def test_retry_after_fallback_doubles_on_consecutive_retries(self) -> None:
+        rate_limited_responses = [
+            HTTPError(
+                "https://example.test/artifact", 429, "rate limited", Message(), None
+            )
+            for _ in range(2)
+        ]
+        opener = _Opener(
+            [*rate_limited_responses, _Response([b"complete retry response", b""])]
         )
-        complete = b"complete retry response"
-        opener = _Opener([rate_limited, _Response([complete, b""])])
         with (
             patch.object(
                 sync_generic_fetcher.urllib.request,
@@ -95,10 +174,9 @@ class SyncGenericFetcherTests(unittest.TestCase):
             ),
             patch.object(sync_generic_fetcher.time, "sleep") as sleep,
         ):
-            checksum = sync_generic_fetcher.sha256_of("https://example.test/artifact")
+            sync_generic_fetcher.sha256_of("https://example.test/artifact")
 
-        self.assertEqual(checksum, f"sha256:{hashlib.sha256(complete).hexdigest()}")
-        sleep.assert_called_once_with(7)
+        self.assertEqual(sleep.call_args_list, [call(1), call(2)])
 
     def test_published_checksum_requires_the_sidecar_asset_name(self) -> None:
         with (

@@ -52,5 +52,5 @@ hide = true
 
 ["test:odh-generic-fetcher"]
 description = "Test ODH generic-fetcher checksum synchronization"
-run = "python3 deploy/konflux/e2e-odh/sync-generic-fetcher_test.py"
+run = "uv run --no-project --with pytest pytest -o \"python_files=*_test.py\" deploy/konflux/e2e-odh/"
 hide = true
