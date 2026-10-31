@@ -1435,6 +1435,52 @@ network supervisor logs for CONNECT and upstream-proxy decisions:
 kubectl -n <sandbox-namespace> logs pod/<supervisor-pod> --tail=200 | grep -Ei 'upstream|connect|proxy'
 ```
 
+#### Sandbox image-update activation and recovery
+
+`openshell.v1.SandboxUpdates/UpdateSandbox` uses the existing authenticated
+gateway listener and defaults to disabled. Check the effective
+`[openshell.gateway] enable_sandbox_updates` value and its overrides,
+`--enable-sandbox-updates true` or
+`OPENSHELL_ENABLE_SANDBOX_UPDATES=true`. Canonical Helm values use:
+
+```yaml
+gatewayConfig:
+  "openshell.gateway":
+    enable_sandbox_updates: true
+```
+
+Do not enable the flag to work around an error. It attests that all incompatible
+gateways, including unregistered processes and Jobs, have been drained and
+retired, their outstanding driver operations have settled, and old binaries
+cannot return through rollout or rollback configurations. Keep it false during
+a rolling upgrade. SQLite supports one gateway process, not shared-file HA.
+
+On PostgreSQL, fresh gateway membership must advertise sandbox-update protocol 1;
+malformed or truncated membership reads fail closed. Administrative, monitoring,
+and backup connections do not block updates, and custom `application_name` values
+are preserved. Membership expiry does not prove a gateway has stopped. Follow the
+[activation checklist](https://docs.nvidia.com/openshell/latest/kubernetes/high-availability#activate-sandbox-updates).
+
+The gateway retries accepted updates automatically, even with new updates disabled.
+Repeated automatic failures back off up to 15 minutes per gateway. Replicas retry
+independently, and restarting a gateway resets its delay. Recovery warnings include
+the attempt count and retry delay.
+To resume immediately, read the sandbox resource version and call `UpdateSandbox`
+with that version and no selected fields. Restore a compatible driver if recovery
+reports missing support. Start, stop, and provisioning retry retain the barrier;
+explicit deletion can reclaim an unrecoverable sandbox and its storage. Preserve
+request admission semantics: use a new ID or no ID for the explicit resume request,
+and never change the original payload under its original ID. See the
+[recovery contract](https://docs.nvidia.com/openshell/latest/sdk/api-errors#sandbox-image-update-recovery).
+
+Split Helm deployments need the current `openshell-workspace` Role. Update
+preflight requires `get` on Pods: it checks the controller-recorded workload
+name, the Sandbox resource name, and `os-supervisor-<sandbox-id>` directly.
+Any remaining Pod at those names, including a terminating Pod, blocks the update.
+The checks make at most three Pod reads regardless of namespace size and do not
+discover unexpectedly named Pods. Upgrade the workspace chart alongside the
+gateway chart.
+
 ### Step 7: Check VM-Backed Gateways
 
 Use the VM driver logs and host diagnostics available in the user's environment. Verify:
