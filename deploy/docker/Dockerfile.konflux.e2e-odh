@@ -83,7 +83,7 @@ RUN uv venv --python python3.11 /opt/odh-e2e-venv && \
         --find-links /cachi2/output/deps/pip -r /tmp/requirements.txt
 RUN /opt/odh-e2e-venv/bin/python tasks/scripts/generate_python_proto.py
 
-FROM registry.access.redhat.com/ubi9/ubi:9.8@sha256:5f08e80aa970ae77712e75e5e857ac0b396abc900823c4d041c1150a9538a13f
+FROM registry.access.redhat.com/ubi9/ubi:9.8-1793179168@sha256:5f08e80aa970ae77712e75e5e857ac0b396abc900823c4d041c1150a9538a13f
 
 ARG OC_VERSION
 ARG HELM_VERSION
