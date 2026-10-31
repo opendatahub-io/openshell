@@ -22,7 +22,7 @@ ARG OC_VERSION=4.20.0
 # renovate: datasource=github-releases depName=helm/helm extractVersion=^v(?<version>.+)$
 ARG HELM_VERSION=4.2.0
 # renovate: datasource=github-releases depName=nextest-rs/nextest extractVersion=^cargo-nextest-(?<version>.+)$
-ARG NEXTEST_VERSION=0.9.143
+ARG NEXTEST_VERSION=0.9.150
 # renovate: datasource=github-releases depName=astral-sh/uv
 ARG UV_VERSION=0.13.1
 
