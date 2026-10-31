@@ -19,6 +19,11 @@ description = "Run ODH scenarios and managed-workspace tests in their gateway mo
 depends = ["build:openshell-cli"]
 run = "odh/scripts/e2e-odh-entrypoint.sh odh"
 
+["e2e:odh:python"]
+description = "Run supported upstream Python gateway E2E against an OpenShift deployment"
+depends = ["build:openshell-cli", "python:dev"]
+run = "odh/scripts/e2e-odh-entrypoint.sh python"
+
 ["e2e:odh:full"]
 description = "Run all feature-enabled e2e binaries across shared and managed gateway modes"
 depends = ["build:openshell-cli"]
@@ -36,13 +41,34 @@ run = "odh/scripts/e2e-odh-entrypoint.sh tier1"
 
 ["e2e:odh:tier2"]
 description = "Run Tier 2: upstream + ODH, medium/low priority positive tests"
-depends = ["build:openshell-cli"]
+# tier2's shared phase also runs the Python gateway suite, which needs the
+# project environment a fresh checkout does not have yet.
+depends = ["build:openshell-cli", "python:dev"]
 run = "odh/scripts/e2e-odh-entrypoint.sh tier2"
 
 ["e2e:odh:tier3"]
 description = "Run Tier 3: upstream + ODH, negative and destructive tests"
 depends = ["build:openshell-cli"]
 run = "odh/scripts/e2e-odh-entrypoint.sh tier3"
+
+["test:odh-python-gates"]
+description = "Test the ODH Python E2E gates tooling without a cluster"
+depends = ["python:dev"]
+run = """
+odh/scripts/tests/test-pytest-odh-gates.sh
+odh/scripts/tests/test-strip-skipped-testcases.sh
+odh/scripts/tests/test-tier-plan.sh
+odh/scripts/tests/test-check-python-e2e-requirements.sh
+odh/scripts/tests/test-e2e-odh-entrypoint.sh
+OPENSHELL_E2E_OIDC=0 \
+OPENSHELL_ODH_PYTHON_GATES_STRICT=1 \
+OPENSHELL_ODH_PYTHON_GATES="$PWD/odh/python-gates.toml" \
+PYTHONPATH="$PWD/python:$PWD/odh/scripts${PYTHONPATH:+:$PYTHONPATH}" \
+"$PWD/.venv/bin/python" -m pytest -p no:cacheprovider -p pytest_odh_gates \
+	-o "python_files=test_*.py *_test.py" -p no:xdist --collect-only -q e2e/python
+"""
+hide = true
+run_windows = "echo Skipping test:odh-python-gates: the Unix ODH scripts do not apply on Windows."
 
 ["test:odh-deploy-digests"]
 description = "Test ODH deploy script image-digest plumbing without a cluster"

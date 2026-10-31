@@ -45,6 +45,10 @@ description = "Medium/low priority positive tests"
 upstream_tests = ["workspace_lifecycle"]
 odh_filter = "tier2::"
 excluded_odh_filters = ["tier2::managed_identity::"]
+# The Python gateway suite rides tier2's shared deployment: the DevTestOps
+# CI only runs smoke through tier3, so the Python lane would never execute
+# in CI unless it shares a tier.
+runners = ["nextest", "python"]
 
 [tier2.managed]
 description = "Managed-workspace lifecycle tests"
@@ -55,6 +59,13 @@ odh_filter = "tier2::managed_identity::"
 description = "Negative and destructive tests"
 upstream_tests = []
 odh_filter = "tier3::"
+
+[python]
+description = "Supported upstream Python gateway E2E on OpenShift"
+# Single-phase tier over the shared gateway mode; the python runner writes
+# the e2e-odh-python-python.xml phase report. Gate the unsupported tests
+# through odh/python-gates.toml (validated strictly before deployment).
+runners = ["python"]
 
 [odh]
 description = "All ODH-specific tests"

@@ -16,6 +16,9 @@ REPO_ROOT = PLAN_FILE.parents[4]
 GLOBAL_EXCLUSIONS_KEY = "global_test_exclusions"
 _BINARY = re.compile(r"[A-Za-z0-9_-]+\Z")
 _FILTER = re.compile(r"[A-Za-z0-9_:]+\Z")
+# The runners a phase may execute, in order. "nextest" runs the Rust test
+# selection; "python" runs the upstream Python gateway E2E suite.
+_RUNNERS = frozenset({"nextest", "python"})
 
 
 def _validate_mode(mode_name: str, mode: dict) -> dict:
@@ -76,6 +79,7 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
         if name in modes and name != base_mode
     )
     names: set[str] = set()
+    python_runner_seen = False
     resolved = []
     for phase_name, phase_config in phase_tables:
         phase = phase_config
@@ -87,6 +91,19 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
         names.add(name)
         if not isinstance(mode_name, str) or mode_name not in modes:
             raise ValueError(f"unknown mode {mode_name!r} in tier {tier!r}")
+        runners = phase.get("runners", ["nextest"])
+        if not isinstance(runners, list) or not runners or any(
+            not isinstance(runner, str) or runner not in _RUNNERS for runner in runners
+        ):
+            raise ValueError(f"invalid runner in phase {name!r}; known: {', '.join(sorted(_RUNNERS))}")
+        if len(set(runners)) != len(runners):
+            raise ValueError(f"duplicate runner in phase {name!r}")
+        if "python" in runners:
+            # The python runner writes one report per tier
+            # (e2e-odh-<tier>-python.xml), so it may run in one phase only.
+            if python_runner_seen:
+                raise ValueError(f"the python runner may appear in at most one phase of tier {tier!r}")
+            python_runner_seen = True
         binaries = phase.get("upstream_tests", [])
         exclusions = phase.get("upstream_test_exclusions", {})
         excluded_binaries = phase.get("excluded_binaries", [])
@@ -115,11 +132,31 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
         for flag in ("all_binaries", "all_odh_tests", "include_image_provenance"):
             if flag in phase and not isinstance(phase[flag], bool):
                 raise ValueError(f"phase {name!r} {flag} must be a boolean")
-        if not binaries and not odh_filter and not phase.get("all_binaries") and not phase.get("all_odh_tests") and not phase.get("odh_only") and not phase.get("include_image_provenance"):
+        has_nextest_selection = (
+            binaries
+            or exclusions
+            or excluded_binaries
+            or odh_filter
+            or excluded_odh_filters
+            or any(
+                phase.get(flag, False)
+                for flag in (
+                    "all_binaries",
+                    "all_odh_tests",
+                    "odh_only",
+                    "include_image_provenance",
+                )
+            )
+        )
+        if "nextest" not in runners and has_nextest_selection:
+            raise ValueError(
+                f"phase {name!r} declares a nextest selection but runners omit nextest"
+            )
+        if "nextest" in runners and not binaries and not odh_filter and not phase.get("all_binaries") and not phase.get("all_odh_tests") and not phase.get("odh_only") and not phase.get("include_image_provenance"):
             raise ValueError(f"phase {name!r} selects no tests")
         if "odh_only" in phase and not isinstance(phase["odh_only"], bool):
             raise ValueError(f"phase {name!r} odh_only must be a boolean")
-        resolved.append({**phase, "name": name, "mode": mode_name, "upstream_tests": binaries,
+        resolved.append({**phase, "name": name, "mode": mode_name, "runners": runners, "upstream_tests": binaries,
                          "upstream_test_exclusions": exclusions, "odh_filter": odh_filter,
                          "global_test_exclusions": global_exclusions,
                          "all_odh_tests": phase.get("all_odh_tests", phase.get("odh_only", False)),
@@ -147,6 +184,8 @@ def load_mode(mode_name: str, plan_path: Path = PLAN_FILE) -> dict:
 
 
 def nextest_filter(phase: dict) -> str:
+    if "nextest" not in phase.get("runners", ["nextest"]):
+        raise ValueError(f"phase {phase['name']!r} runs no nextest selection")
     terms = []
     odh_filter = phase["odh_filter"]
     if odh_filter:

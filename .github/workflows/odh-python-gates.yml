@@ -1,0 +1,53 @@
+name: ODH Python Gate Checks
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - ".github/workflows/odh-python-gates.yml"
+      - "e2e/python/**"
+      - "e2e/rust/tests/odh/tier_plan.py"
+      - "e2e/rust/tests/odh/tiers.toml"
+      - "mise.toml"
+      - "odh/python-gates.toml"
+      - "odh/requirements.in"
+      - "odh/requirements.txt"
+      - "odh/scripts/check-python-e2e-requirements.py"
+      - "odh/scripts/e2e-odh-entrypoint.sh"
+      - "odh/scripts/merge-e2e-odh-reports.py"
+      - "odh/scripts/pytest_odh_gates.py"
+      - "odh/scripts/python-e2e-common.sh"
+      - "odh/scripts/run-python-e2e.sh"
+      - "odh/scripts/strip-skipped-testcases.py"
+      - "odh/scripts/tests/**"
+      - "pyproject.toml"
+      - "tasks/python.toml"
+      - "tasks/test-odh.toml"
+      - "uv.lock"
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ODH Python gate tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # This check uses Python and uv only. Avoid installing the complete
+      # repository toolchain (Rust, Docker helpers, Helm, etc.), which is
+      # unrelated to the gate tooling and can time out on hosted runners.
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+        with:
+          install: false
+          experimental: true
+
+      - name: Install Python tools
+        run: mise install --locked python uv
+
+      - name: Test ODH Python gate tooling
+        run: mise run --skip-tools test:odh-python-gates

@@ -203,9 +203,25 @@ context you happen to have active elsewhere. This means:
 | `mise run e2e:odh:full` | All upstream e2e + e2e-kubernetes + ODH tests (see caveat below), including image provenance |
 | `mise run e2e:odh:smoke` | Smoke tier: mapped upstream tests + ODH `smoke::` (includes image provenance) |
 | `mise run e2e:odh:tier1` | Tier 1: mapped upstream tests + ODH `tier1::` + image provenance |
-| `mise run e2e:odh:tier2` | Tier 2: mapped upstream tests + ODH `tier2::` + image provenance |
+| `mise run e2e:odh:tier2` | Tier 2: mapped upstream tests + ODH `tier2::` + supported Python gateway E2E + image provenance |
 | `mise run e2e:odh:tier3` | Tier 3: mapped upstream tests + ODH `tier3::` + image provenance |
+| `mise run e2e:odh:python` | Supported upstream Python gateway E2E in the shared OpenShift mode |
 | `cargo nextest run --config-file "$PWD/.config/nextest.toml" --tool-config-file "odh:$PWD/e2e/rust/tests/odh/nextest.toml" --profile e2e-odh --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh -E 'test(=module::test_name)'` | A single ODH test function |
+
+### Python gateway E2E
+
+`e2e:odh:python` reuses the public ODH entrypoint: it deploys the shared
+OpenShift gateway, imports the example provider profiles, runs upstream
+`e2e/python`, and tears the deployment down. It writes the phase report
+`e2e-odh-python-python.xml` and merged `e2e-odh-python-xunit.xml` plus HTML
+companion in `results/`. `odh/python-gates.toml` contains the exact tests that cannot run
+on the current OpenShift lane (host-only fixtures, unrestricted egress, the
+missing Python workload image, and the pending upstream deletion-timeout
+decision). Gate entries are collection-validated so an upstream rename cannot
+silently leave a stale exclusion. The phase also fails when the JUnit report
+shows no executed test case, so a suite that skips every collected case cannot
+report success. The Python tests also run as part of the tier2 shared phase,
+riding the same gateway deployment.
 
 Example, running the Smoke tier against a real cluster:
 
@@ -411,7 +427,7 @@ locally with:
 
 The local build tags the image as `odh-openshell-e2e`.
 
-The image accepts `smoke`, `tier1`, `tier2`, `tier3`, `odh`, or `full`
+The image accepts `smoke`, `tier1`, `tier2`, `tier3`, `odh`, `full`, or `python`
 as its first argument; `smoke` is the default. The Shift-Left job mounts
 cluster credentials and a writable report directory, then passes environment
 variables through `--env-file`:
