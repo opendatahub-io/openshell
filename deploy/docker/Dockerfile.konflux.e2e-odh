@@ -24,7 +24,7 @@ ARG HELM_VERSION=4.2.0
 # renovate: datasource=github-releases depName=nextest-rs/nextest extractVersion=^cargo-nextest-(?<version>.+)$
 ARG NEXTEST_VERSION=0.9.143
 # renovate: datasource=github-releases depName=astral-sh/uv
-ARG UV_VERSION=0.13.1
+ARG UV_VERSION=0.13.6
 
 FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.0@sha256:b00aaa63f7d6f5b857c170e4aed9d77f013f507ba97e72ebfcac48a7d3760310 AS builder
 
