@@ -12,12 +12,12 @@ artifacts:
     checksum: "sha256:9041c73c99fdc5892cf128140beb354eca9231d502068cc36e6cb53a8e59ad14"
     filename: uv-0.13.6-aarch64-unknown-linux-gnu.tar.gz
 
-  - download_url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.20.0/openshift-client-linux-amd64-rhel9-4.20.0.tar.gz
+  - download_url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.21/openshift-client-linux-amd64-rhel9-4.22.21.tar.gz
     checksum: "sha256:dbc11aa32c8fa967c47c46900c524798b782b355615c9ca8ec2bbba647850420"
-    filename: openshift-client-linux-amd64-rhel9-4.20.0.tar.gz
-  - download_url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.20.0/openshift-client-linux-arm64-rhel9-4.20.0.tar.gz
+    filename: openshift-client-linux-amd64-rhel9-4.22.21.tar.gz
+  - download_url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.21/openshift-client-linux-arm64-rhel9-4.22.21.tar.gz
     checksum: "sha256:f8a18b7f6a3498d71825d954a54f7b0f9e042d9a7887d9e88c4a44371dddd5e4"
-    filename: openshift-client-linux-arm64-rhel9-4.20.0.tar.gz
+    filename: openshift-client-linux-arm64-rhel9-4.22.21.tar.gz
 
   - download_url: https://get.helm.sh/helm-v4.3.1-linux-amd64.tar.gz
     checksum: "sha256:97dbeb971be4ac4b27e3839976d9564c0fb35c6f3b1da89dd1e292d236af4096"
