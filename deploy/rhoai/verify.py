@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 OpenShell contributors
 # SPDX-License-Identifier: Apache-2.0
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = []
 # ///
 """Read-only gateway authorization checks through the dashboard BFF and public Route."""

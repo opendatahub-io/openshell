@@ -1,0 +1,60 @@
+{
+  "namespace": "openshell-team",
+  "context": "REPLACE_WITH_KUBECONFIG_CONTEXT",
+  "gateway": {
+    "chart": "oci://ghcr.io/nvidia/openshell/helm-chart",
+    "version": "0.1.6",
+    "values_files": [],
+    "host": "gateway-openshell-team.apps.example.com",
+    "images": {
+      "gateway": {
+        "registry": "quay.io",
+        "repository": "opendatahub/odh-openshell-gateway",
+        "tag": "v0.1.6-rhaiv.3"
+      },
+      "supervisor": {
+        "registry": "quay.io",
+        "repository": "opendatahub/odh-openshell-supervisor",
+        "tag": "v0.1.6-rhaiv.3"
+      },
+      "sandboxRuntime": {
+        "registry": "quay.io",
+        "repository": "opendatahub/odh-openshell-sandbox",
+        "tag": "v0.1.6-rhaiv.3"
+      },
+      "sandbox": {
+        "repository": "quay.io/opendatahub/odh-openshell-sandbox",
+        "tag": "v0.1.6-rhaiv.3"
+      }
+    }
+  },
+  "dashboard": {
+    "chart": "oci://ghcr.io/gkrumbach07/openshell-dashboard/helm-chart/openshell-dashboard",
+    "version": "0.1.2",
+    "values_files": [],
+    "host": "dashboard-openshell-team.apps.example.com",
+    "images": {
+      "dashboard": {
+        "registry": "quay.io",
+        "repository": "opendatahub/odh-openshell-dashboard",
+        "digest": "sha256:cfb3b592c5909c7c1a5d5622f98a20bf8c503554d53b3441abb189140254450b"
+      }
+    }
+  },
+  "oidc": {
+    "provider": "keycloak-oidc",
+    "issuer": "https://keycloak.apps.example.com/realms/openshell",
+    "client_id": "openshell-dashboard-openshell-team",
+    "client_secret_file": "dashboard-client-secret.txt",
+    "ca_file": "ingress-ca.crt",
+    "audience": "openshell-api-openshell-team",
+    "roles_claim": "realm_access.roles",
+    "admin_role": "openshell-admin",
+    "user_role": "openshell-user",
+    "allowed_roles": [
+      "openshell-admin",
+      "openshell-user"
+    ],
+    "scope": "openid email profile"
+  }
+}
