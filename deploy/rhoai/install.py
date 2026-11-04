@@ -1,8 +1,8 @@
-#!/usr/bin/env -S uv run --script
+#!/usr/bin/env -S uv run --no-project --python 3.12 --script
 # SPDX-FileCopyrightText: Copyright (c) 2026 OpenShell contributors
 # SPDX-License-Identifier: Apache-2.0
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = ["PyYAML==6.0.3"]
 # ///
 """Install the gateway and dashboard as separate Helm releases on OpenShift."""

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 OpenShell contributors
 # SPDX-License-Identifier: Apache-2.0
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = ["PyYAML==6.0.3"]
 # ///
 """Behavioral tests with a simulated cluster; no network or cluster access."""
@@ -25,7 +25,8 @@ spec.loader.exec_module(installer)
 
 
 def configuration():
-    config = json.loads(Path(__file__).with_name("config.example.json").read_text())
+    config_path = Path(__file__).with_name("config-examples") / "config.example.json"
+    config = json.loads(config_path.read_text())
     config["context"] = "test-context"
     config["gateway"]["version"] = "0.1.3"
     config["dashboard"]["version"] = "0.1.7"
