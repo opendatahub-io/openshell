@@ -9,6 +9,7 @@ cloudpickle>=3.0
 googleapis-common-protos>=1.63
 grpcio>=1.60
 grpcio-tools>=1.60
+mypy-protobuf>=5.1
 httpx>=0.27
 protobuf>=4.25
 pytest>=8.0
