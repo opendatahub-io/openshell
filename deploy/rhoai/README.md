@@ -269,7 +269,7 @@ Run cluster preflight without installing:
 ```
 
 Expect `Cluster preflight passed; no installation resources were changed.`
-Preflight prints the resolved context and namespace. When a host is omitted, it
+Preflight prints the target context and namespace. When a host is omitted, it
 also resolves the ingress apps domain and uses the derived hosts for the
 installer's identity checks.
 
@@ -287,7 +287,18 @@ and OIDC identifiers do not change, so keep the provider registrations in sync.
 cluster. On failure, the installer leaves the created resources for diagnosis;
 correct the cause and rerun the same command.
 
+When the install finishes, the installer also prints the next steps with your
+configuration values: install the matching OpenShell CLI, register the gateway
+with its CA, check the connection with `openshell status`, and create a sandbox
+with `openshell sandbox create`. The printed `kubectl` command includes the kube
+context the install targeted, so it reads the CA Secret from the same cluster.
+The following sections describe the same steps in more detail, including the
+trust setup for custom identity providers.
+
 ## Register the gateway and log in
+
+The installer prints these commands with the values from your configuration; use
+its output when it differs from the examples below.
 
 Install the OpenShell CLI. The examples in this guide use `v0.1.6`; install the
 version that matches the gateway release you deployed:
@@ -499,7 +510,7 @@ namespace for you.
 | Symptom | Cause and fix |
 |---|---|
 | `oidc.client_secret_file is required for the first install` | Create the client secret file before `--check`, or reuse installer state from an earlier successful install. |
-| No default StorageClass | Mark a block-backed StorageClass as default; the gateway's SQLite PVC needs it. |
+| No default StorageClass | Mark a StorageClass that provisions block volumes as default; the gateway's SQLite database needs it. |
 | Agent Sandbox readiness fails | Install or start the Agent Sandbox controller, or override `agent_sandbox_namespace` and `agent_sandbox_deployment`. |
 | `x509` error during `openshell gateway add` | Distinguish the two trust paths: copy the gateway CA into the CLI mtls directory, and build the `SSL_CERT_FILE` bundle for OIDC discovery. |
 | `dns error` from `openshell status` after `gateway add` succeeds | The gateway host is outside the router's `*.apps.<domain>` wildcard, so it has no DNS record. Registration only contacts the OIDC issuer; `status` is the first gateway connection. Correct `gateway.host`, or remove it to derive `gateway-<namespace>.<apps-domain>` from the ingress domain. Reinstall when the installer already recorded the old host. |

@@ -31,6 +31,12 @@ INSTALL_STATE = "openshell-installer"
 OIDC_SECRET = "openshell-dashboard-oidc"
 OIDC_CA = "openshell-oidc-ca"
 MIN_DASHBOARD_USER_ROLE_CHART = (0, 1, 2)
+CLI_CLIENT_ID = "openshell-cli"
+CLI_INSTALL_URL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh"
+# Releases from this version onward include the pre-5.19 legacy-kernel fixes
+# (NVIDIA/OpenShell#4150). The gateway chart version tracks the OpenShell
+# release, so downstream images must match it.
+LEGACY_KERNEL_FIX_RELEASE = (0, 1, 3)
 PLACEHOLDER_APPS_DOMAIN = "apps.example.com"
 CONTEXT_ERROR = (
     "Cannot determine the current kubeconfig context; pass --context or "
@@ -130,6 +136,16 @@ def current_context():
     return context
 
 
+def version_at_least(version, minimum):
+    match = VERSION.fullmatch(version)
+    require(match, f"Invalid version: {version}")
+    numbers = tuple(int(match.group(index)) for index in (1, 2, 3))
+    if numbers != minimum:
+        return numbers > minimum
+    # A prerelease sorts before its release, even when it already carries the fix.
+    return not match.group("prerelease")
+
+
 def require_host(name, host):
     require(
         isinstance(host, str)
@@ -147,11 +163,27 @@ def require_host(name, host):
 
 def resolve_hosts(config, apps_domain=None):
     domain = apps_domain.strip().rstrip(".").lower() if apps_domain else ""
+    ns = config["namespace"]
     for name in ("gateway", "dashboard"):
         item = config[name]
         if item.get("host") is None:
             require(domain, f"An apps domain is required to derive {name}.host")
-            item["host"] = f"{name}-{config['namespace']}.{domain}"
+            label = f"{name}-{ns}"
+            host = f"{label}.{domain}"
+            # Name the derived label, since the namespace is otherwise valid.
+            require(
+                len(label) <= 63,
+                f"Cannot derive {name}.host for namespace {ns!r}: the {label!r} "
+                "label exceeds the 63-character DNS limit; set "
+                f"{name}.host explicitly",
+            )
+            require(
+                len(host) <= 253,
+                f"Cannot derive {name}.host for namespace {ns!r}: {host!r} "
+                "exceeds the 253-character DNS limit; set "
+                f"{name}.host explicitly",
+            )
+            item["host"] = host
         require_host(name, item["host"])
     require(
         config["gateway"]["host"] != config["dashboard"]["host"],
@@ -443,6 +475,56 @@ def chart_values(config):
     return gateway, dashboard
 
 
+def next_steps(config, context):
+    ns = config["namespace"]
+    oidc = config["oidc"]
+    gateway_dir = f"$HOME/.config/openshell/gateways/{ns}/mtls"
+    gateway_url = f"https://{config['gateway']['host']}:443"
+    lines = [
+        "Next steps:",
+        "",
+        "1. Install the OpenShell CLI that matches this gateway release:",
+        f"   curl -LsSf {CLI_INSTALL_URL} \\",
+        f"     | OPENSHELL_VERSION=v{config['gateway']['version']} sh",
+        "",
+        "2. Register the gateway with the OpenShell CLI:",
+        f'   mkdir -p "{gateway_dir}"',
+        f'   kubectl --context "{context}" -n {ns} get secret openshell-client-tls \\',
+        "     -o jsonpath='{.data.ca\\.crt}' | base64 -d \\",
+        f'     > "{gateway_dir}/ca.crt"',
+    ]
+    if oidc.get("ca_file"):
+        lines += [
+            "",
+            "   The OIDC issuer uses a private CA; add it to the trust bundle:",
+            "   cat /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \\",
+            f'     "{oidc["ca_file"]}" \\',
+            '     > "$HOME/.config/openshell-rhoai/ca-bundle.pem"',
+            '   export SSL_CERT_FILE="$HOME/.config/openshell-rhoai/ca-bundle.pem"',
+        ]
+    lines += [
+        "",
+        "   openshell gateway add \\",
+        f"     --name {ns} \\",
+        f'     --oidc-issuer "{oidc["issuer"]}" \\',
+        f"     --oidc-client-id {CLI_CLIENT_ID} \\",
+        f"     --oidc-audience {oidc['audience']} \\",
+        f'     "{gateway_url}"',
+        "",
+        f"   Use your provider's CLI client ID if it is not {CLI_CLIENT_ID}.",
+        "",
+        "3. Check the connection:",
+        "   openshell status",
+        "",
+        "4. Create a sandbox:",
+        "   openshell sandbox create",
+        "",
+        "An administrator must add users to workspaces before they can sign in.",
+        "See deploy/rhoai/README.md#register-the-gateway-and-log-in for details.",
+    ]
+    return "\n".join(lines)
+
+
 class Installer:
     def __init__(self, config, timeout, context=None):
         self.config = config
@@ -589,7 +671,7 @@ class Installer:
     def cluster_checks(self, namespace):
         version = self.get("clusterversion.config.openshift.io", "version", False)
         print(
-            f"OpenShift: {(version or {}).get('status', {}).get('desired', {}).get('version', 'unknown')}"
+            f"OpenShift version: {(version or {}).get('status', {}).get('desired', {}).get('version', 'unknown')}"
         )
         storage = json.loads(
             self.run([*self.kube, "get", "storageclasses", "-o", "json"])
@@ -607,10 +689,16 @@ class Installer:
         ]
         require(
             defaults,
-            "No default StorageClass; the gateway chart's SQLite PVC requires one",
+            "No default StorageClass; the gateway's SQLite database needs one "
+            "that provisions block storage",
         )
+        classes = ", ".join(defaults)
         print(
-            f"Default storage: {', '.join(defaults)} (verify block-backed SQLite storage)"
+            f"Default StorageClass: {classes}\n"
+            "  The gateway's SQLite database runs on a PersistentVolumeClaim, so the\n"
+            "  default StorageClass must provision block volumes. The installer cannot\n"
+            "  detect the volume type; verify the default class is block-backed (not NFS\n"
+            "  or a shared filesystem) before installing."
         )
         custom = (
             self.config["gateway"]
@@ -633,14 +721,31 @@ class Installer:
             }
         )
         print(f"Node kernels: {', '.join(kernels) or 'none reported'}")
-        if any(
-            (match := re.match(r"(\d+)\.(\d+)", kernel))
-            and tuple(map(int, match.groups())) < (5, 19)
+        legacy = [
+            kernel
             for kernel in kernels
-        ):
+            if (match := re.match(r"(\d+)\.(\d+)", kernel))
+            and tuple(map(int, match.groups())) < (5, 19)
+        ]
+        if legacy:
+            fixes = ".".join(str(part) for part in LEGACY_KERNEL_FIX_RELEASE)
+            version = self.config["gateway"]["version"]
+            fixed = version_at_least(version, LEGACY_KERNEL_FIX_RELEASE)
             print(
-                "Note: kernels before 5.19 need an OpenShell build with the legacy-kernel fixes; verify sandbox networking."
+                f"{'Note' if fixed else 'Warning'}: node kernel(s) below 5.19: {', '.join(legacy)}"
             )
+            if fixed:
+                print(
+                    f"  The legacy-kernel fixes are included in OpenShell {fixes} and later.\n"
+                    "  No action is required if gateway.version and the images match this release."
+                )
+            else:
+                print(
+                    "  The default OpenShell network path requires kernel 5.19 or later.\n"
+                    f"  The legacy-kernel fixes are included in OpenShell {fixes} and later, but gateway.version is {version}.\n"
+                    f"  Pin a chart version of {fixes} or newer with matching images, then verify sandbox networking after the install.\n"
+                    "  This warning does not stop preflight."
+                )
         # Check actual installation operations instead of requiring wildcard
         # cluster-admin. These checks cannot prove RBAC bind/escalate or SCC admission.
         scoped = [
@@ -741,7 +846,10 @@ class Installer:
                 )
 
     def preflight(self):
-        print(f"Context: {self.context}; namespace: {self.ns}", flush=True)
+        print(
+            f"Target:\n  kube context: {self.context}\n  namespace:    {self.ns}",
+            flush=True,
+        )
         self.run([*self.kube, "get", "--raw", "/apis/route.openshift.io/v1"])
         crd = self.get("crd", "sandboxes.agents.x-k8s.io", False)
         require(
@@ -967,13 +1075,9 @@ class Installer:
                 )
             self.wait_for_route(release)
         print(f"Dashboard: https://{self.config['dashboard']['host']}")
-        print(f"Gateway: https://{self.config['gateway']['host']}")
-        print(
-            "Register the gateway with the CLI using its CA, then log in through customer OIDC."
-        )
-        print(
-            "An administrator must add users to workspaces. Verify login, denied access, sandbox creation and terminals."
-        )
+        print(f"Gateway:   https://{self.config['gateway']['host']}")
+        print()
+        print(next_steps(self.config, self.context))
 
 
 def main():
@@ -1040,11 +1144,20 @@ def main():
         require(args.apps_domain != "", "--apps-domain must be a nonempty DNS name")
         resolve_hosts(config, args.apps_domain or PLACEHOLDER_APPS_DOMAIN)
         if missing and args.apps_domain is None:
-            hosts = ", ".join(config[name]["host"] for name in missing)
+            labels = [f"{name}.host" for name in missing]
+            width = max(map(len, labels))
             print(
-                f"Note: {', '.join(missing)} host(s) are not set; rendering placeholder "
-                f"host(s) {hosts}. The install derives real hosts from the cluster apps "
-                "domain; pass --apps-domain to render them offline.",
+                "\n".join(
+                    [
+                        f"Note: {', '.join(labels)} are not set, so --check renders placeholders:",
+                        *(
+                            f"  {label.ljust(width)} = {config[name]['host']}"
+                            for label, name in zip(labels, missing, strict=True)
+                        ),
+                        "The install derives the real hosts from the cluster ingress apps domain.",
+                        "Pass --apps-domain <domain> to render the real hosts offline.",
+                    ]
+                ),
                 flush=True,
             )
     else:
