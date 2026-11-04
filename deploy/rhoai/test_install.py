@@ -1242,6 +1242,51 @@ class InstallTests(unittest.TestCase):
             steps,
         )
 
+    def test_system_ca_bundle_prefers_first_existing_candidate(self):
+        def exists(candidate):
+            return str(candidate) in (
+                "/etc/ssl/certs/ca-certificates.crt",
+                "/etc/ssl/cert.pem",
+            )
+
+        with patch.object(installer.Path, "is_file", exists):
+            self.assertEqual(
+                installer.system_ca_bundle(), "/etc/ssl/certs/ca-certificates.crt"
+            )
+
+    def test_system_ca_bundle_is_none_when_no_candidate_exists(self):
+        with patch.object(installer.Path, "is_file", lambda _candidate: False):
+            self.assertIsNone(installer.system_ca_bundle())
+
+    def test_next_steps_use_the_detected_system_bundle(self):
+        config = self.load()
+        config["oidc"]["ca_file"] = "/tmp/ingress-ca.crt"
+        with patch.object(
+            installer, "system_ca_bundle", return_value="/etc/ssl/cert.pem"
+        ):
+            steps = installer.next_steps(config, "install-context")
+        self.assertIn("cat /etc/ssl/cert.pem \\", steps)
+        self.assertNotIn("Could not detect a system CA bundle", steps)
+
+    def test_next_steps_name_debian_and_macos_bundle_paths(self):
+        config = self.load()
+        config["oidc"]["ca_file"] = "/tmp/ingress-ca.crt"
+        with patch.object(
+            installer, "system_ca_bundle", return_value="/etc/ssl/cert.pem"
+        ):
+            steps = installer.next_steps(config, "install-context")
+        self.assertIn("/etc/ssl/certs/ca-certificates.crt", steps)
+        self.assertIn("/etc/ssl/cert.pem", steps)
+        self.assertIn("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", steps)
+
+    def test_next_steps_use_placeholder_when_no_bundle_is_detected(self):
+        config = self.load()
+        config["oidc"]["ca_file"] = "/tmp/ingress-ca.crt"
+        with patch.object(installer, "system_ca_bundle", return_value=None):
+            steps = installer.next_steps(config, "install-context")
+        self.assertIn("Could not detect a system CA bundle", steps)
+        self.assertIn("cat <system-ca-bundle> \\", steps)
+
 
 if __name__ == "__main__":
     unittest.main()
