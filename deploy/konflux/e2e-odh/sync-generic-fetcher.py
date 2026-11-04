@@ -200,6 +200,25 @@ def check(versions: dict[str, str], artifacts: list[Artifact]) -> list[str]:
 
 
 RETRY_ATTEMPTS = 3
+MAX_RETRY_AFTER_SECONDS = 60
+
+
+def retry_delay(retry_after: str | None, attempt: int) -> tuple[int, str | None]:
+    """Return a bounded delay and the requested value when it was capped."""
+    fallback_delay = 2 ** (attempt - 1)
+    if not retry_after or not retry_after.isascii() or not retry_after.isdecimal():
+        return fallback_delay, None
+
+    significant_digits = retry_after.lstrip("0")
+    # Avoid converting an unbounded value supplied by a remote server, while
+    # retaining a useful exact value in the retry log for normal headers.
+    if len(significant_digits) > 10:
+        return MAX_RETRY_AFTER_SECONDS, f"more than {MAX_RETRY_AFTER_SECONDS}s"
+
+    requested_delay = int(significant_digits or "0")
+    if requested_delay > MAX_RETRY_AFTER_SECONDS:
+        return MAX_RETRY_AFTER_SECONDS, f"{requested_delay}s"
+    return requested_delay, None
 
 
 def _with_retry(url: str, consume, what: str):
@@ -228,14 +247,16 @@ def _with_retry(url: str, consume, what: str):
             if isinstance(last_error, urllib.error.HTTPError)
             else None
         )
-        delay = (
-            int(retry_after)
-            if retry_after and retry_after.isdigit()
-            else 2 ** (attempt - 1)
+        retry_after = retry_after.strip() if retry_after else None
+        delay, capped_retry_after = retry_delay(retry_after, attempt)
+        cap_note = (
+            f"; server Retry-After was {capped_retry_after}"
+            if capped_retry_after is not None
+            else ""
         )
         print(
             f"{url}: {last_error}; attempt {attempt}/{RETRY_ATTEMPTS} failed "
-            f"while {what}, retrying in {delay}s",
+            f"while {what}, retrying in {delay}s{cap_note}",
             file=sys.stderr,
         )
         time.sleep(delay)
