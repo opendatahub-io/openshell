@@ -5,8 +5,8 @@ the `--config` installer described in [../README.md](../README.md).
 
 ## Using an example
 
-Copy an example outside the checkout, then replace every placeholder before
-installing:
+Copy an example outside the checkout, then replace the chart, version, image,
+and OIDC placeholders before installing:
 
 ```shell
 cp deploy/rhoai/config-examples/config.example-odh-keycloak.json \
@@ -19,6 +19,11 @@ installer validates that the file exists and is not empty. The Keycloak
 examples also set `"ca_file": "ingress-ca.crt"`, so create that file with the
 command in [../README.md](../README.md#oidc-issuer-certificate) before running
 `--check`.
+
+The examples omit `context` and the hosts. The installer uses the current
+kubeconfig context (`--context` overrides it) and derives
+`gateway-<namespace>.<apps-domain>` and `dashboard-<namespace>.<apps-domain>`
+from the cluster ingress domain.
 
 ## Example values files
 
@@ -51,15 +56,42 @@ so keep the same files. Omitting them installs the chart defaults.
 | `config.example-rhoai-3.6.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.2` | generic | match the RHOAI 3.6 operator CSV |
 | `config.example-rhoai-3.6-keycloak.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.2` | Keycloak | default README walkthrough |
 
+All examples omit `context` and the hosts and rely on the defaults described
+below.
+
 ## OIDC identifiers
 
 The Keycloak examples use namespace-qualified
 `openshell-dashboard-<namespace>` and `openshell-api-<namespace>` client IDs,
 with `openshell-team` as the default. The non-Keycloak examples follow the same
-convention. Hosts follow the same pattern: `gateway-<namespace>.<apps-domain>`
-and `dashboard-<namespace>.<apps-domain>`, as in the examples. When you change
-the namespace, keep the Keycloak clients, hosts, `config.json`, and
-`openshell gateway add --oidc-audience` in sync.
+convention. When you change the namespace, update the client IDs and audience in
+`config.json`, the provider registrations, and
+`openshell gateway add --oidc-audience`.
+
+Derived hosts follow the effective namespace automatically. Explicit
+`gateway.host` and `dashboard.host` values do not follow it.
+
+## Optional fields
+
+These fields are optional; the installer derives or defaults them:
+
+| Field | Default |
+|---|---|
+| `context` | Current kubeconfig context; `--context` overrides it |
+| `gateway.host`, `dashboard.host` | `gateway-<namespace>.<apps-domain>` and `dashboard-<namespace>.<apps-domain>` |
+| `gateway.values_files`, `dashboard.values_files` | `[]` |
+| `gateway.images`, `dashboard.images` | Chart defaults |
+| `agent_sandbox_namespace` | `agent-sandbox-system` |
+| `agent_sandbox_deployment` | `agent-sandbox-controller` |
+| `oidc.provider` | `oidc` |
+| `oidc.allowed_groups`, `oidc.allowed_roles` | `[]` |
+| `oidc.client_secret_file`, `oidc.ca_file` | none |
+| `oidc.scope` | Provider defaults |
+
+Set a host explicitly when the router serves a wildcard that differs from
+`ingresses.config.openshift.io/cluster` `.spec.domain`. `--check` renders
+omitted hosts as `<component>-<namespace>.apps.example.com` unless you pass
+`--apps-domain`.
 
 ## ODH images
 

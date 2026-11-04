@@ -31,6 +31,11 @@ INSTALL_STATE = "openshell-installer"
 OIDC_SECRET = "openshell-dashboard-oidc"
 OIDC_CA = "openshell-oidc-ca"
 MIN_DASHBOARD_USER_ROLE_CHART = (0, 1, 2)
+PLACEHOLDER_APPS_DOMAIN = "apps.example.com"
+CONTEXT_ERROR = (
+    "Cannot determine the current kubeconfig context; pass --context or "
+    "select a context with kubectl config use-context"
+)
 VERSION = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?P<prerelease>-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -111,6 +116,49 @@ def fields(obj, required, optional=()):
         require(key in obj and obj[key] != "", f"Missing configuration field: {key}")
 
 
+def current_context():
+    # Local kubeconfig read, not a cluster call. Keep it lazy so --check never
+    # requires kubectl or a kubeconfig.
+    result = subprocess.run(
+        ["kubectl", "config", "current-context"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    context = result.stdout.strip()
+    require(result.returncode == 0 and context, CONTEXT_ERROR)
+    return context
+
+
+def require_host(name, host):
+    require(
+        isinstance(host, str)
+        and len(host) <= 253
+        and DNS.fullmatch(host)
+        and all(
+            0 < len(label) <= 63
+            and not label.startswith("-")
+            and not label.endswith("-")
+            for label in host.split(".")
+        ),
+        f"Invalid {name}.host",
+    )
+
+
+def resolve_hosts(config, apps_domain=None):
+    domain = apps_domain.strip().rstrip(".").lower() if apps_domain else ""
+    for name in ("gateway", "dashboard"):
+        item = config[name]
+        if item.get("host") is None:
+            require(domain, f"An apps domain is required to derive {name}.host")
+            item["host"] = f"{name}-{config['namespace']}.{domain}"
+        require_host(name, item["host"])
+    require(
+        config["gateway"]["host"] != config["dashboard"]["host"],
+        "Gateway and dashboard need distinct hosts",
+    )
+
+
 def load_config(path, namespace=None):
     config = json.loads(path.read_text())
     if namespace is not None:
@@ -118,8 +166,8 @@ def load_config(path, namespace=None):
         config["namespace"] = namespace
     fields(
         config,
-        ("namespace", "context", "gateway", "dashboard", "oidc"),
-        ("agent_sandbox_namespace", "agent_sandbox_deployment"),
+        ("namespace", "gateway", "dashboard", "oidc"),
+        ("context", "agent_sandbox_namespace", "agent_sandbox_deployment"),
     )
     ns = config["namespace"]
     require(
@@ -139,13 +187,14 @@ def load_config(path, namespace=None):
                 isinstance(config[key], str) and DNS.fullmatch(config[key]),
                 f"Invalid {key}",
             )
-    require(
-        isinstance(config["context"], str) and config["context"].strip(),
-        "context is required",
-    )
+    if "context" in config:
+        require(
+            isinstance(config["context"], str) and config["context"].strip(),
+            "context must be a nonempty string",
+        )
     for name in ("gateway", "dashboard"):
         item = config[name]
-        fields(item, ("chart", "version", "host"), ("images", "values_files"))
+        fields(item, ("chart", "version"), ("host", "images", "values_files"))
         require(
             isinstance(item["chart"], str) and item["chart"].startswith("oci://"),
             f"{name}.chart must be an OCI chart reference",
@@ -179,19 +228,8 @@ def load_config(path, namespace=None):
                 raise ValueError(f"Invalid YAML in {name} values file") from None
             merge_values(overrides, overlay, EXTRA_VALUES[name])
         item["values"] = overrides
-        host = item["host"]
-        require(
-            isinstance(host, str)
-            and len(host) <= 253
-            and DNS.fullmatch(host)
-            and all(
-                0 < len(label) <= 63
-                and not label.startswith("-")
-                and not label.endswith("-")
-                for label in host.split(".")
-            ),
-            f"Invalid {name}.host",
-        )
+        if item.get("host") is not None:
+            require_host(name, item["host"])
         components = (
             ("gateway", "supervisor", "sandboxRuntime", "sandbox")
             if name == "gateway"
@@ -215,10 +253,6 @@ def load_config(path, namespace=None):
                     f"{name}.images.{component}.digest must be sha256: followed by "
                     "64 lowercase hexadecimal characters",
                 )
-    require(
-        config["gateway"]["host"] != config["dashboard"]["host"],
-        "Gateway and dashboard need distinct hosts",
-    )
     oidc = config["oidc"]
     fields(
         oidc,
@@ -332,6 +366,10 @@ def warn_if_dashboard_user_role_missing(manifest, role, chart_version):
 
 def chart_values(config):
     ns, oidc = config["namespace"], config["oidc"]
+    require(
+        config["gateway"].get("host") and config["dashboard"].get("host"),
+        "Hosts must be resolved before rendering chart values",
+    )
     ca = OIDC_CA if oidc.get("ca_file") else ""
     security = {"runAsUser": None, "seccompProfile": {"type": "RuntimeDefault"}}
     gateway = {
@@ -406,11 +444,27 @@ def chart_values(config):
 
 
 class Installer:
-    def __init__(self, config, timeout):
+    def __init__(self, config, timeout, context=None):
         self.config = config
         self.timeout = timeout
-        self.kube = ["kubectl", "--context", config["context"], "--request-timeout=30s"]
+        self._context = context if context is not None else config.get("context")
+        require(
+            self._context is None
+            or (isinstance(self._context, str) and self._context.strip()),
+            "context must be a nonempty string",
+        )
         self.ns = config["namespace"]
+
+    @property
+    def context(self):
+        # Resolved lazily so --check never reads the kubeconfig or runs kubectl.
+        if self._context is None:
+            self._context = current_context()
+        return self._context
+
+    @property
+    def kube(self):
+        return ["kubectl", "--context", self.context, "--request-timeout=30s"]
 
     def run(self, args, payload=None):
         # Never log stdin: it can contain Secret data. Do not echo commands.
@@ -428,6 +482,17 @@ class Installer:
         )
         return json.loads(output) if output.strip() else None
 
+    def apps_domain(self):
+        ingress = self.get("ingresses.config.openshift.io", "cluster", False)
+        domain = ((ingress or {}).get("spec") or {}).get("domain")
+        require(
+            isinstance(domain, str) and domain.strip(),
+            "Could not resolve the OpenShift apps domain from "
+            "ingresses.config.openshift.io/cluster; set gateway.host and "
+            "dashboard.host explicitly",
+        )
+        return domain.strip().rstrip(".").lower()
+
     def create(self, resource):
         self.run([*self.kube, "create", "-f", "-"], json.dumps(resource))
 
@@ -441,7 +506,7 @@ class Installer:
                 "manifest",
                 release,
                 "--kube-context",
-                self.config["context"],
+                self.context,
                 "--namespace",
                 self.ns,
             ]
@@ -478,7 +543,7 @@ class Installer:
                         "helm",
                         "list",
                         "--kube-context",
-                        self.config["context"],
+                        self.context,
                         "--namespace",
                         self.ns,
                         "--output",
@@ -676,6 +741,7 @@ class Installer:
                 )
 
     def preflight(self):
+        print(f"Context: {self.context}; namespace: {self.ns}", flush=True)
         self.run([*self.kube, "get", "--raw", "/apis/route.openshift.io/v1"])
         crd = self.get("crd", "sandboxes.agents.x-k8s.io", False)
         require(
@@ -879,7 +945,7 @@ class Installer:
                     release,
                     str(charts[index]),
                     "--kube-context",
-                    self.config["context"],
+                    self.context,
                     "--namespace",
                     self.ns,
                     "--values",
@@ -917,6 +983,14 @@ def main():
         "--namespace",
         help="Administrator-selected namespace; overrides config.namespace (created if missing)",
     )
+    parser.add_argument(
+        "--context",
+        help="Kube context; overrides config.context and the current kubeconfig context",
+    )
+    parser.add_argument(
+        "--apps-domain",
+        help="Apps domain used to derive omitted hosts during --check",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--check",
@@ -948,13 +1022,33 @@ def main():
         "Local source charts are only supported with --check; install versioned OCI artifacts",
     )
     require(
+        args.apps_domain is None or args.check,
+        "--apps-domain is only supported with --check",
+    )
+    require(
         re.fullmatch(r"[1-9][0-9]*[smh]", args.timeout),
         "Timeout must be a positive duration such as 10m",
     )
     for tool in ["helm"] if args.check else ["helm", "kubectl"]:
         require(shutil.which(tool), f"Required tool not found: {tool}")
     config = load_config(args.config.resolve(), args.namespace)
-    installer = Installer(config, args.timeout)
+    installer = Installer(config, args.timeout, args.context)
+    missing = [
+        name for name in ("gateway", "dashboard") if config[name].get("host") is None
+    ]
+    if args.check:
+        require(args.apps_domain != "", "--apps-domain must be a nonempty DNS name")
+        resolve_hosts(config, args.apps_domain or PLACEHOLDER_APPS_DOMAIN)
+        if missing and args.apps_domain is None:
+            hosts = ", ".join(config[name]["host"] for name in missing)
+            print(
+                f"Note: {', '.join(missing)} host(s) are not set; rendering placeholder "
+                f"host(s) {hosts}. The install derives real hosts from the cluster apps "
+                "domain; pass --apps-domain to render them offline.",
+                flush=True,
+            )
+    else:
+        resolve_hosts(config, installer.apps_domain() if missing else None)
     os.umask(0o077)
     with tempfile.TemporaryDirectory(prefix="openshell-install-") as temporary:
         root = Path(temporary)

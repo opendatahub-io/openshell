@@ -35,6 +35,26 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+CONTEXT_ERROR = (
+    "Cannot determine the current kubeconfig context; pass --context or "
+    "select a context with kubectl config use-context"
+)
+
+
+def current_context():
+    # Keep the message identical to install.py's helper.
+    result = subprocess.run(
+        ["kubectl", "config", "current-context"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    context = result.stdout.strip()
+    if result.returncode or not context:
+        raise ValueError(CONTEXT_ERROR)
+    return context
+
+
 def secret_file(path):
     value = path.read_text().strip()
     if not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
@@ -205,7 +225,6 @@ def verify(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in (
-        "context",
         "namespace",
         "dashboard-url",
         "allowed-workspace",
@@ -213,6 +232,10 @@ def main():
         "admin-role",
     ):
         parser.add_argument(f"--{name}", required=True)
+    parser.add_argument(
+        "--context",
+        help="Kube context; defaults to the current kubeconfig context",
+    )
     for name in ("admin-token-file", "user-token-file"):
         parser.add_argument(f"--{name}", type=Path, required=True)
     for name in ("other-gateway-token-file", "session-cookie-file", "ca-file"):
@@ -233,6 +256,7 @@ def main():
         parser.error("allowed and denied workspaces must be different")
     if not shutil.which("kubectl"):
         parser.error("kubectl is required")
+    context = args.context or current_context()
     admin = secret_file(args.admin_token_file)
     user = secret_file(args.user_token_file)
     other = (
@@ -241,7 +265,7 @@ def main():
         else None
     )
     cookie = secret_file(args.session_cookie_file) if args.session_cookie_file else None
-    with forward(args.context, args.namespace) as base:
+    with forward(context, args.namespace) as base:
         verify(
             base,
             args.dashboard_url.rstrip("/"),

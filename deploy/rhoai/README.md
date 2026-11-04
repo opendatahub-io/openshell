@@ -18,9 +18,33 @@ qualified RHOAI deployment: it does not cover FIPS compliance, certificate
 renewal, or isolation guarantees beyond the workspace access checks described
 here.
 
+## Table of contents
+
+- [Prerequisites](#prerequisites)
+- [Choose a configuration](#choose-a-configuration)
+- [Copy the configuration](#copy-the-configuration)
+- [Edit the configuration](#edit-the-configuration)
+  - [Required](#required)
+  - [Optional](#optional)
+  - [OIDC issuer certificate](#oidc-issuer-certificate)
+  - [Chart and image pins](#chart-and-image-pins)
+  - [Operational values overrides](#operational-values-overrides)
+  - [Database backend](#database-backend)
+- [Save the client secret](#save-the-client-secret)
+- [Validate, preflight, and install](#validate-preflight-and-install)
+- [Register the gateway and log in](#register-the-gateway-and-log-in)
+- [Create and use a sandbox](#create-and-use-a-sandbox)
+- [Using the OpenShell Dashboard UI](#using-the-openshell-dashboard-ui)
+- [Rerun and upgrade](#rerun-and-upgrade)
+- [Remove an installation](#remove-an-installation)
+- [Troubleshoot common failures](#troubleshoot-common-failures)
+- [Contributor checks](#contributor-checks)
+- [Related documentation](#related-documentation)
+
 ## Prerequisites
 
-- `uv`, Helm 3.17.3 or later, and `kubectl` on the administrator's workstation.
+- `uv`, Helm 3.17.3 or later, and `kubectl` for installation and preflight on
+  the administrator's workstation. `--check` needs only Helm.
 - OpenShift 4.20 or newer.
 - [Red Hat Build of Agent Sandbox
   Operator](https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.13/html/deploying_red_hat_build_of_agent_sandbox/index)
@@ -38,7 +62,9 @@ here.
   `registry.access.redhat.com` is only needed when you use a Red Hat base image.
 
 The installer does not install an identity provider, Agent Sandbox, RHOAI, or
-console integration. It does not change your current kubeconfig context.
+console integration. It installs into the current kubeconfig context unless you
+pass `--context`, and never changes it. `--check` reads neither the context nor
+the cluster.
 
 ## Choose a configuration
 
@@ -75,19 +101,20 @@ how to wire them.
 
 ## Edit the configuration
 
-- `context` is the kubeconfig context to install into. Run
-  `kubectl config current-context` to copy the active one.
+Review the required fields first. They describe the deployment target and the
+identity provider registration. The examples already pin published charts and
+images; check them against [Chart and image pins](#chart-and-image-pins).
+
+### Required
+
 - `namespace` is the application namespace, for example `openshell-team`. The
   installer rejects `default`, `kube-*`, and `openshift-*`. It deploys one
   gateway and dashboard pair per namespace, and each pair needs distinct hosts
   and OIDC identifiers: the OpenShift router does not admit the same host from
   two namespaces.
-- `gateway.host` and `dashboard.host` are distinct public hostnames, qualified
-  with the namespace, as in the examples
-  (`gateway-openshell-team.apps.example.com`). Both must sit under the router's
-  `*.apps.<domain>` wildcard so DNS resolves. The dashboard's edge Route uses
-  the router certificate; the gateway serves its own certificate through a
-  passthrough Route.
+- `gateway.chart`, `gateway.version`, `dashboard.chart`, and `dashboard.version`
+  are required. The examples pin published versions; replace the
+  `REPLACE_WITH_*` placeholders when you copy `config.example.json`.
 - `oidc.issuer` is the provider's issuer URL.
 - `oidc.client_id` is the dashboard browser client, conventionally
   `openshell-dashboard-<namespace>`. The Keycloak examples use
@@ -100,15 +127,32 @@ how to wire them.
   `roles`.
 - `oidc.admin_role` and `oidc.user_role` are the role names the gateway and
   dashboard recognize.
+- `oidc.client_secret_file` names the browser client secret file. It is required
+  for the first install, and paths in this field and `oidc.ca_file` resolve
+  relative to the configuration file.
+
+### Optional
+
+- `gateway.host` and `dashboard.host` are optional. When omitted, the installer
+  derives `gateway-<namespace>.<apps-domain>` and
+  `dashboard-<namespace>.<apps-domain>` from the cluster ingress domain
+  (`ingresses.config.openshift.io/cluster` `.spec.domain`), using the effective
+  namespace including `--namespace`. Set them explicitly to use a different
+  router domain; explicit hosts do not follow `--namespace`. Both hosts must be
+  distinct and sit under the router's `*.apps.<domain>` wildcard so DNS
+  resolves. The dashboard's edge Route uses the router certificate; the gateway
+  serves its own certificate through a passthrough Route.
+- `context` is optional. The installer uses the current kubeconfig context;
+  `--context` overrides it and also overrides this field when set.
 - `oidc.allowed_roles` is a dashboard login filter. The Keycloak examples list
   both roles that [keycloak-dev-guide.md](keycloak-dev-guide.md) creates, as an
   example choice, not a requirement; any role list the provider emits works.
 - `oidc.scope` is the space-separated OAuth scope request, for example
   `openid email profile`. Omit it to keep the provider defaults.
-- `oidc.client_secret_file` names the browser client secret file. Paths in this
-  field and `oidc.ca_file` resolve relative to the configuration file.
 
 Register `https://<dashboard-host>/oauth2/callback` with the identity provider.
+With the default configuration, `<dashboard-host>` is
+`dashboard-<namespace>.<apps-domain>`.
 
 ### OIDC issuer certificate
 
@@ -211,6 +255,12 @@ Expect `Both charts rendered successfully. This does not verify cluster or API
 compatibility.` The check downloads the pinned charts but does not access the
 cluster.
 
+When a configuration omits the hosts, `--check` renders them as
+`gateway-<namespace>.apps.example.com` and
+`dashboard-<namespace>.apps.example.com` and prints a note; the install derives
+the real hosts from the cluster. Pass `--apps-domain <domain>` to render the
+real derived hosts offline.
+
 Run cluster preflight without installing:
 
 ```shell
@@ -219,6 +269,9 @@ Run cluster preflight without installing:
 ```
 
 Expect `Cluster preflight passed; no installation resources were changed.`
+Preflight prints the resolved context and namespace. When a host is omitted, it
+also resolves the ingress apps domain and uses the derived hosts for the
+installer's identity checks.
 
 Install:
 
@@ -227,10 +280,12 @@ Install:
   --config "$HOME/.config/openshell-rhoai/config.json"
 ```
 
-The installer prints the dashboard and gateway URLs. `--namespace` overrides
-only the namespace, not the hosts or OIDC identifiers. Set `--timeout 15m` for
-a slower cluster. On failure, the installer leaves the created resources for
-diagnosis; correct the cause and rerun the same command.
+The installer prints the dashboard and gateway URLs. `--namespace` overrides the
+namespace; when hosts are omitted, the derived hosts follow it. Explicit hosts
+and OIDC identifiers do not change, so keep the provider registrations in sync.
+`--context` overrides the kube context. Set `--timeout 15m` for a slower
+cluster. On failure, the installer leaves the created resources for diagnosis;
+correct the cause and rerun the same command.
 
 ## Register the gateway and log in
 
@@ -288,8 +343,9 @@ openshell gateway add \
   "https://gateway-openshell-team.apps.example.com:443"
 ```
 
-Replace the issuer and hosts with the values in your configuration. The command
-opens a browser for the Authorization Code + PKCE login.
+Replace the issuer with your configuration value. The gateway URL is the derived
+default `gateway-<namespace>.<apps-domain>`; use the URL the installer printed.
+The command opens a browser for the Authorization Code + PKCE login.
 
 Log in as a user that holds the gateway's admin role, configured in
 `oidc.admin_role` and named `openshell-admin` in the Keycloak examples. The
@@ -347,9 +403,10 @@ and [How it works](https://docs.nvidia.com/openshell/how-it-works).
 
 ## Using the OpenShell Dashboard UI
 
-The installer deploys the dashboard beside the gateway and prints its URL. You
-can also use `https://<dashboard.host>` from your configuration. Open the URL
-and sign in through the configured OIDC provider.
+The installer deploys the dashboard beside the gateway and prints its URL. With
+omitted hosts, the URL is `https://dashboard-<namespace>.<apps-domain>`; when
+hosts are set explicitly, use the value the installer printed. Open the URL and
+sign in through the configured OIDC provider.
 
 The dashboard shows different features depending on the signed-in user's role.
 The account must hold a role listed in `oidc.allowed_roles`; the Keycloak
@@ -382,7 +439,9 @@ generated values with `--reset-values`, including the configured values files,
 so out-of-band Helm value edits are not preserved.
 
 Changing the gateway host, issuer, audience, or client ID is rejected by the
-`openshell-installer` state and needs an explicit identity migration.
+`openshell-installer` state and needs an explicit identity migration. When hosts
+are omitted, changing the namespace or the cluster apps domain changes the
+derived gateway host and triggers the same check.
 
 A changed client secret or OIDC CA requires explicit rotation. Update the
 Secret while preserving `cookie-secret`, then restart the dashboard:
@@ -405,9 +464,12 @@ The installer has no uninstall subcommand. Remove the dashboard first, then the
 gateway:
 
 ```shell
-helm uninstall openshell-dashboard -n openshell-team --kube-context YOUR_CONTEXT
-helm uninstall openshell -n openshell-team --kube-context YOUR_CONTEXT
+helm uninstall openshell-dashboard -n openshell-team
+helm uninstall openshell -n openshell-team
 ```
+
+Helm uses the current kube context; add `--kube-context <context>` if it differs
+from `kubectl config current-context`.
 
 The gateway chart's certificate hook creates three Secrets outside the release
 manifest, so `helm uninstall` does not remove them. Delete them and the
@@ -440,9 +502,10 @@ namespace for you.
 | No default StorageClass | Mark a block-backed StorageClass as default; the gateway's SQLite PVC needs it. |
 | Agent Sandbox readiness fails | Install or start the Agent Sandbox controller, or override `agent_sandbox_namespace` and `agent_sandbox_deployment`. |
 | `x509` error during `openshell gateway add` | Distinguish the two trust paths: copy the gateway CA into the CLI mtls directory, and build the `SSL_CERT_FILE` bundle for OIDC discovery. |
-| `dns error` from `openshell status` after `gateway add` succeeds | The gateway host is outside the router's `*.apps.<domain>` wildcard, so it has no DNS record. Registration only contacts the OIDC issuer; `status` is the first gateway connection. Correct `gateway.host`, and reinstall when the installer already recorded the old host. |
+| `dns error` from `openshell status` after `gateway add` succeeds | The gateway host is outside the router's `*.apps.<domain>` wildcard, so it has no DNS record. Registration only contacts the OIDC issuer; `status` is the first gateway connection. Correct `gateway.host`, or remove it to derive `gateway-<namespace>.<apps-domain>` from the ingress domain. Reinstall when the installer already recorded the old host. |
+| `Could not resolve the OpenShift apps domain` | Grant read access to `ingresses.config.openshift.io/cluster`, or set `gateway.host` and `dashboard.host` explicitly. |
 | HTTP 403 after login | The user holds no role in `allowed_roles`. Add a listed role to the user, or include the roles the provider emits, then rerun the install command. |
-| Gateway host or issuer change is rejected | The installer state records the original identity. Migrate the certificate and endpoint explicitly instead of editing state. |
+| Gateway host or issuer change is rejected | The installer state records the original identity. With omitted hosts, a namespace or ingress-domain change also changes the gateway host. Migrate the certificate and endpoint explicitly instead of editing state. |
 
 For Keycloak-specific failures, see
 [Troubleshooting](keycloak-dev-guide.md#troubleshooting) in the Keycloak

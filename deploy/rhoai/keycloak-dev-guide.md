@@ -25,10 +25,13 @@ export CONFIG_DIR="${HOME}/.config/openshell-rhoai"
 ```
 
 The client IDs are namespace-qualified and match the example configurations, so
-the commands work unchanged for the default namespace. Changing `NS` changes the
-client IDs and the dashboard callback URL; update the OpenShell configuration
-from [README.md](README.md) to match and re-register
-`https://<new-dashboard-host>/oauth2/callback` with Keycloak.
+the commands work unchanged for the default namespace. `DASH_URL` also matches
+the host the installer derives from the namespace and ingress domain, so the
+example configurations need no host changes. Changing `NS` changes the client
+IDs, `DASH_URL`, and both derived hosts; update the OIDC identifiers in the
+OpenShell configuration from [README.md](README.md) and re-register
+`https://<new-dashboard-host>/oauth2/callback` with Keycloak. If the
+configuration sets explicit hosts, register that dashboard URL instead.
 
 ## Part 1 — PostgreSQL and Keycloak
 
