@@ -334,9 +334,12 @@ cat /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
 export SSL_CERT_FILE="$HOME/.config/openshell-rhoai/ca-bundle.pem"
 ```
 
-On Debian-based hosts, replace the system bundle path with
-`/etc/ssl/certs/ca-certificates.crt`. You may also source the ingress CA from
-the installer-created ConfigMap:
+The installer prints the system bundle path it detects for the host it runs
+on. If you run these commands on another host, substitute the matching path:
+`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` on Fedora and RHEL,
+`/etc/ssl/certs/ca-certificates.crt` on Debian and Ubuntu, and
+`/etc/ssl/cert.pem` on macOS. You may also source the ingress CA from the
+installer-created ConfigMap:
 
 ```shell
 oc -n openshell-team get configmap openshell-oidc-ca \

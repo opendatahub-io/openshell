@@ -33,6 +33,16 @@ OIDC_CA = "openshell-oidc-ca"
 MIN_DASHBOARD_USER_ROLE_CHART = (0, 1, 2)
 CLI_CLIENT_ID = "openshell-cli"
 CLI_INSTALL_URL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh"
+# System trust bundles in preference order; the installer prints the first that
+# exists on its host and names the others for copy-paste on a different host.
+SYSTEM_CA_BUNDLES = (
+    # Fedora, RHEL
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    # Debian, Ubuntu
+    "/etc/ssl/certs/ca-certificates.crt",
+    # macOS
+    "/etc/ssl/cert.pem",
+)
 # Releases from this version onward include the pre-5.19 legacy-kernel fixes
 # (NVIDIA/OpenShell#4150). The gateway chart version tracks the OpenShell
 # release, so downstream images must match it.
@@ -475,6 +485,15 @@ def chart_values(config):
     return gateway, dashboard
 
 
+def system_ca_bundle():
+    # The CLI normally runs on the workstation where the installer runs, so
+    # prefer the bundle that exists on this host.
+    for candidate in SYSTEM_CA_BUNDLES:
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
 def next_steps(config, context):
     ns = config["namespace"]
     oidc = config["oidc"]
@@ -494,13 +513,26 @@ def next_steps(config, context):
         f'     > "{gateway_dir}/ca.crt"',
     ]
     if oidc.get("ca_file"):
+        bundle = system_ca_bundle()
         lines += [
             "",
             "   The OIDC issuer uses a private CA; add it to the trust bundle:",
-            "   cat /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \\",
+        ]
+        if bundle is None:
+            lines += [
+                "   Could not detect a system CA bundle on this host; substitute",
+                "   your platform's path below.",
+            ]
+        lines += [
+            f"   cat {bundle or '<system-ca-bundle>'} \\",
             f'     "{oidc["ca_file"]}" \\',
             '     > "$HOME/.config/openshell-rhoai/ca-bundle.pem"',
             '   export SSL_CERT_FILE="$HOME/.config/openshell-rhoai/ca-bundle.pem"',
+            "",
+            "   Platform paths: Fedora/RHEL",
+            "   /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem,",
+            "   Debian/Ubuntu /etc/ssl/certs/ca-certificates.crt,",
+            "   macOS /etc/ssl/cert.pem.",
         ]
     lines += [
         "",
