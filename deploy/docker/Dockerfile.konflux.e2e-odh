@@ -81,7 +81,9 @@ COPY odh/requirements.txt /tmp/requirements.txt
 RUN uv venv --python python3.11 /opt/odh-e2e-venv && \
     uv pip install --python /opt/odh-e2e-venv/bin/python --no-index --require-hashes \
         --find-links /cachi2/output/deps/pip -r /tmp/requirements.txt
-RUN /opt/odh-e2e-venv/bin/python tasks/scripts/generate_python_proto.py
+# uv run puts the venv bin on PATH so protoc can find protoc-gen-mypy_grpc.
+RUN uv run --no-project --python /opt/odh-e2e-venv/bin/python \
+    python tasks/scripts/generate_python_proto.py
 
 FROM registry.access.redhat.com/ubi9/ubi:9.8-1793580630@sha256:8f989cc9270da6abec0144c22846ed1e6e92e462dc7768ce0981c4ac1d574733
 
