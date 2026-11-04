@@ -13,7 +13,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,10 +24,14 @@ installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
 
 
-def configuration():
+def configuration(with_hosts=True):
     config_path = Path(__file__).with_name("config-examples") / "config.example.json"
     config = json.loads(config_path.read_text())
     config["context"] = "test-context"
+    if with_hosts:
+        # Keep the existing suite deterministic; the examples omit these.
+        config["gateway"]["host"] = "gateway-openshell-team.apps.example.com"
+        config["dashboard"]["host"] = "dashboard-openshell-team.apps.example.com"
     config["gateway"]["version"] = "0.1.3"
     config["dashboard"]["version"] = "0.1.7"
     for section in ("gateway", "dashboard"):
@@ -44,7 +48,10 @@ class FakeCluster(installer.Installer):
         self.objects = {
             ("crd", "sandboxes.agents.x-k8s.io"): {
                 "spec": {"versions": [{"name": "v1beta1", "served": True}]}
-            }
+            },
+            ("ingresses.config.openshift.io", "cluster"): {
+                "spec": {"domain": "apps.test.example.com"}
+            },
         }
         self.calls = []
         self.releases = []
@@ -881,6 +888,250 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(call.args[0][:2], ["helm", "template"])
             args = call.args[0]
             self.assertEqual(args[args.index("--namespace") + 1], "render-project")
+
+    def check_render(self, extra=()):
+        """Run --check with local source charts and return rendered value files."""
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        for chart in ("gateway", "dashboard"):
+            (self.root / chart).mkdir()
+            (self.root / chart / "Chart.yaml").write_text("version: 0.0.0\n")
+        rendered = []
+
+        def run(_instance, args, payload=None):
+            self.assertEqual(args[:2], ["helm", "template"])
+            self.assertIsNone(payload)
+            rendered.append(
+                json.loads(Path(args[args.index("--values") + 1]).read_text())
+            )
+            return ""
+
+        argv = [
+            "install.py",
+            "--config",
+            str(path),
+            "--check",
+            "--gateway-chart-directory",
+            str(self.root / "gateway"),
+            "--dashboard-chart-directory",
+            str(self.root / "dashboard"),
+            *extra,
+        ]
+        output = io.StringIO()
+        with (
+            patch("sys.argv", argv),
+            patch.object(installer.shutil, "which", return_value="helm"),
+            patch.object(installer.Installer, "run", run),
+            patch.object(
+                installer,
+                "current_context",
+                side_effect=AssertionError("--check resolved a kube context"),
+            ),
+            patch.object(
+                installer.Installer,
+                "apps_domain",
+                side_effect=AssertionError("--check accessed the cluster"),
+            ),
+            redirect_stdout(output),
+        ):
+            installer.main()
+        return rendered, output.getvalue()
+
+    def test_example_configs_omit_context_and_hosts(self):
+        examples = Path(__file__).with_name("config-examples")
+        for path in sorted(examples.glob("config.example*.json")):
+            raw = json.loads(path.read_text())
+            with self.subTest(path=path.name):
+                self.assertNotIn("context", raw)
+                self.assertNotIn("host", raw["gateway"])
+                self.assertNotIn("host", raw["dashboard"])
+
+    def test_resolve_hosts_derives_namespace_qualified_hosts(self):
+        self.config = configuration(with_hosts=False)
+        config = self.load()
+        installer.resolve_hosts(config, "apps.cluster.example.com")
+        self.assertEqual(
+            config["gateway"]["host"],
+            "gateway-openshell-team.apps.cluster.example.com",
+        )
+        self.assertEqual(
+            config["dashboard"]["host"],
+            "dashboard-openshell-team.apps.cluster.example.com",
+        )
+        gateway, dashboard = installer.chart_values(config)
+        self.assertEqual(gateway["openshiftRoute"]["host"], config["gateway"]["host"])
+        self.assertEqual(
+            gateway["pkiInitJob"]["serverDnsNames"][0], config["gateway"]["host"]
+        )
+        self.assertEqual(
+            dashboard["openshiftRoute"]["host"], config["dashboard"]["host"]
+        )
+
+    def test_resolve_hosts_keeps_explicit_host_and_derives_other(self):
+        config = self.load()
+        config["dashboard"].pop("host")
+        installer.resolve_hosts(config, "apps.cluster.example.com")
+        self.assertEqual(
+            config["gateway"]["host"], "gateway-openshell-team.apps.example.com"
+        )
+        self.assertEqual(
+            config["dashboard"]["host"],
+            "dashboard-openshell-team.apps.cluster.example.com",
+        )
+
+    def test_resolve_hosts_enforces_distinctness_after_derivation(self):
+        config = self.load()
+        config["dashboard"]["host"] = config["gateway"]["host"]
+        with self.assertRaisesRegex(ValueError, "distinct hosts"):
+            installer.resolve_hosts(config)
+
+    def test_resolve_hosts_rejects_invalid_derived_host(self):
+        self.config = configuration(with_hosts=False)
+        config = self.load()
+        with self.assertRaisesRegex(ValueError, "Invalid gateway.host"):
+            installer.resolve_hosts(config, "apps_bad.example.com")
+
+    def test_namespace_override_changes_derived_hosts(self):
+        self.config = configuration(with_hosts=False)
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        config = installer.load_config(path, "research-team")
+        installer.resolve_hosts(config, "apps.cluster.example.com")
+        self.assertEqual(
+            config["gateway"]["host"],
+            "gateway-research-team.apps.cluster.example.com",
+        )
+        self.assertEqual(
+            config["dashboard"]["host"],
+            "dashboard-research-team.apps.cluster.example.com",
+        )
+
+    def test_apps_domain_reads_openshift_ingress(self):
+        self.assertEqual(self.cluster().apps_domain(), "apps.test.example.com")
+
+    def test_apps_domain_missing_is_rejected(self):
+        cluster = self.cluster()
+        cluster.objects[("ingresses.config.openshift.io", "cluster")] = {"spec": {}}
+        with self.assertRaisesRegex(ValueError, "apps domain"):
+            cluster.apps_domain()
+
+    def test_installer_does_not_resolve_context_on_construction(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        config = self.load()
+        with patch.object(
+            installer,
+            "current_context",
+            side_effect=AssertionError("resolved eagerly"),
+        ):
+            cluster = FakeCluster(config)
+        self.assertIsNone(cluster._context)
+
+    def test_default_context_is_resolved_once_and_used_for_kubectl_and_helm(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        with patch.object(
+            installer, "current_context", return_value="current-context"
+        ) as current:
+            cluster = self.cluster()
+            installer.resolve_hosts(cluster.config, cluster.apps_domain())
+            cluster.install(["gateway.tgz", "dashboard.tgz"], ["g.json", "d.json"])
+        self.assertEqual(current.call_count, 1)
+        for args, _ in cluster.calls:
+            self.assertIn("current-context", args)
+
+    def test_cli_context_overrides_config_context(self):
+        with patch.object(
+            installer,
+            "current_context",
+            side_effect=AssertionError("looked up the current context"),
+        ):
+            self.assertEqual(
+                installer.Installer(self.load(), "10m", "cli-context").context,
+                "cli-context",
+            )
+
+    def test_config_context_is_used_without_lookup(self):
+        with patch.object(
+            installer,
+            "current_context",
+            side_effect=AssertionError("looked up the current context"),
+        ):
+            self.assertEqual(
+                installer.Installer(self.load(), "10m").context, "test-context"
+            )
+
+    def test_check_without_context_or_hosts_never_resolves_cluster(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        rendered, output = self.check_render()
+        self.assertEqual(
+            rendered[0]["openshiftRoute"]["host"],
+            "gateway-openshell-team.apps.example.com",
+        )
+        self.assertEqual(
+            rendered[1]["openshiftRoute"]["host"],
+            "dashboard-openshell-team.apps.example.com",
+        )
+        self.assertIn("rendering placeholder", output)
+        self.assertIn("apps.example.com", output)
+
+    def test_check_with_apps_domain_derives_hosts_offline(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        rendered, output = self.check_render(
+            ["--apps-domain", "apps.cluster.example.com"]
+        )
+        self.assertEqual(
+            rendered[0]["openshiftRoute"]["host"],
+            "gateway-openshell-team.apps.cluster.example.com",
+        )
+        self.assertEqual(
+            rendered[1]["openshiftRoute"]["host"],
+            "dashboard-openshell-team.apps.cluster.example.com",
+        )
+        self.assertNotIn("rendering placeholder", output)
+
+    def test_check_placeholder_hosts_follow_namespace_override(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        rendered, _ = self.check_render(["--namespace", "render-project"])
+        self.assertEqual(
+            rendered[0]["openshiftRoute"]["host"],
+            "gateway-render-project.apps.example.com",
+        )
+        self.assertEqual(
+            rendered[1]["openshiftRoute"]["host"],
+            "dashboard-render-project.apps.example.com",
+        )
+
+    def test_apps_domain_flag_requires_check(self):
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "install.py",
+                    "--config",
+                    str(path),
+                    "--preflight",
+                    "--apps-domain",
+                    "apps.example.com",
+                ],
+            ),
+            self.assertRaisesRegex(ValueError, "only supported with --check"),
+        ):
+            installer.main()
+
+    def test_derived_gateway_host_change_requires_migration(self):
+        self.config = configuration(with_hosts=False)
+        cluster = self.cluster()
+        installer.resolve_hosts(cluster.config, cluster.apps_domain())
+        cluster.install(["gateway.tgz", "dashboard.tgz"], ["g.json", "d.json"])
+        cluster.config["gateway"]["host"] = "other.apps.test.example.com"
+        with self.assertRaisesRegex(ValueError, "certificate migration"):
+            cluster.preflight()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Authorization verifier regression tests; no cluster or identity provider."""
 
+import contextlib
 import importlib.util
 import io
 import threading
@@ -125,6 +126,70 @@ class VerifyTests(unittest.TestCase):
             raise ValueError("test failure")
         process.terminate.assert_called_once()
         process.wait.assert_called_once()
+
+    def run_main(self, extra=()):
+        argv = [
+            "verify.py",
+            "--namespace",
+            "team",
+            "--dashboard-url",
+            "https://dashboard.example",
+            "--allowed-workspace",
+            "allow",
+            "--denied-workspace",
+            "deny",
+            "--admin-role",
+            "admin",
+            "--admin-token-file",
+            "admin.txt",
+            "--user-token-file",
+            "user.txt",
+            *extra,
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(verifier.shutil, "which", return_value="kubectl"),
+            patch.object(verifier, "secret_file", return_value="token"),
+            patch.object(verifier, "verify"),
+            patch.object(
+                verifier,
+                "forward",
+                return_value=contextlib.nullcontext("http://127.0.0.1:1234"),
+            ) as forward,
+        ):
+            verifier.main()
+        return forward
+
+    def test_current_context_reads_kubectl_stdout(self):
+        result = Mock(returncode=0, stdout="ctx\n")
+        with patch.object(verifier.subprocess, "run", return_value=result):
+            self.assertEqual(verifier.current_context(), "ctx")
+
+    def test_current_context_failure_is_clear(self):
+        for result in (
+            Mock(returncode=1, stdout="ctx\n"),
+            Mock(returncode=0, stdout="\n"),
+        ):
+            with (
+                self.subTest(result=result),
+                patch.object(verifier.subprocess, "run", return_value=result),
+                self.assertRaisesRegex(ValueError, "current kubeconfig context"),
+            ):
+                verifier.current_context()
+
+    def test_context_defaults_to_current_kube_context(self):
+        with patch.object(
+            verifier, "current_context", return_value="current-context"
+        ) as current:
+            forward = self.run_main()
+        current.assert_called_once()
+        forward.assert_called_once_with("current-context", "team")
+
+    def test_explicit_context_skips_current_context_lookup(self):
+        with patch.object(verifier, "current_context") as current:
+            forward = self.run_main(["--context", "cli-context"])
+        current.assert_not_called()
+        forward.assert_called_once_with("cli-context", "team")
 
 
 if __name__ == "__main__":
