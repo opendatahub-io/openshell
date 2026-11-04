@@ -20,7 +20,7 @@
 #     quay.io/opendatahub/odh-openshell-{gateway,supervisor,sandbox}:<tag>
 #
 # Env overrides:
-#   IMAGE_TAG        image tag to deploy (required without Git branch metadata)
+#   IMAGE_TAG        tag for bare image repositories (otherwise inferred from Git)
 #   QUAY_NAMESPACE   quay.io namespace (default: opendatahub)
 #   GATEWAY_IMAGE    gateway image reference (bare repository uses IMAGE_TAG)
 #   GATEWAY_IMAGE_DIGEST optional gateway digest override
@@ -180,18 +180,21 @@ if [[ "${ACTION}" == teardown ]]; then
 	exit 0
 fi
 
-if [[ -z "${IMAGE_TAG:-}" ]]; then
+GATEWAY_IMAGE="${GATEWAY_IMAGE:-${QNS}/odh-openshell-gateway}"
+SUPERVISOR_IMAGE="${SUPERVISOR_IMAGE:-${QNS}/odh-openshell-supervisor}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-${QNS}/odh-openshell-sandbox}"
+needs_image_tag=0
+for image in "${GATEWAY_IMAGE}" "${SUPERVISOR_IMAGE}" "${SANDBOX_IMAGE}"; do
+	if ! e2e_image_reference_is_complete "${image}"; then needs_image_tag=1; fi
+done
+if [[ "${needs_image_tag}" == 1 && -z "${IMAGE_TAG:-}" ]]; then
 	if ! branch="$(git -C "${REPO_ROOT}" symbolic-ref --quiet --short HEAD)"; then
-		fail "IMAGE_TAG is required when the source tree has no Git branch metadata"
+		fail "IMAGE_TAG is required for bare image repositories when the source tree has no Git branch metadata"
 	fi
 	IMAGE_TAG="${branch//\//-}"
 	IMAGE_TAG="${IMAGE_TAG//[^a-zA-Z0-9._-]/}"
 	IMAGE_TAG="${IMAGE_TAG:0:128}"
 fi
-
-GATEWAY_IMAGE="${GATEWAY_IMAGE:-${QNS}/odh-openshell-gateway}"
-SUPERVISOR_IMAGE="${SUPERVISOR_IMAGE:-${QNS}/odh-openshell-supervisor}"
-SANDBOX_IMAGE="${SANDBOX_IMAGE:-${QNS}/odh-openshell-sandbox}"
 
 # Helm receives image components through --set-string, so references must not
 # carry Helm map separators (',' or '=') that could inject additional values.
@@ -224,9 +227,9 @@ validate_image_reference() {
 	fi
 }
 
-GATEWAY_IMAGE_REF="$(e2e_resolve_image_reference "${GATEWAY_IMAGE}" "${IMAGE_TAG}")"
-SUPERVISOR_IMAGE_REF="$(e2e_resolve_image_reference "${SUPERVISOR_IMAGE}" "${IMAGE_TAG}")"
-SANDBOX_IMAGE_REF="$(e2e_resolve_image_reference "${SANDBOX_IMAGE}" "${IMAGE_TAG}")"
+GATEWAY_IMAGE_REF="$(e2e_resolve_image_reference "${GATEWAY_IMAGE}" "${IMAGE_TAG:-}")"
+SUPERVISOR_IMAGE_REF="$(e2e_resolve_image_reference "${SUPERVISOR_IMAGE}" "${IMAGE_TAG:-}")"
+SANDBOX_IMAGE_REF="$(e2e_resolve_image_reference "${SANDBOX_IMAGE}" "${IMAGE_TAG:-}")"
 
 # Validate the resolved references: an operator-supplied IMAGE_TAG joins the
 # reference during resolution, and every component reaches Helm through

@@ -35,6 +35,16 @@ Gateway modes and tier phases are data in
 and the deploy script checks the deployed Helm values before the tests start.
 Image repository, tag, and digest overrides can vary between local and image
 runs; phase selection and gateway configuration come from the shared plan.
+The entrypoint discovers digest-pinned runtime images from the installed
+RHOAI/ODH operator CSV before deploying using a bash-only `discover_e2e_images`
+function compatible with Bash 3.2 and later. It fetches the selected CSV's
+deployment env vars and related images in one request. Discovery retries
+transient query failures up to three attempts and stops before deployment
+if a query still fails. Discovered images must come from the expected registry
+(`registry.redhat.io/rhoai/` for RHOAI, `quay.io/opendatahub/` for ODH) and
+match `^[a-z0-9._/-]+@sha256:[0-9a-f]{64}$`. Per-image environment overrides
+take precedence. See [runtime image selection](../../../e2e/rust/tests/odh/README.md#runtime-image-selection)
+for selection rules, permissions, and fallback behavior.
 
 The image also carries a fully prefetched Python 3.11 test environment and
 generated protobuf bindings, so later named Python test modes can execute

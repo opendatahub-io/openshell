@@ -161,7 +161,7 @@ Excluded tests do not appear as passes or skips in the JUnit report.
 ## Prerequisites
 
 - An OpenShift cluster with ODH/RHOAI installed. The normal tier tasks deploy
-  the selected Quay images and tear down each phase deployment.
+  the selected runtime images and tear down each phase deployment.
 - `oc` CLI authenticated to that cluster.
 - Rust toolchain and `mise` installed.
 - Python 3.11 or newer, `cargo-nextest`, and `xsltproc` installed for tiered
@@ -213,13 +213,15 @@ Example, running the Smoke tier against a real cluster:
 umask 077
 oc --kubeconfig ~/.kube/config config view --minify --flatten > kubeconfig
 chmod 600 kubeconfig
-ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/" \
+ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/astral-sh/" \
   mise run e2e:odh:smoke
 ```
 
-`IMAGE_TAG` and `ALLOWED_IMAGE_REGISTRY_PREFIXES` are required by deployment
-and the image provenance test — see below. For RHOAI images, use
-`registry.redhat.io/,nvcr.io/nvidia/base/` instead. The shared entrypoint
+`ALLOWED_IMAGE_REGISTRY_PREFIXES` is required by the image provenance test.
+Runtime images default to the installed operator CSV; `IMAGE_TAG` is only
+needed for bare repository overrides or fallback images without Git metadata
+— see [Runtime image selection](#runtime-image-selection). For RHOAI images, use
+`registry.redhat.io/,ghcr.io/astral-sh/` instead. The shared entrypoint
 generates a DNS-safe `OPENSHELL_E2E_RUN_ID` for each deployed invocation unless
 you provide one. The namespace and Helm release default to `openshell` for
 both shared and managed phases to preserve managed-test compatibility; gateway
@@ -337,7 +339,7 @@ gateway-configured images. Runtime image digests are required E2E evidence:
 failure to persist the evidence fails the test.
 
 ```bash
-ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,nvcr.io/nvidia/base/" \
+ALLOWED_IMAGE_REGISTRY_PREFIXES="quay.io/opendatahub/,ghcr.io/astral-sh/" \
   cargo test --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh \
   -- smoke::image_provenance::
 ```
@@ -465,28 +467,102 @@ the tests. Set `OPENSHELL_E2E_DEPLOY_GATEWAY=0` only when a single-phase tier
 uses an already deployed gateway configured for the CLI inside the container;
 multi-phase tiers reject this option before cluster access.
 
-The environment file must set `IMAGE_TAG` for the gateway, supervisor,
-and sandbox images, plus `ALLOWED_IMAGE_REGISTRY_PREFIXES` for the
-provenance test. `IMAGE_TAG` is required in the image because its source
-tree carries no Git branch metadata; when running the deployment from a
-source checkout, an unset `IMAGE_TAG` is derived from the current Git
-branch instead (sanitized and truncated to 128 characters). The tag is a
-preflight requirement even when every component uses a complete tagged or
-digest reference, and bare repositories inherit it. By default, the
-deployment uses the
-`quay.io/opendatahub/odh-openshell-*` midstream repositories.
-Override `QUAY_NAMESPACE`, `GATEWAY_IMAGE`, `SUPERVISOR_IMAGE`, or
-`SANDBOX_IMAGE` when testing another repository. Image variables accept a bare
-repository (which inherits `IMAGE_TAG`) or a complete tagged/digest reference.
-Each component can be pinned by digest with `GATEWAY_IMAGE_DIGEST`,
-`SUPERVISOR_IMAGE_DIGEST`, or `SANDBOX_IMAGE_DIGEST` (an inline
-`repo@sha256:…` reference works too and must agree with any explicit digest);
-the workload image can optionally be pinned with `WORKLOAD_IMAGE`,
-`WORKLOAD_IMAGE_TAG`, and `WORKLOAD_IMAGE_DIGEST` — these pins are forwarded
-to the deployment but are not yet verified at runtime: the provenance test
-checks the workload only against the registry-prefix allowlist. Requested
-gateway, supervisor, and sandbox-runtime digests are verified against the pods
-that actually run.
+The environment file must set `ALLOWED_IMAGE_REGISTRY_PREFIXES` for the
+provenance test. Runtime image selection follows the same rules as local runs.
+If cluster admission rewrites image registries, include the destination registry
+prefixes in `ALLOWED_IMAGE_REGISTRY_PREFIXES` too. Include the test workload's
+registry as well; the chart's current default uses `nvcr.io/nvidia/base/`.
+
+By default, deployment uses the `quay.io/opendatahub/odh-openshell-*`
+midstream repositories. Override `QUAY_NAMESPACE`, `GATEWAY_IMAGE`,
+`SUPERVISOR_IMAGE`, or `SANDBOX_IMAGE` to test another repository. Bare
+repositories inherit `IMAGE_TAG`; complete tagged or digest references do not
+need it. In the test image, which has no Git branch metadata, set `IMAGE_TAG`
+when using bare repositories. In a source checkout, an unset tag is derived
+from the current branch (sanitized and truncated to 128 characters).
+`GATEWAY_IMAGE_DIGEST`, `SUPERVISOR_IMAGE_DIGEST`, and
+`SANDBOX_IMAGE_DIGEST` can pin components by digest. An inline
+`repo@sha256:…` reference must agree with any explicit digest. The workload
+can optionally be pinned with `WORKLOAD_IMAGE`, `WORKLOAD_IMAGE_TAG`, and
+`WORKLOAD_IMAGE_DIGEST`. The provenance test verifies requested gateway,
+supervisor, and sandbox runtime digests against running pods; it checks the
+workload against the registry allowlist.
+
+### Runtime image selection
+
+Before deploying any phase, the shared entrypoint's `discover_e2e_images`
+function detects RHOAI or ODH by listing operator ClusterServiceVersions
+(CSVs) across namespaces. Discovery supports Bash 3.2 and later. After checking
+the OLM API, it uses two `oc` calls: one jsonpath listing for
+`namespace|name|phase|copiedFrom|reason`, then one fetch of the selected
+CSV's deployment env vars and `spec.relatedImages`. It selects the single
+`Succeeded` CSV named `rhods-operator.*` or `opendatahub-operator.*`,
+ignoring OLM copies (`metadata.labels["olm.copiedFrom"]`) and
+`status.reason == "Copied"`. It reads these environment variables from the
+CSV's deployment containers, falling back to `spec.relatedImages` entries
+when the env vars are absent:
+
+| E2E override | CSV environment variable | relatedImages name |
+|---|---|---|
+| `GATEWAY_IMAGE` | `RELATED_IMAGE_ODH_OPENSHELL_GATEWAY_IMAGE` | `odh_openshell_gateway_image` |
+| `SANDBOX_IMAGE` | `RELATED_IMAGE_ODH_OPENSHELL_SANDBOX_IMAGE` | `odh_openshell_sandbox_image` |
+| `SUPERVISOR_IMAGE` | `RELATED_IMAGE_ODH_OPENSHELL_SUPERVISOR_IMAGE` | `odh_openshell_supervisor_image` |
+
+Discovered references must be sha256-pinned
+(`^[a-z0-9._/-]+@sha256:[0-9a-f]{64}$`) and must come from the expected
+registry for the detected product:
+
+- **RHOAI** (`rhods-operator.*`): `registry.redhat.io/rhoai/`
+- **ODH** (`opendatahub-operator.*`): `quay.io/opendatahub/`
+
+This registry allowlist prevents a rogue CSV from injecting images from an
+unauthorized registry. The strict character class also rejects `,` and `=`,
+preventing Helm `--set-string` injection.
+
+Discovery preserves the full `registry/repository@sha256:...` references and
+resolves them once for all phases in that invocation. It does not change the
+CLI inside the test image. The kubeconfig must allow cluster API discovery
+and listing `clusterserviceversions.operators.coreos.com` across namespaces.
+
+Set any of the three override variables to replace that image; the remaining
+images still come from the CSV. Setting all three bypasses CSV discovery,
+including its permission requirements. For example, this environment file
+replaces just the gateway:
+
+```shell
+GATEWAY_IMAGE=quay.io/my-team/odh-openshell-gateway:custom
+ALLOWED_IMAGE_REGISTRY_PREFIXES=quay.io/my-team/,registry.redhat.io/,nvcr.io/nvidia/base/
+```
+
+Fully tagged or digest-pinned images need no `IMAGE_TAG`. Bare repositories
+use `IMAGE_TAG`, falling back to a sanitized Git branch name when available.
+`IMAGE_TAG` alone does not override CSV images. `GATEWAY_IMAGE_DIGEST` still
+overrides the selected gateway digest.
+
+If OLM is absent or no RHOAI/ODH operator CSV is installed, deployment keeps
+the existing `quay.io/opendatahub/odh-openshell-*` defaults for unset images.
+`QUAY_NAMESPACE` changes the namespace of those fallback repositories.
+Query failures, multiple successful operator CSVs, or an installed operator
+without a successful CSV stop the run before deployment. Missing, conflicting,
+unpinned, or wrong-registry CSV images also stop the run unless that image
+has an explicit override. `OPENSHELL_E2E_DEPLOY_GATEWAY=0` skips discovery.
+
+Each discovery query has a 30-second request timeout. Transient API failures
+(such as timeouts, throttling, and connection resets) receive up to three
+attempts with 1-second and 2-second backoff. Authorization errors fail
+immediately; exhausted retries stop the run before deployment.
+
+Run the discovery and deployment contract tests without a cluster:
+
+```shell
+mise run test:odh-infra
+```
+
+The `ODH Infrastructure Contracts` workflow runs this task on Linux and macOS
+for changes to the discovery and deployment scripts and their dependencies.
+It checks the system Bash on each runner, including macOS Bash 3.2. To select
+that shell locally, set `OPENSHELL_E2E_TEST_BASH=/bin/bash`.
+
 `NAMESPACE`, `RELEASE`, `ROUTE_HOST`, and `GATEWAY_NAME` control the deployment
 and are exact when set;
 use distinct values across parallel invocations. The entrypoint exports
