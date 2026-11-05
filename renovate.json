@@ -11,6 +11,13 @@
     },
     {
       "customType": "regex",
+      "description": "Track the digest-pinned ubi-minimal-pqc runtime bases of the product Konflux images",
+      "managerFilePatterns": ["/^deploy/docker/Dockerfile\\.konflux\\.(gateway|supervisor|cli)$/"],
+      "matchStrings": ["FROM (?<depName>registry\\.redhat\\.io/ubi9/ubi-minimal-pqc):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
       "description": "Track the digest-pinned Rust builder base of the ODH e2e image",
       "managerFilePatterns": ["/^deploy/docker/Dockerfile\\.konflux\\.e2e-odh$/"],
       "matchStrings": ["FROM (?<depName>registry\\.redhat\\.io/rust-builder-image/rust-rhel9):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],

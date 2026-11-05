@@ -113,11 +113,18 @@ build_image() {
     esac
 
     if [[ -z "${prefetch_input}" ]]; then
-        prefetch_input="[
+        if [[ -f "${REPO_ROOT}/${konfig_dir}/rpms.in.yaml" ]]; then
+            prefetch_input="[
             {\"path\": \".\", \"type\": \"cargo\"},
             {\"path\": \"deploy/konflux/cargo-auditable\", \"type\": \"cargo\"},
             {\"path\": \"${konfig_dir}\", \"type\": \"rpm\"}
         ]"
+        else
+            prefetch_input="[
+            {\"path\": \".\", \"type\": \"cargo\"},
+            {\"path\": \"deploy/konflux/cargo-auditable\", \"type\": \"cargo\"}
+        ]"
+        fi
     fi
 
     output_dir="${OUTPUT_DIR}/${component}"
@@ -155,7 +162,9 @@ build_image() {
         */arm64|*/aarch64) rpm_arch="aarch64" ;;
         *)                 rpm_arch=$(uname -m) ;;
     esac
-    cp "${output_dir}/deps/rpm/${rpm_arch}/repos.d/cachi2.repo" "${repos_dir}/"
+    if [[ -f "${output_dir}/deps/rpm/${rpm_arch}/repos.d/cachi2.repo" ]]; then
+        cp "${output_dir}/deps/rpm/${rpm_arch}/repos.d/cachi2.repo" "${repos_dir}/"
+    fi
     chmod -R go+rX "${repos_dir}"
 
     echo "=== Building ${component} (--network none, platform ${PLATFORM}) ==="
@@ -194,9 +203,13 @@ build_image() {
         "${REPO_ROOT}"
 
     echo "=== ${component} built successfully ==="
-    # The sandbox runtime image is ubi-micro without crypto-policies.
-    # openclaw stays on UBI 9 with DEFAULT:PQ; smoke-test.sh asserts it.
-    if [[ "${component}" != "sandbox" && "${component}" != "openclaw" ]]; then
+    # Sandbox is ubi-micro without crypto-policies. OpenClaw still installs
+    # crypto-policies-scripts; smoke-test.sh asserts DEFAULT:PQ. Product
+    # runtimes use ubi-minimal-pqc, which has no update-crypto-policies
+    # binary, so read the policy file instead. e2e-odh still has the binary.
+    if [[ "${component}" == "gateway" || "${component}" == "supervisor" || "${component}" == "cli" ]]; then
+        test "$(podman run --rm --platform "${PLATFORM}" --user=0 --entrypoint /bin/sh "${image_name}" -c 'cat /etc/crypto-policies/config')" = "DEFAULT:PQ"
+    elif [[ "${component}" == "e2e-odh" ]]; then
         test "$(podman run --rm --platform "${PLATFORM}" --user=0 --entrypoint /usr/bin/update-crypto-policies "${image_name}" --show)" = "DEFAULT:PQ"
     fi
     if [[ "${component}" == "openclaw" ]]; then
