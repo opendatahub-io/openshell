@@ -82,6 +82,10 @@ a rule and the README disagree, fix the drift rather than guessing.
 - Add tests by creating a `.rs` file under the right tier and a `mod` line in
   that tier's `mod.rs`, and map upstream binaries/filters in `tiers.toml`. Do
   not add new one-off `mise` tasks for individual test lanes.
+- The sole narrow exception is `e2e:odh:python`: it is the plan-backed,
+  full upstream Python gateway-E2E suite, not an individual test lane. It
+  must continue to use the same tier-plan resolver and shared entrypoint as
+  every other ODH task.
 - Keep the standard tier entry points
   (`e2e:odh:smoke|tier1|tier2|tier3`, `e2e:odh`, and `e2e:odh:full`)
   stable. The OpenShift AI Shift-Left pipeline consumes those tiers as
