@@ -19,6 +19,10 @@ expected_helm_values = { gatewayConfig = { "openshell.gateway.auth" = { allow_un
 helm_values = ["deploy/helm/openshell/ci/values-workspace-managed.yaml"]
 expected_helm_values = { gatewayConfig = { "openshell.gateway.auth" = { allow_unauthenticated_users = false }, "openshell.drivers.kubernetes" = { workspace_mode = "managed", image_pull_policy = "IfNotPresent", sandbox_runtime_image_pull_policy = "IfNotPresent", supervisor_image_pull_policy = "IfNotPresent" } } }
 
+[modes.ha]
+helm_values = ["deploy/helm/openshell/ci/values-high-availability.yaml"]
+expected_helm_values = { replicaCount = 2, workload = { kind = "deployment" }, server = { externalDbSecret = "openshell-ha-pg" }, gatewayConfig = { "openshell.gateway.auth" = { allow_unauthenticated_users = false }, "openshell.drivers.kubernetes" = { workspace_mode = "shared", image_pull_policy = "IfNotPresent", sandbox_runtime_image_pull_policy = "IfNotPresent", supervisor_image_pull_policy = "IfNotPresent" } } }
+
 [smoke]
 description = "Component-level critical tests (5 min target)"
 # The standalone smoke binary was removed in favor of the portable CLI
@@ -56,6 +60,14 @@ description = "Negative and destructive tests"
 upstream_tests = []
 odh_filter = "tier3::"
 
+[tier3.ha]
+description = "Destructive HA gateway failover coverage"
+mode = "ha"
+odh_filter = "tier3::gateway_failover::"
+include_image_provenance = false
+required_env = "OPENSHELL_ODH_HA_FAILOVER"
+run_ignored = true
+
 [odh]
 description = "All ODH-specific tests"
 odh_only = true
@@ -67,6 +79,14 @@ excluded_odh_filters = ["tier2::managed_identity::"]
 description = "Managed-workspace tests"
 upstream_tests = ["workspace_namespace_managed"]
 odh_filter = "tier2::managed_identity::"
+
+[odh.ha]
+description = "Destructive HA gateway failover coverage"
+mode = "ha"
+odh_filter = "tier3::gateway_failover::"
+include_image_provenance = false
+required_env = "OPENSHELL_ODH_HA_FAILOVER"
+run_ignored = true
 
 [full]
 description = "All feature-enabled upstream and ODH tests except listed exclusions"
@@ -87,3 +107,11 @@ port_forward = ["port_forward_echo"]
 description = "Managed-workspace tests"
 upstream_tests = ["workspace_namespace_managed"]
 odh_filter = "tier2::managed_identity::"
+
+[full.ha]
+description = "Destructive HA gateway failover coverage"
+mode = "ha"
+odh_filter = "tier3::gateway_failover::"
+include_image_provenance = false
+required_env = "OPENSHELL_ODH_HA_FAILOVER"
+run_ignored = true

@@ -30,6 +30,7 @@ fi
 resolved="$("${PYTHON_BIN}" "${SCRIPT_DIR}/tier_plan.py" "${TIER}" "${SCRIPT_DIR}/tiers.toml" "${PHASE}")"
 OPENSHELL_E2E_GATEWAY_MODE="$(printf '%s' "${resolved}" | "${PYTHON_BIN}" -c 'import json,sys; print(json.load(sys.stdin)["phase"]["mode"])')"
 export OPENSHELL_E2E_GATEWAY_MODE
+run_ignored="$(printf '%s' "${resolved}" | "${PYTHON_BIN}" -c 'import json,sys; print(int(json.load(sys.stdin)["phase"]["run_ignored"]))')"
 filter="$(printf '%s' "${resolved}" | "${PYTHON_BIN}" -c 'import json,sys; print(json.load(sys.stdin)["filter"])')"
 results_dir="${OPENSHELL_E2E_RESULTS_DIR:-${ROOT}/results}"
 mkdir -p "${results_dir}"
@@ -66,6 +67,11 @@ if old not in text:
 destination.write_text(text.replace(old, f'path = "{report}"'))
 PY
 nextest_args=(--profile e2e-odh --config-file "${ROOT}/.config/nextest.toml" --tool-config-file "odh:${config_file}" --no-tests fail -E "${filter}")
+# The resolved phase, rather than its name, declares whether it owns ignored
+# tests. This keeps destructive opt-ins scoped to their explicit selector.
+if [[ "${run_ignored}" == 1 ]]; then
+	nextest_args+=(--run-ignored all)
+fi
 if [[ -n "${OPENSHELL_E2E_NEXTEST_ARCHIVE:-}" ]]; then
 	nextest_args+=(--archive-file "${OPENSHELL_E2E_NEXTEST_ARCHIVE}" --workspace-remap "${ROOT}/e2e/rust")
 else
