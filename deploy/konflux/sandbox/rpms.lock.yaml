@@ -11,13 +11,13 @@ arches:
     name: glibc-devel
     evr: 2.34-283.el9_8
     sourcerpm: glibc-2.34-283.el9_8.src.rpm
-  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/aarch64/appstream/os/Packages/k/kernel-headers-5.14.0-687.64.1.el9_8.aarch64.rpm
+  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/aarch64/appstream/os/Packages/k/kernel-headers-5.14.0-687.66.1.el9_8.aarch64.rpm
     repoid: ubi-9-for-aarch64-appstream-rpms
-    size: 2959549
-    checksum: sha256:fa39d84dbba31b364d73e3716c360e7c3eccd7e84543a9f6fef4606f1ec25a9b
+    size: 2961573
+    checksum: sha256:add94ff426adc10c812084491df2cd4229f7e34f497034b53d32b14f6b059db1
     name: kernel-headers
-    evr: 5.14.0-687.64.1.el9_8
-    sourcerpm: kernel-5.14.0-687.64.1.el9_8.src.rpm
+    evr: 5.14.0-687.66.1.el9_8
+    sourcerpm: kernel-5.14.0-687.66.1.el9_8.src.rpm
   - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/aarch64/appstream/os/Packages/l/libxcrypt-devel-4.4.18-3.el9.aarch64.rpm
     repoid: ubi-9-for-aarch64-appstream-rpms
     size: 33051
@@ -137,13 +137,13 @@ arches:
     name: setup
     evr: 2.13.7-10.el9
     sourcerpm: setup-2.13.7-10.el9.src.rpm
-  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/aarch64/baseos/os/Packages/t/tzdata-2026e-1.el9_8.noarch.rpm
+  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/aarch64/baseos/os/Packages/t/tzdata-2026f-1.el9_8.noarch.rpm
     repoid: ubi-9-for-aarch64-baseos-rpms
-    size: 936099
-    checksum: sha256:c105d92f6cacb9bb8337b77041cedd9c9c906a72c4b5233909b9b69b78f4369f
+    size: 936560
+    checksum: sha256:dca72e34b88f487c4e0c473f156d4207f5e1187a2343e89ce28d46dc34a646aa
     name: tzdata
-    evr: 2026e-1.el9_8
-    sourcerpm: tzdata-2026e-1.el9_8.src.rpm
+    evr: 2026f-1.el9_8
+    sourcerpm: tzdata-2026f-1.el9_8.src.rpm
   - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/aarch64/codeready-builder/os/Packages/g/glibc-static-2.34-283.el9_8.aarch64.rpm
     repoid: codeready-builder-for-ubi-9-aarch64-rpms
     size: 1249928
@@ -176,13 +176,13 @@ arches:
     name: glibc-headers
     evr: 2.34-283.el9_8
     sourcerpm: glibc-2.34-283.el9_8.src.rpm
-  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/x86_64/appstream/os/Packages/k/kernel-headers-5.14.0-687.64.1.el9_8.x86_64.rpm
+  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/x86_64/appstream/os/Packages/k/kernel-headers-5.14.0-687.66.1.el9_8.x86_64.rpm
     repoid: ubi-9-for-x86_64-appstream-rpms
-    size: 2998841
-    checksum: sha256:63e8c2f98fdd0ed70e30d9037e7262925730013dcd52b46d7f7e10c428ac7ed3
+    size: 3000861
+    checksum: sha256:e00747fbbf172ce46ed34bfe797463674dc59c53625e69510d4a0b304d12cc83
     name: kernel-headers
-    evr: 5.14.0-687.64.1.el9_8
-    sourcerpm: kernel-5.14.0-687.64.1.el9_8.src.rpm
+    evr: 5.14.0-687.66.1.el9_8
+    sourcerpm: kernel-5.14.0-687.66.1.el9_8.src.rpm
   - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/x86_64/appstream/os/Packages/l/libxcrypt-devel-4.4.18-3.el9.x86_64.rpm
     repoid: ubi-9-for-x86_64-appstream-rpms
     size: 33101
@@ -302,13 +302,13 @@ arches:
     name: setup
     evr: 2.13.7-10.el9
     sourcerpm: setup-2.13.7-10.el9.src.rpm
-  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/x86_64/baseos/os/Packages/t/tzdata-2026e-1.el9_8.noarch.rpm
+  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/x86_64/baseos/os/Packages/t/tzdata-2026f-1.el9_8.noarch.rpm
     repoid: ubi-9-for-x86_64-baseos-rpms
-    size: 936099
-    checksum: sha256:c105d92f6cacb9bb8337b77041cedd9c9c906a72c4b5233909b9b69b78f4369f
+    size: 936560
+    checksum: sha256:dca72e34b88f487c4e0c473f156d4207f5e1187a2343e89ce28d46dc34a646aa
     name: tzdata
-    evr: 2026e-1.el9_8
-    sourcerpm: tzdata-2026e-1.el9_8.src.rpm
+    evr: 2026f-1.el9_8
+    sourcerpm: tzdata-2026f-1.el9_8.src.rpm
   - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/x86_64/codeready-builder/os/Packages/g/glibc-static-2.34-283.el9_8.x86_64.rpm
     repoid: codeready-builder-for-ubi-9-x86_64-rpms
     size: 1532977
