@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 OpenShell contributors
 # SPDX-License-Identifier: Apache-2.0
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = ["PyYAML==6.0.3"]
 # ///
 """Behavioral tests with a simulated cluster; no network or cluster access."""
@@ -13,7 +13,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,9 +24,14 @@ installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
 
 
-def configuration():
-    config = json.loads(Path(__file__).with_name("config.example.json").read_text())
+def configuration(with_hosts=True):
+    config_path = Path(__file__).with_name("config-examples") / "config.example.json"
+    config = json.loads(config_path.read_text())
     config["context"] = "test-context"
+    if with_hosts:
+        # Keep the existing suite deterministic; the examples omit these.
+        config["gateway"]["host"] = "gateway-openshell-team.apps.example.com"
+        config["dashboard"]["host"] = "dashboard-openshell-team.apps.example.com"
     config["gateway"]["version"] = "0.1.3"
     config["dashboard"]["version"] = "0.1.7"
     for section in ("gateway", "dashboard"):
@@ -43,7 +48,10 @@ class FakeCluster(installer.Installer):
         self.objects = {
             ("crd", "sandboxes.agents.x-k8s.io"): {
                 "spec": {"versions": [{"name": "v1beta1", "served": True}]}
-            }
+            },
+            ("ingresses.config.openshift.io", "cluster"): {
+                "spec": {"domain": "apps.test.example.com"}
+            },
         }
         self.calls = []
         self.releases = []
@@ -61,6 +69,7 @@ class FakeCluster(installer.Installer):
         ]
         self.other_states = []
         self.denied_permission = None
+        self.nodes = []
 
     def run(self, args, payload=None):
         self.calls.append((args, payload))
@@ -80,7 +89,7 @@ class FakeCluster(installer.Installer):
         if "storageclasses" in args:
             return json.dumps({"items": self.storage})
         if "nodes" in args:
-            return json.dumps({"items": []})
+            return json.dumps({"items": self.nodes})
         if "--all-namespaces" in args:
             return json.dumps({"items": self.other_states})
         if "patch" in args:
@@ -880,6 +889,403 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(call.args[0][:2], ["helm", "template"])
             args = call.args[0]
             self.assertEqual(args[args.index("--namespace") + 1], "render-project")
+
+    def check_render(self, extra=()):
+        """Run --check with local source charts and return rendered value files."""
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        for chart in ("gateway", "dashboard"):
+            (self.root / chart).mkdir()
+            (self.root / chart / "Chart.yaml").write_text("version: 0.0.0\n")
+        rendered = []
+
+        def run(_instance, args, payload=None):
+            self.assertEqual(args[:2], ["helm", "template"])
+            self.assertIsNone(payload)
+            rendered.append(
+                json.loads(Path(args[args.index("--values") + 1]).read_text())
+            )
+            return ""
+
+        argv = [
+            "install.py",
+            "--config",
+            str(path),
+            "--check",
+            "--gateway-chart-directory",
+            str(self.root / "gateway"),
+            "--dashboard-chart-directory",
+            str(self.root / "dashboard"),
+            *extra,
+        ]
+        output = io.StringIO()
+        with (
+            patch("sys.argv", argv),
+            patch.object(installer.shutil, "which", return_value="helm"),
+            patch.object(installer.Installer, "run", run),
+            patch.object(
+                installer,
+                "current_context",
+                side_effect=AssertionError("--check resolved a kube context"),
+            ),
+            patch.object(
+                installer.Installer,
+                "apps_domain",
+                side_effect=AssertionError("--check accessed the cluster"),
+            ),
+            redirect_stdout(output),
+        ):
+            installer.main()
+        return rendered, output.getvalue()
+
+    def test_example_configs_omit_context_and_hosts(self):
+        examples = Path(__file__).with_name("config-examples")
+        for path in sorted(examples.glob("config.example*.json")):
+            raw = json.loads(path.read_text())
+            with self.subTest(path=path.name):
+                self.assertNotIn("context", raw)
+                self.assertNotIn("host", raw["gateway"])
+                self.assertNotIn("host", raw["dashboard"])
+
+    def test_resolve_hosts_derives_namespace_qualified_hosts(self):
+        self.config = configuration(with_hosts=False)
+        config = self.load()
+        installer.resolve_hosts(config, "apps.cluster.example.com")
+        self.assertEqual(
+            config["gateway"]["host"],
+            "gateway-openshell-team.apps.cluster.example.com",
+        )
+        self.assertEqual(
+            config["dashboard"]["host"],
+            "dashboard-openshell-team.apps.cluster.example.com",
+        )
+        gateway, dashboard = installer.chart_values(config)
+        self.assertEqual(gateway["openshiftRoute"]["host"], config["gateway"]["host"])
+        self.assertEqual(
+            gateway["pkiInitJob"]["serverDnsNames"][0], config["gateway"]["host"]
+        )
+        self.assertEqual(
+            dashboard["openshiftRoute"]["host"], config["dashboard"]["host"]
+        )
+
+    def test_resolve_hosts_keeps_explicit_host_and_derives_other(self):
+        config = self.load()
+        config["dashboard"].pop("host")
+        installer.resolve_hosts(config, "apps.cluster.example.com")
+        self.assertEqual(
+            config["gateway"]["host"], "gateway-openshell-team.apps.example.com"
+        )
+        self.assertEqual(
+            config["dashboard"]["host"],
+            "dashboard-openshell-team.apps.cluster.example.com",
+        )
+
+    def test_resolve_hosts_enforces_distinctness_after_derivation(self):
+        config = self.load()
+        config["dashboard"]["host"] = config["gateway"]["host"]
+        with self.assertRaisesRegex(ValueError, "distinct hosts"):
+            installer.resolve_hosts(config)
+
+    def test_resolve_hosts_rejects_invalid_derived_host(self):
+        self.config = configuration(with_hosts=False)
+        config = self.load()
+        with self.assertRaisesRegex(ValueError, "Invalid gateway.host"):
+            installer.resolve_hosts(config, "apps_bad.example.com")
+
+    def test_namespace_override_changes_derived_hosts(self):
+        self.config = configuration(with_hosts=False)
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        config = installer.load_config(path, "research-team")
+        installer.resolve_hosts(config, "apps.cluster.example.com")
+        self.assertEqual(
+            config["gateway"]["host"],
+            "gateway-research-team.apps.cluster.example.com",
+        )
+        self.assertEqual(
+            config["dashboard"]["host"],
+            "dashboard-research-team.apps.cluster.example.com",
+        )
+
+    def test_derived_host_rejects_namespace_beyond_the_label_limit(self):
+        self.config = configuration(with_hosts=False)
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        namespace = "n" * 54
+        config = installer.load_config(path, namespace)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"63-character DNS limit; set dashboard\.host explicitly",
+        ):
+            installer.resolve_hosts(config, "apps.cluster.example.com")
+
+    def test_derived_host_allows_namespace_at_the_label_limit(self):
+        self.config = configuration(with_hosts=False)
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        namespace = "n" * 53
+        config = installer.load_config(path, namespace)
+        installer.resolve_hosts(config, "apps.cluster.example.com")
+        self.assertEqual(
+            config["dashboard"]["host"],
+            f"dashboard-{namespace}.apps.cluster.example.com",
+        )
+
+    def test_derived_host_rejects_host_beyond_the_total_length_limit(self):
+        self.config = configuration(with_hosts=False)
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        config = installer.load_config(path, "team")
+        domain = ".".join(["d" * 60] * 4)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"253-character DNS limit; set gateway\.host explicitly",
+        ):
+            installer.resolve_hosts(config, domain)
+
+    def test_apps_domain_reads_openshift_ingress(self):
+        self.assertEqual(self.cluster().apps_domain(), "apps.test.example.com")
+
+    def test_apps_domain_missing_is_rejected(self):
+        cluster = self.cluster()
+        cluster.objects[("ingresses.config.openshift.io", "cluster")] = {"spec": {}}
+        with self.assertRaisesRegex(ValueError, "apps domain"):
+            cluster.apps_domain()
+
+    def test_installer_does_not_resolve_context_on_construction(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        config = self.load()
+        with patch.object(
+            installer,
+            "current_context",
+            side_effect=AssertionError("resolved eagerly"),
+        ):
+            cluster = FakeCluster(config)
+        self.assertIsNone(cluster._context)
+
+    def test_default_context_is_resolved_once_and_used_for_kubectl_and_helm(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        with patch.object(
+            installer, "current_context", return_value="current-context"
+        ) as current:
+            cluster = self.cluster()
+            installer.resolve_hosts(cluster.config, cluster.apps_domain())
+            cluster.install(["gateway.tgz", "dashboard.tgz"], ["g.json", "d.json"])
+        self.assertEqual(current.call_count, 1)
+        for args, _ in cluster.calls:
+            self.assertIn("current-context", args)
+
+    def test_cli_context_overrides_config_context(self):
+        with patch.object(
+            installer,
+            "current_context",
+            side_effect=AssertionError("looked up the current context"),
+        ):
+            self.assertEqual(
+                installer.Installer(self.load(), "10m", "cli-context").context,
+                "cli-context",
+            )
+
+    def test_config_context_is_used_without_lookup(self):
+        with patch.object(
+            installer,
+            "current_context",
+            side_effect=AssertionError("looked up the current context"),
+        ):
+            self.assertEqual(
+                installer.Installer(self.load(), "10m").context, "test-context"
+            )
+
+    def test_check_without_context_or_hosts_never_resolves_cluster(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        rendered, output = self.check_render()
+        self.assertEqual(
+            rendered[0]["openshiftRoute"]["host"],
+            "gateway-openshell-team.apps.example.com",
+        )
+        self.assertEqual(
+            rendered[1]["openshiftRoute"]["host"],
+            "dashboard-openshell-team.apps.example.com",
+        )
+        self.assertIn("renders placeholders", output)
+        self.assertIn("gateway.host", output)
+        self.assertIn("dashboard.host", output)
+        self.assertIn("gateway-openshell-team.apps.example.com", output)
+        self.assertIn("dashboard-openshell-team.apps.example.com", output)
+
+    def test_check_with_apps_domain_derives_hosts_offline(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        rendered, output = self.check_render(
+            ["--apps-domain", "apps.cluster.example.com"]
+        )
+        self.assertEqual(
+            rendered[0]["openshiftRoute"]["host"],
+            "gateway-openshell-team.apps.cluster.example.com",
+        )
+        self.assertEqual(
+            rendered[1]["openshiftRoute"]["host"],
+            "dashboard-openshell-team.apps.cluster.example.com",
+        )
+        self.assertNotIn("renders placeholders", output)
+
+    def test_check_placeholder_hosts_follow_namespace_override(self):
+        self.config = configuration(with_hosts=False)
+        self.config.pop("context")
+        rendered, _ = self.check_render(["--namespace", "render-project"])
+        self.assertEqual(
+            rendered[0]["openshiftRoute"]["host"],
+            "gateway-render-project.apps.example.com",
+        )
+        self.assertEqual(
+            rendered[1]["openshiftRoute"]["host"],
+            "dashboard-render-project.apps.example.com",
+        )
+
+    def test_apps_domain_flag_requires_check(self):
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "install.py",
+                    "--config",
+                    str(path),
+                    "--preflight",
+                    "--apps-domain",
+                    "apps.example.com",
+                ],
+            ),
+            self.assertRaisesRegex(ValueError, "only supported with --check"),
+        ):
+            installer.main()
+
+    def test_derived_gateway_host_change_requires_migration(self):
+        self.config = configuration(with_hosts=False)
+        cluster = self.cluster()
+        installer.resolve_hosts(cluster.config, cluster.apps_domain())
+        cluster.install(["gateway.tgz", "dashboard.tgz"], ["g.json", "d.json"])
+        cluster.config["gateway"]["host"] = "other.apps.test.example.com"
+        with self.assertRaisesRegex(ValueError, "certificate migration"):
+            cluster.preflight()
+
+    def test_version_at_least_treats_prerelease_as_older(self):
+        self.assertTrue(installer.version_at_least("0.1.3", (0, 1, 3)))
+        self.assertTrue(installer.version_at_least("0.1.10", (0, 1, 3)))
+        self.assertTrue(installer.version_at_least("0.2.0", (0, 1, 3)))
+        self.assertFalse(installer.version_at_least("0.1.2", (0, 1, 3)))
+        # Prereleases sort before the release; warn conservatively.
+        self.assertFalse(installer.version_at_least("0.1.3-pre.5", (0, 1, 3)))
+
+    def legacy_kernel_output(self, version):
+        self.config["gateway"]["version"] = version
+        cluster = FakeCluster(self.load())
+        cluster.nodes = [
+            {"status": {"nodeInfo": {"kernelVersion": "5.14.0-687.el9.x86_64"}}}
+        ]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.cluster_checks(None)
+        return output.getvalue()
+
+    def test_legacy_kernel_note_for_fixed_release(self):
+        output = self.legacy_kernel_output("0.1.3")
+        self.assertIn("Note: node kernel(s) below 5.19", output)
+        self.assertIn(
+            "The legacy-kernel fixes are included in OpenShell 0.1.3 and later.",
+            output,
+        )
+        self.assertNotIn("Warning: node kernel(s) below 5.19", output)
+
+    def test_legacy_kernel_warning_names_configured_version(self):
+        output = self.legacy_kernel_output("0.1.2")
+        self.assertIn("Warning: node kernel(s) below 5.19", output)
+        self.assertIn("OpenShell 0.1.3 and later", output)
+        self.assertIn("gateway.version is 0.1.2", output)
+
+    def test_next_steps_include_registration_and_sandbox_commands(self):
+        config = self.load()
+        steps = installer.next_steps(config, "install-context")
+        self.assertIn("1. Install the OpenShell CLI", steps)
+        self.assertIn(f"OPENSHELL_VERSION=v{config['gateway']['version']} sh", steps)
+        self.assertIn("2. Register the gateway", steps)
+        self.assertLess(
+            steps.index("1. Install the OpenShell CLI"),
+            steps.index("openshell gateway add"),
+        )
+        self.assertIn(
+            'kubectl --context "install-context" -n openshell-team '
+            "get secret openshell-client-tls",
+            steps,
+        )
+        self.assertIn("openshell gateway add", steps)
+        self.assertIn("--name openshell-team", steps)
+        self.assertIn(f'--oidc-issuer "{config["oidc"]["issuer"]}"', steps)
+        self.assertIn("--oidc-client-id openshell-cli", steps)
+        self.assertIn("--oidc-audience openshell-api-openshell-team", steps)
+        self.assertIn("https://gateway-openshell-team.apps.example.com:443", steps)
+        self.assertIn("openshell status", steps)
+        self.assertIn("openshell sandbox create", steps)
+        self.assertNotIn("SSL_CERT_FILE", steps)
+
+    def test_next_steps_add_private_ca_bundle_when_configured(self):
+        config = self.load()
+        config["oidc"]["ca_file"] = "/tmp/ingress-ca.crt"
+        steps = installer.next_steps(config, "install-context")
+        self.assertIn("/tmp/ingress-ca.crt", steps)
+        self.assertIn(
+            'export SSL_CERT_FILE="$HOME/.config/openshell-rhoai/ca-bundle.pem"',
+            steps,
+        )
+
+    def test_system_ca_bundle_prefers_first_existing_candidate(self):
+        def exists(candidate):
+            return str(candidate) in (
+                "/etc/ssl/certs/ca-certificates.crt",
+                "/etc/ssl/cert.pem",
+            )
+
+        with patch.object(installer.Path, "is_file", exists):
+            self.assertEqual(
+                installer.system_ca_bundle(), "/etc/ssl/certs/ca-certificates.crt"
+            )
+
+    def test_system_ca_bundle_is_none_when_no_candidate_exists(self):
+        with patch.object(installer.Path, "is_file", lambda _candidate: False):
+            self.assertIsNone(installer.system_ca_bundle())
+
+    def test_next_steps_use_the_detected_system_bundle(self):
+        config = self.load()
+        config["oidc"]["ca_file"] = "/tmp/ingress-ca.crt"
+        with patch.object(
+            installer, "system_ca_bundle", return_value="/etc/ssl/cert.pem"
+        ):
+            steps = installer.next_steps(config, "install-context")
+        self.assertIn("cat /etc/ssl/cert.pem \\", steps)
+        self.assertNotIn("Could not detect a system CA bundle", steps)
+
+    def test_next_steps_name_debian_and_macos_bundle_paths(self):
+        config = self.load()
+        config["oidc"]["ca_file"] = "/tmp/ingress-ca.crt"
+        with patch.object(
+            installer, "system_ca_bundle", return_value="/etc/ssl/cert.pem"
+        ):
+            steps = installer.next_steps(config, "install-context")
+        self.assertIn("/etc/ssl/certs/ca-certificates.crt", steps)
+        self.assertIn("/etc/ssl/cert.pem", steps)
+        self.assertIn("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", steps)
+
+    def test_next_steps_use_placeholder_when_no_bundle_is_detected(self):
+        config = self.load()
+        config["oidc"]["ca_file"] = "/tmp/ingress-ca.crt"
+        with patch.object(installer, "system_ca_bundle", return_value=None):
+            steps = installer.next_steps(config, "install-context")
+        self.assertIn("Could not detect a system CA bundle", steps)
+        self.assertIn("cat <system-ca-bundle> \\", steps)
 
 
 if __name__ == "__main__":
