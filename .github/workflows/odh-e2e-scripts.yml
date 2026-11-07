@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 OpenShell contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: ODH E2E Scripts
+
+on:
+  pull_request:
+    paths:
+      - "odh/scripts/**"
+      - "odh/rhoai-image-tags.yaml"
+      - ".github/workflows/odh-e2e-scripts.yml"
+  push:
+    branches: [main]
+    paths:
+      - "odh/scripts/**"
+      - "odh/rhoai-image-tags.yaml"
+      - ".github/workflows/odh-e2e-scripts.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: RHOAI tag mapping tests
+        run: python3 -m unittest discover -s odh/scripts/tests -p 'test_*.py'
