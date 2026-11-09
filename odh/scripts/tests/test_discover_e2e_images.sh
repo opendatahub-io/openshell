@@ -141,6 +141,19 @@ set -euo pipefail
 printf 'phase|%s\n' "$*" >> "${FAKE_OC_WORK_DIR}/calls"
 printf '<testsuite name="fake"><testcase classname="fake" name="%s"/></testsuite>\n' "$2" > "$3"
 FAKEPHASE
+	cat > "${WORK_DIR}/bin/python-e2e" <<'FAKEPYTHON'
+#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--junitxml)
+			printf '<testsuite name="fake-python"><testcase classname="fake" name="python"/></testsuite>\n' > "$2"
+			shift 2
+			;;
+		*) shift ;;
+	esac
+done
+FAKEPYTHON
 	cat > "${WORK_DIR}/bin/openshell" <<'FAKECLI'
 #!/usr/bin/env bash
 printf 'openshell|%s\n' "$*" >> "${FAKE_OC_WORK_DIR}/calls"
@@ -166,6 +179,7 @@ FAKESLEEP
 	export OPENSHELL_BIN="${WORK_DIR}/bin/openshell"
 	export OPENSHELL_E2E_DEPLOY_SCRIPT="${WORK_DIR}/bin/deploy"
 	export OPENSHELL_E2E_PHASE_RUNNER="${WORK_DIR}/bin/phase"
+	export OPENSHELL_E2E_PYTHON="${WORK_DIR}/bin/python-e2e"
 }
 
 teardown() {
