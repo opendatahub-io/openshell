@@ -2,7 +2,8 @@
 
 This guide is for development only. It is not a production Keycloak
 deployment: it runs one PostgreSQL instance and one Keycloak instance with
-bootstrap credentials, and the optional REST steps disable TLS verification.
+bootstrap credentials, and the client helper verifies the Keycloak Route
+against the cluster ingress CA.
 
 This guide deploys and removes a development Keycloak instance only. Use
 [README.md](README.md) to install OpenShell and the OpenShell Dashboard admin UI.
@@ -69,10 +70,18 @@ subdirectory to avoid the `lost+found` conflict at the mount point:
 ```shell
 oc -n "$KEYCLOAK_NS" new-app registry.access.redhat.com/hi/postgresql:18.4 \
   -e POSTGRES_USER=keycloak \
-  -e POSTGRES_PASSWORD="$(oc -n "$KEYCLOAK_NS" get secret keycloak-db-secret -o jsonpath='{.data.password}' | base64 -d)" \
   -e POSTGRES_DATABASE=keycloak \
   -e PGDATA=/var/lib/postgresql/data/pgdata \
   --name=keycloak-db
+```
+
+Do not pass the database password through `oc new-app`: it would appear in the
+process table and as a literal Deployment value. Add the reference from
+`keycloak-db-secret` instead:
+
+```shell
+oc -n "$KEYCLOAK_NS" patch deployment/keycloak-db --type=json -p \
+  '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"POSTGRES_PASSWORD","valueFrom":{"secretKeyRef":{"name":"keycloak-db-secret","key":"password"}}}}]'
 ```
 
 Replace the image's emptyDir volume with the claim. The image names its volume
@@ -96,8 +105,11 @@ install it in the `keycloak` namespace or all namespaces, and wait until the
 operator pod is ready:
 
 ```shell
-oc -n "$KEYCLOAK_NS" get pods -l app.kubernetes.io/name=keycloak-operator
+oc -n "$KEYCLOAK_NS" rollout status deployment/rhbk-operator
 ```
+
+If you installed the operator for all namespaces, its Deployment runs in
+`openshift-operators`; use `-n openshift-operators` for that command instead.
 
 To install with a Subscription instead, first list the channels your cluster
 offers and pick a version channel from the output:
@@ -107,18 +119,17 @@ oc get packagemanifest rhbk-operator -n openshift-marketplace \
   -o jsonpath='{.status.channels[*].name}'
 ```
 
-The manifests below use `stable-v26.6`. Channel names change with operator
-releases, so substitute a channel from the command output when needed. The
-manifests assume the default `keycloak` namespace; replace it if you changed
-`KEYCLOAK_NS`.
+The manifests below use `stable-v26.6` and expand `KEYCLOAK_NS`. Channel names
+change with operator releases, so substitute a channel from the command output
+when needed.
 
 ```shell
-oc apply -f - <<'EOF'
+oc apply -f - <<EOF
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
   name: rhbk-operator
-  namespace: keycloak
+  namespace: ${KEYCLOAK_NS}
 spec:
   channel: stable-v26.6
   installPlanApproval: Automatic
@@ -135,15 +146,15 @@ oc get operatorgroup -n "$KEYCLOAK_NS"
 ```
 
 ```shell
-oc apply -f - <<'EOF'
+oc apply -f - <<EOF
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
-  name: keycloak
-  namespace: keycloak
+  name: ${KEYCLOAK_NS}
+  namespace: ${KEYCLOAK_NS}
 spec:
   targetNamespaces:
-    - keycloak
+    - ${KEYCLOAK_NS}
 EOF
 ```
 
@@ -285,15 +296,19 @@ API. It writes the dashboard secret to
 `${CONFIG_DIR}/dashboard-client-secret.txt`, so you can skip the console steps
 for the realm, roles, and clients. Create the users in the console; they need
 passwords and verified email addresses. The script is idempotent: rerunning
-skips objects that already exist. The script prints the target and asks for
-confirmation before changing anything; pass `--yes` to skip the prompt. It
-requires `oc`, `curl`, and `python3`, and reads the environment variables set at
-the top of this guide. Its `curl` calls skip TLS verification, which is
-development only.
+keeps existing objects and reconciles the dashboard client redirect settings
+with `DASH_URL`. The script prints the target and asks for confirmation before
+changing anything; pass `--yes` to skip the prompt. It requires `oc`, `curl`,
+and `python3`, and reads the environment variables set at the top of this guide.
+It verifies the Keycloak Route against a bundle built from the system roots and
+`${CONFIG_DIR}/ingress-ca.crt`, and exits if that file is missing.
 
-Run it from the repository root after the Keycloak instance is ready:
+Export the ingress CA, then run the script from the repository root after the
+Keycloak instance is ready:
 
 ```shell
+oc -n openshift-config-managed get configmap default-ingress-cert \
+  -o jsonpath='{.data.ca-bundle\.crt}' > "${CONFIG_DIR}/ingress-ca.crt"
 ./deploy/rhoai/keycloak-dev-guide-create-openshell-clients.sh
 ```
 
@@ -330,7 +345,7 @@ Remove Keycloak and PostgreSQL:
 oc delete keycloak keycloak -n "$KEYCLOAK_NS"
 oc delete subscription rhbk-operator -n "$KEYCLOAK_NS"
 oc delete csv -n "$KEYCLOAK_NS" -l operators.coreos.com/rhbk-operator.keycloak
-oc delete operatorgroup keycloak -n "$KEYCLOAK_NS"
+oc delete operatorgroup "$KEYCLOAK_NS" -n "$KEYCLOAK_NS"
 oc delete all -l app=keycloak-db -n "$KEYCLOAK_NS"
 oc delete pvc keycloak-db-data -n "$KEYCLOAK_NS"
 oc delete secret keycloak-db-secret -n "$KEYCLOAK_NS"

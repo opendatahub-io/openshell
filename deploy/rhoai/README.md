@@ -144,9 +144,11 @@ images; check them against [Chart and image pins](#chart-and-image-pins).
   serves its own certificate through a passthrough Route.
 - `context` is optional. The installer uses the current kubeconfig context;
   `--context` overrides it and also overrides this field when set.
-- `oidc.allowed_roles` is a dashboard login filter. The Keycloak examples list
-  both roles that [keycloak-dev-guide.md](keycloak-dev-guide.md) creates, as an
-  example choice, not a requirement; any role list the provider emits works.
+- `oidc.allowed_roles` is a dashboard login filter. The installer accepts it only
+  when `oidc.provider` is `keycloak-oidc`; for generic `oidc`, use
+  `oidc.allowed_groups`. The Keycloak examples list both roles that
+  [keycloak-dev-guide.md](keycloak-dev-guide.md) creates, as an example choice,
+  not a requirement; with `keycloak-oidc`, any role list the provider emits works.
 - `oidc.scope` is the space-separated OAuth scope request, for example
   `openid email profile`. Omit it to keep the provider defaults.
 
@@ -315,11 +317,13 @@ Copy the gateway server CA into the CLI's per-gateway TLS directory. The
 directory name must match the `--name` value you use below:
 
 ```shell
-mkdir -p "$HOME/.config/openshell/gateways/openshell-team/mtls"
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/openshell-team/mtls"
 oc -n openshell-team get secret openshell-client-tls \
   -o jsonpath='{.data.ca\.crt}' | base64 -d \
-  > "$HOME/.config/openshell/gateways/openshell-team/mtls/ca.crt"
+  > "${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/openshell-team/mtls/ca.crt"
 ```
+
+The CLI stores gateway metadata under `${XDG_CONFIG_HOME:-$HOME/.config}/openshell`.
 
 OIDC bearer authentication needs only `ca.crt` in this directory.
 
@@ -423,8 +427,12 @@ hosts are set explicitly, use the value the installer printed. Open the URL and
 sign in through the configured OIDC provider.
 
 The dashboard shows different features depending on the signed-in user's role.
-The account must hold a role listed in `oidc.allowed_roles`; the Keycloak
-examples list `openshell-admin` and `openshell-user`. A user with the admin role
+With `oidc.provider: "keycloak-oidc"`, the account must hold a role listed in
+`oidc.allowed_roles`; the Keycloak examples list `openshell-admin` and
+`openshell-user`. With generic `oidc`, list the provider's group in
+`oidc.allowed_groups` instead. When neither filter is set, any authenticated
+identity-provider user can reach the UI, but the gateway still enforces its
+roles and workspace access. A user with the admin role
 (`oidc.admin_role`) can create workspaces and add users to them. A user with the
 user role (`oidc.user_role`) sees the workspaces they were added to and manages
 them, including creating sandboxes.
@@ -457,16 +465,19 @@ Changing the gateway host, issuer, audience, or client ID is rejected by the
 are omitted, changing the namespace or the cluster apps domain changes the
 derived gateway host and triggers the same check.
 
-A changed client secret or OIDC CA requires explicit rotation. Update the
-Secret while preserving `cookie-secret`, then restart the dashboard:
+A changed client secret or OIDC CA requires explicit rotation. Set `CTX` to the
+context used for the installation (or the current context when `--context` was
+not passed), then update the Secret while preserving `cookie-secret` and
+restart the dashboard:
 
 ```shell
-COOKIE=$(oc -n openshell-team get secret openshell-dashboard-oidc -o jsonpath='{.data.cookie-secret}' | base64 -d)
-oc -n openshell-team create secret generic openshell-dashboard-oidc \
+CTX=YOUR_INSTALL_CONTEXT
+COOKIE=$(oc --context "$CTX" -n openshell-team get secret openshell-dashboard-oidc -o jsonpath='{.data.cookie-secret}' | base64 -d)
+oc --context "$CTX" -n openshell-team create secret generic openshell-dashboard-oidc \
   --from-literal=client-secret="$(cat "$HOME/.config/openshell-rhoai/dashboard-client-secret.txt")" \
   --from-literal=cookie-secret="$COOKIE" \
-  --dry-run=client -o yaml | oc apply -f -
-oc -n openshell-team rollout restart deployment openshell-dashboard
+  --dry-run=client -o yaml | oc --context "$CTX" apply -f -
+oc --context "$CTX" -n openshell-team rollout restart deployment openshell-dashboard
 ```
 
 There is no cross-release transaction or automatic rollback: a gateway success
@@ -474,33 +485,32 @@ followed by a dashboard failure leaves the upgraded gateway in place.
 
 ## Remove an installation
 
-The installer has no uninstall subcommand. Remove the dashboard first, then the
-gateway:
+The installer has no uninstall subcommand. Set `CTX` to the context used for the
+installation (or the current context when `--context` was not passed), then
+remove the dashboard first, then the gateway:
 
 ```shell
-helm uninstall openshell-dashboard -n openshell-team
-helm uninstall openshell -n openshell-team
+CTX=YOUR_INSTALL_CONTEXT
+helm uninstall openshell-dashboard -n openshell-team --kube-context "$CTX"
+helm uninstall openshell -n openshell-team --kube-context "$CTX"
 ```
-
-Helm uses the current kube context; add `--kube-context <context>` if it differs
-from `kubectl config current-context`.
 
 The gateway chart's certificate hook creates three Secrets outside the release
 manifest, so `helm uninstall` does not remove them. Delete them and the
 installer-owned authentication objects:
 
 ```shell
-oc -n openshell-team delete secret \
+oc --context "$CTX" -n openshell-team delete secret \
   openshell-server-tls openshell-client-tls openshell-jwt-keys
-oc -n openshell-team delete secret openshell-dashboard-oidc
-oc -n openshell-team delete configmap openshell-oidc-ca
+oc --context "$CTX" -n openshell-team delete secret openshell-dashboard-oidc
+oc --context "$CTX" -n openshell-team delete configmap openshell-oidc-ca
 ```
 
 Optionally delete the installer state ConfigMap and the namespace:
 
 ```shell
-oc -n openshell-team delete configmap openshell-installer
-oc delete namespace openshell-team
+oc --context "$CTX" -n openshell-team delete configmap openshell-installer
+oc --context "$CTX" delete namespace openshell-team
 ```
 
 Remaining Secrets block a later reinstall and can be reused by a new gateway if
@@ -518,7 +528,7 @@ namespace for you.
 | `x509` error during `openshell gateway add` | Distinguish the two trust paths: copy the gateway CA into the CLI mtls directory, and build the `SSL_CERT_FILE` bundle for OIDC discovery. |
 | `dns error` from `openshell status` after `gateway add` succeeds | The gateway host is outside the router's `*.apps.<domain>` wildcard, so it has no DNS record. Registration only contacts the OIDC issuer; `status` is the first gateway connection. Correct `gateway.host`, or remove it to derive `gateway-<namespace>.<apps-domain>` from the ingress domain. Reinstall when the installer already recorded the old host. |
 | `Could not resolve the OpenShift apps domain` | Grant read access to `ingresses.config.openshift.io/cluster`, or set `gateway.host` and `dashboard.host` explicitly. |
-| HTTP 403 after login | The user holds no role in `allowed_roles`. Add a listed role to the user, or include the roles the provider emits, then rerun the install command. |
+| HTTP 403 after login | The user holds no role in `allowed_roles`, or no group in `allowed_groups` for generic OIDC. Add a listed role or group to the user, then rerun the install command. |
 | Gateway host or issuer change is rejected | The installer state records the original identity. With omitted hosts, a namespace or ingress-domain change also changes the gateway host. Migrate the certificate and endpoint explicitly instead of editing state. |
 
 For Keycloak-specific failures, see

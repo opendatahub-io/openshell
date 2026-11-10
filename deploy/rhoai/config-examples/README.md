@@ -88,6 +88,10 @@ These fields are optional; the installer derives or defaults them:
 | `oidc.client_secret_file`, `oidc.ca_file` | none |
 | `oidc.scope` | Provider defaults |
 
+`oidc.allowed_roles` is accepted only with `oidc.provider: "keycloak-oidc"`.
+Generic OIDC configurations restrict the dashboard login with
+`oidc.allowed_groups` instead.
+
 Set a host explicitly when the router serves a wildcard that differs from
 `ingresses.config.openshift.io/cluster` `.spec.domain`. `--check` renders
 omitted hosts as `<component>-<namespace>.apps.example.com` unless you pass
