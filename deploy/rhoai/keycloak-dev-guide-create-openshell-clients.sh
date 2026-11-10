@@ -5,7 +5,8 @@
 # Create the OpenShell clients in a Keycloak realm.
 #
 # Development helper only. It uses the operator bootstrap admin credentials and
-# disables TLS verification for Keycloak API calls. Do not use it to manage a
+# verifies the Keycloak Route against a bundle built from the system roots and
+# the ingress CA at "${CONFIG_DIR}/ingress-ca.crt". Do not use it to manage a
 # production realm.
 #
 # The script creates the realm and the openshell-admin/openshell-user realm
@@ -16,11 +17,13 @@
 #
 # Requires the environment variables set by the Keycloak development guide:
 #   KC_URL, KEYCLOAK_NS, REALM, API_ID, DASH_ID, CLI_ID, DASH_URL, CONFIG_DIR
+# CONFIG_DIR must contain ingress-ca.crt, the CA bundle for the Keycloak Route.
 #
 # Usage: keycloak-dev-guide-create-openshell-clients.sh [-y|--yes]
 #   -y, --yes  Skip the confirmation prompt.
 #
-# The script is idempotent: rerunning skips clients and mappers that exist.
+# The script is idempotent: rerunning keeps existing objects and reconciles the
+# dashboard client redirect settings with DASH_URL.
 
 set -euo pipefail
 umask 077
@@ -54,7 +57,7 @@ This configures OpenShell clients in Keycloak:
   Dashboard:     ${DASH_ID} (confidential, callback ${DASH_URL}/oauth2/callback)
   CLI:           ${CLI_ID} (public, PKCE)
   Secret output: ${CONFIG_DIR}/dashboard-client-secret.txt (mode 0600)
-Existing clients and mappers are kept.
+Existing clients are kept; the dashboard redirect settings are reconciled.
 
 EOF
 
@@ -78,12 +81,33 @@ echo "Preparing ${CONFIG_DIR} (mode 0700)..."
 mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 
+CACERT="${CONFIG_DIR}/ingress-ca.crt"
+[ -s "$CACERT" ] || {
+  echo "error: missing ${CACERT}; export the ingress CA as described in the guide." >&2
+  exit 1
+}
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK_DIR"' EXIT
+# Combine the system roots with the ingress CA so curl trusts both public and
+# cluster-internal issuers. --cacert replaces the default bundle.
+CURL_CA="${WORK_DIR}/ca-bundle.pem"
+for bundle in \
+  /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+  /etc/ssl/certs/ca-certificates.crt \
+  /etc/ssl/cert.pem; do
+  if [ -f "$bundle" ]; then
+    cat "$bundle" >> "$CURL_CA"
+    break
+  fi
+done
+cat "$CACERT" >> "$CURL_CA"
+
 echo "Reading Keycloak admin credentials from ${KEYCLOAK_NS}/keycloak-initial-admin..."
 AU=$(oc -n "$KEYCLOAK_NS" get secret keycloak-initial-admin -o jsonpath='{.data.username}' | base64 -d)
 AP=$(oc -n "$KEYCLOAK_NS" get secret keycloak-initial-admin -o jsonpath='{.data.password}' | base64 -d)
 echo "Requesting a Keycloak admin token from ${KC_URL}..."
 # Keep the admin password out of the process argument list.
-TOK=$(printf '%s' "$AP" | curl -fsSk -d client_id=admin-cli -d "username=$AU" \
+TOK=$(printf '%s' "$AP" | curl -fsS --cacert "$CURL_CA" -d client_id=admin-cli -d "username=$AU" \
   --data-urlencode "password@-" -d grant_type=password \
   "$KC_URL/realms/master/protocol/openid-connect/token" \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
@@ -91,12 +115,12 @@ H="Authorization: Bearer $TOK"
 REALM_API="$KC_URL/admin/realms/$REALM"
 
 echo "Checking realm ${REALM}..."
-status=$(curl -sSk -o /dev/null -w '%{http_code}' -H "$H" "$REALM_API")
+status=$(curl -sS --cacert "$CURL_CA" -o /dev/null -w '%{http_code}' -H "$H" "$REALM_API")
 case "$status" in
   200) echo "Keeping existing realm ${REALM}." ;;
   404)
     echo "Creating realm ${REALM}..."
-    curl -fsSk -X POST -H "$H" -H "Content-Type: application/json" \
+    curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" \
       "$KC_URL/admin/realms" -d "{\"realm\":\"$REALM\",\"enabled\":true}"
     ;;
   *)
@@ -107,12 +131,12 @@ esac
 
 for role in openshell-admin openshell-user; do
   echo "Checking realm role ${role}..."
-  status=$(curl -sSk -o /dev/null -w '%{http_code}' -H "$H" "$REALM_API/roles/$role")
+  status=$(curl -sS --cacert "$CURL_CA" -o /dev/null -w '%{http_code}' -H "$H" "$REALM_API/roles/$role")
   case "$status" in
     200) echo "Keeping existing realm role ${role}." ;;
     404)
       echo "Creating realm role ${role}..."
-      curl -fsSk -X POST -H "$H" -H "Content-Type: application/json" \
+      curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" \
         "$REALM_API/roles" -d "{\"name\":\"$role\"}"
       ;;
     *)
@@ -123,11 +147,18 @@ for role in openshell-admin openshell-user; do
 done
 
 API="$REALM_API/clients"
-exists() { curl -fsSk -H "$H" "$API?clientId=$1" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d[0]['id'] if d else '')"; }
+exists() {
+  curl -fsS --cacert "$CURL_CA" -G -H "$H" \
+    --data-urlencode "clientId=$1" "$API" \
+    | python3 -c "import sys,json;d=json.load(sys.stdin);print(d[0]['id'] if d else '')"
+}
+has_audience() {
+  python3 -c "import sys,json;print(any(m.get('config',{}).get('included.client.audience')==sys.argv[1] for m in json.load(sys.stdin)))" "$1"
+}
 
 if [ -z "$(exists "$API_ID")" ]; then
   echo "Creating API audience client ${API_ID}..."
-  curl -fsSk -X POST -H "$H" -H "Content-Type: application/json" "$API" -d "{
+  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API" -d "{
     \"clientId\":\"$API_ID\",\"enabled\":true,\"protocol\":\"openid-connect\",
     \"publicClient\":true,\"standardFlowEnabled\":false,\"directAccessGrantsEnabled\":false
   }"
@@ -135,25 +166,60 @@ else
   echo "Keeping existing API audience client ${API_ID}."
 fi
 
-if [ -z "$(exists "$DASH_ID")" ]; then
+DASH_UUID=$(exists "$DASH_ID")
+if [ -z "$DASH_UUID" ]; then
   echo "Creating dashboard client ${DASH_ID}..."
-  curl -fsSk -X POST -H "$H" -H "Content-Type: application/json" "$API" -d "{
+  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API" -d "{
     \"clientId\":\"$DASH_ID\",\"enabled\":true,\"protocol\":\"openid-connect\",
     \"publicClient\":false,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,
     \"redirectUris\":[\"$DASH_URL/oauth2/callback\"],\"webOrigins\":[\"$DASH_URL\"],
     \"attributes\":{\"post.logout.redirect.uris\":\"$DASH_URL/*\",\"pkce.code.challenge.method\":\"S256\"}
   }"
+  DASH_UUID=$(exists "$DASH_ID")
+  : "${DASH_UUID:?dashboard client ${DASH_ID} was not found in realm ${REALM}}"
 else
-  echo "Keeping existing dashboard client ${DASH_ID}."
-fi
-DASH_UUID=$(exists "$DASH_ID")
-: "${DASH_UUID:?dashboard client ${DASH_ID} was not found in realm ${REALM}}"
+  echo "Checking dashboard client ${DASH_ID} redirect settings..."
+  DASH_CLIENT="${WORK_DIR}/dashboard-client.json"
+  curl -fsS --cacert "$CURL_CA" -H "$H" "$API/$DASH_UUID" > "$DASH_CLIENT"
+  if python3 - "$DASH_URL" "$DASH_CLIENT" <<'PY'
+import json
+import sys
 
-if [ "$(curl -fsSk -H "$H" "$API/$DASH_UUID/protocol-mappers/models" \
-    | python3 -c "import sys,json;print(any(m['name']=='openshell-api-audience' for m in json.load(sys.stdin)))")" != "True" ]; then
+url, path = sys.argv[1], sys.argv[2]
+with open(path) as source:
+    client = json.load(source)
+attributes = client.setdefault("attributes", {})
+redirect = url + "/oauth2/callback"
+logout = url + "/*"
+changed = False
+if client.get("redirectUris") != [redirect]:
+    client["redirectUris"] = [redirect]
+    changed = True
+if client.get("webOrigins") != [url]:
+    client["webOrigins"] = [url]
+    changed = True
+if attributes.get("post.logout.redirect.uris") != logout:
+    attributes["post.logout.redirect.uris"] = logout
+    changed = True
+if changed:
+    with open(path, "w") as target:
+        json.dump(client, target)
+sys.exit(0 if changed else 1)
+PY
+  then
+    echo "Updating dashboard client ${DASH_ID} for ${DASH_URL}..."
+    curl -fsS --cacert "$CURL_CA" -X PUT -H "$H" -H "Content-Type: application/json" \
+      --data-binary "@$DASH_CLIENT" "$API/$DASH_UUID"
+  else
+    echo "Keeping existing dashboard client ${DASH_ID}."
+  fi
+fi
+
+if [ "$(curl -fsS --cacert "$CURL_CA" -H "$H" "$API/$DASH_UUID/protocol-mappers/models" \
+    | has_audience "$API_ID")" != "True" ]; then
   echo "Adding audience mapper to ${DASH_ID}..."
-  curl -fsSk -X POST -H "$H" -H "Content-Type: application/json" "$API/$DASH_UUID/protocol-mappers/models" -d "{
-    \"name\":\"openshell-api-audience\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",
+  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API/$DASH_UUID/protocol-mappers/models" -d "{
+    \"name\":\"openshell-api-audience-$API_ID\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",
     \"config\":{\"included.client.audience\":\"$API_ID\",\"id.token.claim\":\"false\",\"access.token.claim\":\"true\"}
   }"
 else
@@ -162,7 +228,7 @@ fi
 
 if [ -z "$(exists "$CLI_ID")" ]; then
   echo "Creating CLI client ${CLI_ID}..."
-  curl -fsSk -X POST -H "$H" -H "Content-Type: application/json" "$API" -d "{
+  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API" -d "{
     \"clientId\":\"$CLI_ID\",\"enabled\":true,\"protocol\":\"openid-connect\",
     \"publicClient\":true,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,
     \"redirectUris\":[\"http://127.0.0.1/*\",\"http://localhost/*\"],
@@ -174,20 +240,27 @@ fi
 CLI_UUID=$(exists "$CLI_ID")
 : "${CLI_UUID:?CLI client ${CLI_ID} was not found in realm ${REALM}}"
 
-if [ "$(curl -fsSk -H "$H" "$API/$CLI_UUID/protocol-mappers/models" \
-    | python3 -c "import sys,json;print(any(m['name']=='openshell-api-audience' for m in json.load(sys.stdin)))")" != "True" ]; then
+if [ "$(curl -fsS --cacert "$CURL_CA" -H "$H" "$API/$CLI_UUID/protocol-mappers/models" \
+    | has_audience "$API_ID")" != "True" ]; then
   echo "Adding audience mapper to ${CLI_ID}..."
-  curl -fsSk -X POST -H "$H" -H "Content-Type: application/json" "$API/$CLI_UUID/protocol-mappers/models" -d "{
-    \"name\":\"openshell-api-audience\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",
+  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API/$CLI_UUID/protocol-mappers/models" -d "{
+    \"name\":\"openshell-api-audience-$API_ID\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",
     \"config\":{\"included.client.audience\":\"$API_ID\",\"id.token.claim\":\"false\",\"access.token.claim\":\"true\"}
   }"
 else
   echo "Keeping existing audience mapper on ${CLI_ID}."
 fi
 
-echo "Writing the dashboard client secret to ${CONFIG_DIR}/dashboard-client-secret.txt (mode 0600)..."
-curl -fsSk -H "$H" "$API/$DASH_UUID/client-secret" \
+SECRET_FILE="${CONFIG_DIR}/dashboard-client-secret.txt"
+SECRET_TMP="${WORK_DIR}/dashboard-client-secret.txt"
+echo "Writing the dashboard client secret to ${SECRET_FILE} (mode 0600)..."
+curl -fsS --cacert "$CURL_CA" -H "$H" "$API/$DASH_UUID/client-secret" \
   | python3 -c "import sys,json;sys.stdout.write(json.load(sys.stdin)['value'])" \
-  > "${CONFIG_DIR}/dashboard-client-secret.txt"
-chmod 600 "${CONFIG_DIR}/dashboard-client-secret.txt"
-echo "Clients ready; dashboard client secret written to ${CONFIG_DIR}/dashboard-client-secret.txt"
+  > "$SECRET_TMP"
+[ -s "$SECRET_TMP" ] || {
+  echo "error: Keycloak returned an empty dashboard client secret." >&2
+  exit 1
+}
+chmod 600 "$SECRET_TMP"
+mv -f "$SECRET_TMP" "$SECRET_FILE"
+echo "Clients ready; dashboard client secret written to ${SECRET_FILE}"
