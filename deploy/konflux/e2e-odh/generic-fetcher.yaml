@@ -5,12 +5,12 @@
 metadata:
   version: "1.0"
 artifacts:
-  - download_url: https://github.com/astral-sh/uv/releases/download/0.13.6/uv-x86_64-unknown-linux-gnu.tar.gz
+  - download_url: https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-unknown-linux-gnu.tar.gz
     checksum: "sha256:f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645"
-    filename: uv-0.13.6-x86_64-unknown-linux-gnu.tar.gz
-  - download_url: https://github.com/astral-sh/uv/releases/download/0.13.6/uv-aarch64-unknown-linux-gnu.tar.gz
+    filename: uv-0.13.7-x86_64-unknown-linux-gnu.tar.gz
+  - download_url: https://github.com/astral-sh/uv/releases/download/0.13.7/uv-aarch64-unknown-linux-gnu.tar.gz
     checksum: "sha256:229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d"
-    filename: uv-0.13.6-aarch64-unknown-linux-gnu.tar.gz
+    filename: uv-0.13.7-aarch64-unknown-linux-gnu.tar.gz
 
   - download_url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.21/openshift-client-linux-amd64-rhel9-4.22.21.tar.gz
     checksum: "sha256:319c74ab09064bd703e781da436a4da13a39ddfc6976df84a5872903a2ec1739"
