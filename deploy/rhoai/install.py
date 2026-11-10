@@ -575,7 +575,9 @@ def next_steps(config, context):
         "4. Create a sandbox:",
         "   openshell sandbox create",
         "",
-        "An administrator must add users to workspaces before they can sign in.",
+        "An administrator must add users to a workspace before they can work there.",
+        "The CLI targets the default workspace; pass --workspace <name> or export",
+        "OPENSHELL_WORKSPACE=<name> to use the workspace you were added to.",
         "See deploy/rhoai/README.md#register-the-gateway-and-log-in for details.",
     ]
     return "\n".join(lines)

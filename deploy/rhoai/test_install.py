@@ -1275,6 +1275,12 @@ class InstallTests(unittest.TestCase):
         self.assertIn(f"({config['oidc']['user_role']})", steps)
         self.assertIn("The gateway rejects API calls from a", steps)
         self.assertIn("user with neither role.", steps)
+        self.assertIn(
+            "An administrator must add users to a workspace before they can work there.",
+            steps,
+        )
+        self.assertIn("--workspace <name> or export", steps)
+        self.assertIn("OPENSHELL_WORKSPACE=<name>", steps)
         self.assertNotIn("SSL_CERT_FILE", steps)
 
     def test_next_steps_shell_quote_untrusted_values(self):

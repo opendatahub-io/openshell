@@ -369,8 +369,16 @@ Sign in as a user that holds the gateway's admin role or user role. The admin
 role is configured in `oidc.admin_role` (`openshell-admin` in the Keycloak
 examples), and the user role in `oidc.user_role` (`openshell-user`). A user who
 holds neither role can complete the login, but the gateway rejects their API
-calls. An admin can create sandboxes and workspaces and add users that hold the
-user role to workspaces; a user works in the workspaces they were added to.
+calls. A user with the admin role creates workspaces and must add users as
+members before those users can work there; a user with the user role works only
+in workspaces where they are a member.
+
+The CLI targets the `default` workspace unless you select another one. If an
+administrator assigned you to a different workspace, pass `--workspace <name>`
+to each command or export `OPENSHELL_WORKSPACE=<name>`; your account may not be
+authorized for the `default` workspace. See
+[Workspaces](https://docs.nvidia.com/openshell/latest/how-it-works/workspaces)
+for workspace creation and membership.
 
 Verify the registration and login:
 
