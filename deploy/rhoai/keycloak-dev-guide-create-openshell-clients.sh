@@ -111,16 +111,20 @@ TOK=$(printf '%s' "$AP" | curl -fsS --cacert "$CURL_CA" -d client_id=admin-cli -
   --data-urlencode "password@-" -d grant_type=password \
   "$KC_URL/realms/master/protocol/openid-connect/token" \
   | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
-H="Authorization: Bearer $TOK"
+# Keep the admin token out of the process argument list. WORK_DIR is created by
+# mktemp and the script sets umask 077, so the file is private.
+HDR_FILE="${WORK_DIR}/auth.hdr"
+printf 'header = "Authorization: Bearer %s"\n' "$TOK" > "$HDR_FILE"
+chmod 600 "$HDR_FILE"
 REALM_API="$KC_URL/admin/realms/$REALM"
 
 echo "Checking realm ${REALM}..."
-status=$(curl -sS --cacert "$CURL_CA" -o /dev/null -w '%{http_code}' -H "$H" "$REALM_API")
+status=$(curl -sS --cacert "$CURL_CA" -o /dev/null -w '%{http_code}' -K "$HDR_FILE" "$REALM_API")
 case "$status" in
   200) echo "Keeping existing realm ${REALM}." ;;
   404)
     echo "Creating realm ${REALM}..."
-    curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" \
+    curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" \
       "$KC_URL/admin/realms" -d "{\"realm\":\"$REALM\",\"enabled\":true}"
     ;;
   *)
@@ -131,12 +135,12 @@ esac
 
 for role in openshell-admin openshell-user; do
   echo "Checking realm role ${role}..."
-  status=$(curl -sS --cacert "$CURL_CA" -o /dev/null -w '%{http_code}' -H "$H" "$REALM_API/roles/$role")
+  status=$(curl -sS --cacert "$CURL_CA" -o /dev/null -w '%{http_code}' -K "$HDR_FILE" "$REALM_API/roles/$role")
   case "$status" in
     200) echo "Keeping existing realm role ${role}." ;;
     404)
       echo "Creating realm role ${role}..."
-      curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" \
+      curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" \
         "$REALM_API/roles" -d "{\"name\":\"$role\"}"
       ;;
     *)
@@ -148,7 +152,7 @@ done
 
 API="$REALM_API/clients"
 exists() {
-  curl -fsS --cacert "$CURL_CA" -G -H "$H" \
+  curl -fsS --cacert "$CURL_CA" -G -K "$HDR_FILE" \
     --data-urlencode "clientId=$1" "$API" \
     | python3 -c "import sys,json;d=json.load(sys.stdin);print(d[0]['id'] if d else '')"
 }
@@ -158,7 +162,7 @@ has_audience() {
 
 if [ -z "$(exists "$API_ID")" ]; then
   echo "Creating API audience client ${API_ID}..."
-  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API" -d "{
+  curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" "$API" -d "{
     \"clientId\":\"$API_ID\",\"enabled\":true,\"protocol\":\"openid-connect\",
     \"publicClient\":true,\"standardFlowEnabled\":false,\"directAccessGrantsEnabled\":false
   }"
@@ -169,7 +173,7 @@ fi
 DASH_UUID=$(exists "$DASH_ID")
 if [ -z "$DASH_UUID" ]; then
   echo "Creating dashboard client ${DASH_ID}..."
-  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API" -d "{
+  curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" "$API" -d "{
     \"clientId\":\"$DASH_ID\",\"enabled\":true,\"protocol\":\"openid-connect\",
     \"publicClient\":false,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,
     \"redirectUris\":[\"$DASH_URL/oauth2/callback\"],\"webOrigins\":[\"$DASH_URL\"],
@@ -180,7 +184,7 @@ if [ -z "$DASH_UUID" ]; then
 else
   echo "Checking dashboard client ${DASH_ID} redirect settings..."
   DASH_CLIENT="${WORK_DIR}/dashboard-client.json"
-  curl -fsS --cacert "$CURL_CA" -H "$H" "$API/$DASH_UUID" > "$DASH_CLIENT"
+  curl -fsS --cacert "$CURL_CA" -K "$HDR_FILE" "$API/$DASH_UUID" > "$DASH_CLIENT"
   if python3 - "$DASH_URL" "$DASH_CLIENT" <<'PY'
 import json
 import sys
@@ -208,17 +212,17 @@ sys.exit(0 if changed else 1)
 PY
   then
     echo "Updating dashboard client ${DASH_ID} for ${DASH_URL}..."
-    curl -fsS --cacert "$CURL_CA" -X PUT -H "$H" -H "Content-Type: application/json" \
+    curl -fsS --cacert "$CURL_CA" -X PUT -K "$HDR_FILE" -H "Content-Type: application/json" \
       --data-binary "@$DASH_CLIENT" "$API/$DASH_UUID"
   else
     echo "Keeping existing dashboard client ${DASH_ID}."
   fi
 fi
 
-if [ "$(curl -fsS --cacert "$CURL_CA" -H "$H" "$API/$DASH_UUID/protocol-mappers/models" \
+if [ "$(curl -fsS --cacert "$CURL_CA" -K "$HDR_FILE" "$API/$DASH_UUID/protocol-mappers/models" \
     | has_audience "$API_ID")" != "True" ]; then
   echo "Adding audience mapper to ${DASH_ID}..."
-  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API/$DASH_UUID/protocol-mappers/models" -d "{
+  curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" "$API/$DASH_UUID/protocol-mappers/models" -d "{
     \"name\":\"openshell-api-audience-$API_ID\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",
     \"config\":{\"included.client.audience\":\"$API_ID\",\"id.token.claim\":\"false\",\"access.token.claim\":\"true\"}
   }"
@@ -228,7 +232,7 @@ fi
 
 if [ -z "$(exists "$CLI_ID")" ]; then
   echo "Creating CLI client ${CLI_ID}..."
-  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API" -d "{
+  curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" "$API" -d "{
     \"clientId\":\"$CLI_ID\",\"enabled\":true,\"protocol\":\"openid-connect\",
     \"publicClient\":true,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,
     \"redirectUris\":[\"http://127.0.0.1/*\",\"http://localhost/*\"],
@@ -240,10 +244,10 @@ fi
 CLI_UUID=$(exists "$CLI_ID")
 : "${CLI_UUID:?CLI client ${CLI_ID} was not found in realm ${REALM}}"
 
-if [ "$(curl -fsS --cacert "$CURL_CA" -H "$H" "$API/$CLI_UUID/protocol-mappers/models" \
+if [ "$(curl -fsS --cacert "$CURL_CA" -K "$HDR_FILE" "$API/$CLI_UUID/protocol-mappers/models" \
     | has_audience "$API_ID")" != "True" ]; then
   echo "Adding audience mapper to ${CLI_ID}..."
-  curl -fsS --cacert "$CURL_CA" -X POST -H "$H" -H "Content-Type: application/json" "$API/$CLI_UUID/protocol-mappers/models" -d "{
+  curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" "$API/$CLI_UUID/protocol-mappers/models" -d "{
     \"name\":\"openshell-api-audience-$API_ID\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",
     \"config\":{\"included.client.audience\":\"$API_ID\",\"id.token.claim\":\"false\",\"access.token.claim\":\"true\"}
   }"
@@ -254,7 +258,7 @@ fi
 SECRET_FILE="${CONFIG_DIR}/dashboard-client-secret.txt"
 SECRET_TMP="${WORK_DIR}/dashboard-client-secret.txt"
 echo "Writing the dashboard client secret to ${SECRET_FILE} (mode 0600)..."
-curl -fsS --cacert "$CURL_CA" -H "$H" "$API/$DASH_UUID/client-secret" \
+curl -fsS --cacert "$CURL_CA" -K "$HDR_FILE" "$API/$DASH_UUID/client-secret" \
   | python3 -c "import sys,json;sys.stdout.write(json.load(sys.stdin)['value'])" \
   > "$SECRET_TMP"
 [ -s "$SECRET_TMP" ] || {
