@@ -1132,6 +1132,24 @@ class InstallTests(unittest.TestCase):
         )
         self.assertNotIn("renders placeholders", output)
 
+    def test_check_skips_distinctness_for_placeholder_derived_hosts(self):
+        self.config = configuration(with_hosts=False)
+        self.config["gateway"]["host"] = "dashboard-openshell-team.apps.example.com"
+        rendered, output = self.check_render()
+        self.assertIn("renders placeholders", output)
+        self.assertEqual(
+            rendered[1]["openshiftRoute"]["host"],
+            "dashboard-openshell-team.apps.example.com",
+        )
+
+    def test_check_rejects_distinctness_with_apps_domain(self):
+        self.config = configuration(with_hosts=False)
+        self.config["gateway"]["host"] = (
+            "dashboard-openshell-team.apps.cluster.example.com"
+        )
+        with self.assertRaisesRegex(ValueError, "distinct hosts"):
+            self.check_render(["--apps-domain", "apps.cluster.example.com"])
+
     def test_check_placeholder_hosts_follow_namespace_override(self):
         self.config = configuration(with_hosts=False)
         self.config.pop("context")
@@ -1218,19 +1236,34 @@ class InstallTests(unittest.TestCase):
             steps.index("openshell gateway add"),
         )
         self.assertIn(
-            'kubectl --context "install-context" -n openshell-team '
+            "kubectl --context install-context -n openshell-team "
             "get secret openshell-client-tls",
+            steps,
+        )
+        self.assertIn(
+            "${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/openshell-team/mtls",
             steps,
         )
         self.assertIn("openshell gateway add", steps)
         self.assertIn("--name openshell-team", steps)
-        self.assertIn(f'--oidc-issuer "{config["oidc"]["issuer"]}"', steps)
+        self.assertIn(f"--oidc-issuer {config['oidc']['issuer']}", steps)
         self.assertIn("--oidc-client-id openshell-cli", steps)
         self.assertIn("--oidc-audience openshell-api-openshell-team", steps)
         self.assertIn("https://gateway-openshell-team.apps.example.com:443", steps)
         self.assertIn("openshell status", steps)
         self.assertIn("openshell sandbox create", steps)
         self.assertNotIn("SSL_CERT_FILE", steps)
+
+    def test_next_steps_shell_quote_untrusted_values(self):
+        config = self.load()
+        config["oidc"]["issuer"] = "https://issuer.example.com/$(id)"
+        config["oidc"]["audience"] = "aud with space"
+        config["oidc"]["ca_file"] = "/tmp/ca;touch /tmp/x"
+        steps = installer.next_steps(config, "ctx;touch /tmp/x")
+        self.assertIn("kubectl --context 'ctx;touch /tmp/x'", steps)
+        self.assertIn("--oidc-issuer 'https://issuer.example.com/$(id)'", steps)
+        self.assertIn("--oidc-audience 'aud with space'", steps)
+        self.assertIn("'/tmp/ca;touch /tmp/x'", steps)
 
     def test_next_steps_add_private_ca_bundle_when_configured(self):
         config = self.load()

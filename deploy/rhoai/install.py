@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -171,7 +172,7 @@ def require_host(name, host):
     )
 
 
-def resolve_hosts(config, apps_domain=None):
+def resolve_hosts(config, apps_domain=None, distinct=True):
     domain = apps_domain.strip().rstrip(".").lower() if apps_domain else ""
     ns = config["namespace"]
     for name in ("gateway", "dashboard"):
@@ -195,10 +196,11 @@ def resolve_hosts(config, apps_domain=None):
             )
             item["host"] = host
         require_host(name, item["host"])
-    require(
-        config["gateway"]["host"] != config["dashboard"]["host"],
-        "Gateway and dashboard need distinct hosts",
-    )
+    if distinct:
+        require(
+            config["gateway"]["host"] != config["dashboard"]["host"],
+            "Gateway and dashboard need distinct hosts",
+        )
 
 
 def load_config(path, namespace=None):
@@ -497,7 +499,7 @@ def system_ca_bundle():
 def next_steps(config, context):
     ns = config["namespace"]
     oidc = config["oidc"]
-    gateway_dir = f"$HOME/.config/openshell/gateways/{ns}/mtls"
+    gateway_dir = f"${{XDG_CONFIG_HOME:-$HOME/.config}}/openshell/gateways/{ns}/mtls"
     gateway_url = f"https://{config['gateway']['host']}:443"
     lines = [
         "Next steps:",
@@ -508,7 +510,7 @@ def next_steps(config, context):
         "",
         "2. Register the gateway with the OpenShell CLI:",
         f'   mkdir -p "{gateway_dir}"',
-        f'   kubectl --context "{context}" -n {ns} get secret openshell-client-tls \\',
+        f"   kubectl --context {shlex.quote(context)} -n {ns} get secret openshell-client-tls \\",
         "     -o jsonpath='{.data.ca\\.crt}' | base64 -d \\",
         f'     > "{gateway_dir}/ca.crt"',
     ]
@@ -525,7 +527,7 @@ def next_steps(config, context):
             ]
         lines += [
             f"   cat {bundle or '<system-ca-bundle>'} \\",
-            f'     "{oidc["ca_file"]}" \\',
+            f"     {shlex.quote(oidc['ca_file'])} \\",
             '     > "$HOME/.config/openshell-rhoai/ca-bundle.pem"',
             '   export SSL_CERT_FILE="$HOME/.config/openshell-rhoai/ca-bundle.pem"',
             "",
@@ -538,9 +540,9 @@ def next_steps(config, context):
         "",
         "   openshell gateway add \\",
         f"     --name {ns} \\",
-        f'     --oidc-issuer "{oidc["issuer"]}" \\',
+        f"     --oidc-issuer {shlex.quote(oidc['issuer'])} \\",
         f"     --oidc-client-id {CLI_CLIENT_ID} \\",
-        f"     --oidc-audience {oidc['audience']} \\",
+        f"     --oidc-audience {shlex.quote(oidc['audience'])} \\",
         f'     "{gateway_url}"',
         "",
         f"   Use your provider's CLI client ID if it is not {CLI_CLIENT_ID}.",
@@ -1174,8 +1176,13 @@ def main():
     ]
     if args.check:
         require(args.apps_domain != "", "--apps-domain must be a nonempty DNS name")
-        resolve_hosts(config, args.apps_domain or PLACEHOLDER_APPS_DOMAIN)
-        if missing and args.apps_domain is None:
+        placeholders = bool(missing) and args.apps_domain is None
+        resolve_hosts(
+            config,
+            args.apps_domain or PLACEHOLDER_APPS_DOMAIN,
+            distinct=not placeholders,
+        )
+        if placeholders:
             labels = [f"{name}.host" for name in missing]
             width = max(map(len, labels))
             print(
