@@ -4388,6 +4388,7 @@ dependencies = [
  "openshell-bootstrap",
  "openshell-core",
  "openshell-crypto",
+ "openshell-otel",
  "openshell-policy",
  "openshell-providers",
  "openshell-sdk",
@@ -4411,17 +4412,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
-]
-
-[[package]]
-name = "openshell-conformance"
-version = "0.0.0"
-dependencies = [
- "rand 0.9.4",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
+ "wiremock",
 ]
 
 [[package]]
@@ -4431,6 +4422,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "clap",
  "glob",
  "h2",
  "ipnet",
@@ -4467,6 +4459,36 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "openshell-credential-issuer"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-sts",
+ "futures",
+ "hyper-util",
+ "jsonwebtoken",
+ "openshell-core",
+ "openshell-crypto",
+ "openshell-driver-db-credstore",
+ "openshell-driver-kubernetes-secrets",
+ "openshell-driver-vault",
+ "prost-types",
+ "reqwest 0.12.28",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tonic",
+ "tower",
+ "tracing",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -4857,14 +4879,27 @@ dependencies = [
 name = "openshell-otel"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "futures",
  "http 1.4.0",
+ "http-body-util",
+ "hyper-rustls",
+ "hyper-util",
  "metrics",
+ "openshell-crypto",
  "openshell-ocsf",
+ "openshell-otel-test-support",
  "opentelemetry",
+ "opentelemetry-http",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
+ "prost",
+ "rustls",
+ "rustls-native-certs",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tonic",
@@ -4872,19 +4907,27 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
 name = "openshell-otel-test-support"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "http 1.4.0",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "openshell-crypto",
  "openshell-otel",
  "opentelemetry-proto",
  "prost",
  "rcgen",
+ "rustls",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "tracing",
@@ -5070,8 +5113,6 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
- "aws-config",
- "aws-sdk-sts",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -5100,10 +5141,8 @@ dependencies = [
  "notify",
  "openshell-bootstrap",
  "openshell-core",
+ "openshell-credential-issuer",
  "openshell-crypto",
- "openshell-driver-db-credstore",
- "openshell-driver-kubernetes-secrets",
- "openshell-driver-vault",
  "openshell-extension-core",
  "openshell-gateway-interceptors",
  "openshell-ocsf",
@@ -5132,6 +5171,7 @@ dependencies = [
  "russh",
  "rustix 1.1.4",
  "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5166,6 +5206,7 @@ dependencies = [
 name = "openshell-supervisor"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "bytes",
  "clap",
  "futures",
@@ -5294,11 +5335,13 @@ dependencies = [
  "openshell-ocsf",
  "openshell-ocsf-validate",
  "openshell-otel",
+ "openshell-otel-test-support",
  "openshell-policy",
  "openshell-policy-schema",
  "openshell-sandbox-backend",
  "openshell-supervisor-middleware",
  "openshell-supervisor-middleware-builtins",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost-types",
  "rcgen",
@@ -5463,13 +5506,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-http"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "302249bd8ee804789faaa7b5b2cbf79bc61cb864714079c644e3828af5b7e811"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http 1.4.0",
+ "opentelemetry",
+]
+
+[[package]]
 name = "opentelemetry-otlp"
 version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0756af24841e367128ef31c831999937b8b5c5197d47914590d8f4e2e88c2e1a"
 dependencies = [
+ "flate2",
  "http 1.4.0",
+ "httpdate",
  "opentelemetry",
+ "opentelemetry-http",
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
@@ -6655,7 +6713,6 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "serde_json",
- "serde_yaml",
  "spin",
  "thiserror 2.0.20",
 ]
