@@ -396,16 +396,23 @@ class InstallTests(unittest.TestCase):
                 )
             return ""
 
+        output = io.StringIO()
         with (
             patch("sys.argv", ["install.py", "--config", str(path), "--preflight"]),
             patch.object(installer.shutil, "which", return_value="tool"),
             patch.object(installer.Installer, "run", run),
             patch.object(installer.Installer, "preflight") as preflight,
             patch.object(installer.Installer, "install") as install,
+            redirect_stdout(output),
         ):
             installer.main()
         preflight.assert_called_once()
         install.assert_not_called()
+        self.assertIn("Step 2/2: Running cluster preflight", output.getvalue())
+        self.assertIn(
+            "Cluster preflight passed; no installation resources were changed.",
+            output.getvalue(),
+        )
 
     def test_rejects_invalid_oidc_and_namespace(self):
         for section, key, value in (
@@ -1154,6 +1161,24 @@ class InstallTests(unittest.TestCase):
             "dashboard-render-project.apps.example.com",
         )
 
+    def test_check_prints_render_step_and_success(self):
+        _, output = self.check_render()
+        self.assertIn("Rendering the gateway and dashboard charts", output)
+        self.assertIn("Both charts rendered successfully.", output)
+
+    def test_colorize_keeps_ansi_out_of_non_tty_output(self):
+        class Tty(io.StringIO):
+            def isatty(self):
+                return True
+
+        with patch.dict(installer.os.environ, {}, clear=True):
+            self.assertEqual(
+                installer.colorize("text", "32", Tty()), "\033[32mtext\033[0m"
+            )
+            self.assertEqual(installer.colorize("text", "32", io.StringIO()), "text")
+        with patch.dict(installer.os.environ, {"NO_COLOR": "1"}):
+            self.assertEqual(installer.colorize("text", "32", Tty()), "text")
+
     def test_apps_domain_flag_requires_check(self):
         path = self.root / "config.json"
         path.write_text(json.dumps(self.config))
@@ -1243,6 +1268,13 @@ class InstallTests(unittest.TestCase):
         self.assertIn("https://gateway-openshell-team.apps.example.com:443", steps)
         self.assertIn("openshell status", steps)
         self.assertIn("openshell sandbox create", steps)
+        self.assertIn("sign in as a user that holds the", steps)
+        self.assertIn(
+            f"admin role ({config['oidc']['admin_role']}) or user role", steps
+        )
+        self.assertIn(f"({config['oidc']['user_role']})", steps)
+        self.assertIn("The gateway rejects API calls from a", steps)
+        self.assertIn("user with neither role.", steps)
         self.assertNotIn("SSL_CERT_FILE", steps)
 
     def test_next_steps_shell_quote_untrusted_values(self):

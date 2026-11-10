@@ -123,6 +123,23 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def colorize(text, code, stream=None):
+    # Keep piped output, logs, and test captures free of ANSI escapes.
+    stream = sys.stdout if stream is None else stream
+    if (
+        os.environ.get("NO_COLOR")
+        or os.environ.get("TERM") == "dumb"
+        or not getattr(stream, "isatty", lambda: False)()
+    ):
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def step(index, total, title):
+    label = f"Step {index}/{total}: " if total > 1 else ""
+    print(f"\n{colorize(label + title, '1;36')}", flush=True)
+
+
 def fields(obj, required, optional=()):
     require(isinstance(obj, dict), "Configuration sections must be JSON objects")
     require(
@@ -502,7 +519,7 @@ def next_steps(config, context):
     gateway_dir = f"${{XDG_CONFIG_HOME:-$HOME/.config}}/openshell/gateways/{ns}/mtls"
     gateway_url = f"https://{config['gateway']['host']}:443"
     lines = [
-        "Next steps:",
+        colorize("Next steps:", "1"),
         "",
         "1. Install the OpenShell CLI that matches this gateway release:",
         f"   curl -LsSf {CLI_INSTALL_URL} \\",
@@ -546,6 +563,11 @@ def next_steps(config, context):
         f'     "{gateway_url}"',
         "",
         f"   Use your provider's CLI client ID if it is not {CLI_CLIENT_ID}.",
+        "",
+        "   The command opens a browser; sign in as a user that holds the",
+        f"   gateway's admin role ({oidc['admin_role']}) or user role",
+        f"   ({oidc['user_role']}). The gateway rejects API calls from a",
+        "   user with neither role.",
         "",
         "3. Check the connection:",
         "   openshell status",
@@ -705,7 +727,8 @@ class Installer:
     def cluster_checks(self, namespace):
         version = self.get("clusterversion.config.openshift.io", "version", False)
         print(
-            f"OpenShift version: {(version or {}).get('status', {}).get('desired', {}).get('version', 'unknown')}"
+            f"{colorize('OpenShift version:', '1')} "
+            f"{(version or {}).get('status', {}).get('desired', {}).get('version', 'unknown')}"
         )
         storage = json.loads(
             self.run([*self.kube, "get", "storageclasses", "-o", "json"])
@@ -728,7 +751,7 @@ class Installer:
         )
         classes = ", ".join(defaults)
         print(
-            f"Default StorageClass: {classes}\n"
+            f"{colorize('Default StorageClass:', '1')} {classes}\n"
             "  The gateway's SQLite database runs on a PersistentVolumeClaim, so the\n"
             "  default StorageClass must provision block volumes. The installer cannot\n"
             "  detect the volume type; verify the default class is block-backed (not NFS\n"
@@ -754,7 +777,9 @@ class Installer:
                 for item in nodes["items"]
             }
         )
-        print(f"Node kernels: {', '.join(kernels) or 'none reported'}")
+        print(
+            f"{colorize('Node kernels:', '1')} {', '.join(kernels) or 'none reported'}"
+        )
         legacy = [
             kernel
             for kernel in kernels
@@ -766,7 +791,11 @@ class Installer:
             version = self.config["gateway"]["version"]
             fixed = version_at_least(version, LEGACY_KERNEL_FIX_RELEASE)
             print(
-                f"{'Note' if fixed else 'Warning'}: node kernel(s) below 5.19: {', '.join(legacy)}"
+                colorize(
+                    f"{'Note' if fixed else 'Warning'}: node kernel(s) below 5.19: "
+                    f"{', '.join(legacy)}",
+                    "33",
+                )
             )
             if fixed:
                 print(
@@ -869,7 +898,11 @@ class Installer:
             data = other.get("data", {})
             if "oidc-issuer" not in data:
                 print(
-                    f"Note: legacy installer state in {other['metadata']['namespace']} has no identity metadata; verify audience isolation manually."
+                    colorize(
+                        f"Note: legacy installer state in {other['metadata']['namespace']} "
+                        "has no identity metadata; verify audience isolation manually.",
+                        "33",
+                    )
                 )
                 continue
             if data["oidc-issuer"].rstrip("/") == desired["oidc-issuer"].rstrip("/"):
@@ -881,7 +914,9 @@ class Installer:
 
     def preflight(self):
         print(
-            f"Target:\n  kube context: {self.context}\n  namespace:    {self.ns}",
+            f"{colorize('Target:', '1')}\n"
+            f"  kube context: {self.context}\n"
+            f"  namespace:    {self.ns}",
             flush=True,
         )
         self.run([*self.kube, "get", "--raw", "/apis/route.openshift.io/v1"])
@@ -1036,7 +1071,10 @@ class Installer:
             time.sleep(min(2, max(0, deadline - time.monotonic())))
 
     def install(self, charts, values):
+        step(2, 3, "Running cluster preflight")
         namespace = self.preflight()
+        print(colorize("Cluster preflight passed.", "32"), flush=True)
+        step(3, 3, "Installing the gateway and dashboard")
         if not namespace:
             self.create(
                 {
@@ -1078,7 +1116,10 @@ class Installer:
             )
         self.credentials()
         for index, release in enumerate(("openshell", "openshell-dashboard")):
-            print(f"Installing {release} in {self.ns}...", flush=True)
+            print(
+                f"{colorize(f'Installing {release}', '1')} in {self.ns}...",
+                flush=True,
+            )
             self.run(
                 [
                     "helm",
@@ -1108,8 +1149,10 @@ class Installer:
                     "Gateway did not create its CA Secret",
                 )
             self.wait_for_route(release)
-        print(f"Dashboard: https://{self.config['dashboard']['host']}")
-        print(f"Gateway:   https://{self.config['gateway']['host']}")
+        print(
+            f"{colorize('Dashboard:', '1')} https://{self.config['dashboard']['host']}"
+        )
+        print(f"{colorize('Gateway:  ', '1')} https://{self.config['gateway']['host']}")
         print()
         print(next_steps(self.config, self.context))
 
@@ -1185,6 +1228,8 @@ def main():
     else:
         resolve_hosts(config, installer.apps_domain() if missing else None)
     os.umask(0o077)
+    total_steps = 1 if args.check else 2 if args.preflight else 3
+    step(1, total_steps, "Rendering the gateway and dashboard charts")
     with tempfile.TemporaryDirectory(prefix="openshell-install-") as temporary:
         root = Path(temporary)
         charts, files = [], []
@@ -1246,12 +1291,20 @@ def main():
             charts.append(chart)
             files.append(value_file)
         print(
-            "Both charts rendered successfully. This does not verify cluster or API compatibility.",
+            f"{colorize('Both charts rendered successfully.', '32')} "
+            "This does not verify cluster or API compatibility.",
             flush=True,
         )
         if args.preflight:
+            step(2, total_steps, "Running cluster preflight")
             installer.preflight()
-            print("Cluster preflight passed; no installation resources were changed.")
+            print(
+                colorize(
+                    "Cluster preflight passed; no installation resources were changed.",
+                    "32",
+                ),
+                flush=True,
+            )
         elif not args.check:
             installer.install(charts, files)
 
@@ -1260,8 +1313,9 @@ if __name__ == "__main__":
     try:
         main()
     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as error:
+        stopped = colorize("Installation stopped:", "1;31", sys.stderr)
         print(
-            f"Installation stopped: {error}\nCluster resources were not rolled back or deleted.",
+            f"{stopped} {error}\nCluster resources were not rolled back or deleted.",
             file=sys.stderr,
         )
         sys.exit(1)
