@@ -259,9 +259,9 @@ cluster.
 
 When a configuration omits the hosts, `--check` renders them as
 `gateway-<namespace>.apps.example.com` and
-`dashboard-<namespace>.apps.example.com` and prints a note; the install derives
-the real hosts from the cluster. Pass `--apps-domain <domain>` to render the
-real derived hosts offline.
+`dashboard-<namespace>.apps.example.com`; the install derives the real hosts
+from the cluster. Pass `--apps-domain <domain>` to render the real derived hosts
+offline.
 
 Run cluster preflight without installing:
 

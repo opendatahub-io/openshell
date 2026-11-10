@@ -1182,23 +1182,6 @@ def main():
             args.apps_domain or PLACEHOLDER_APPS_DOMAIN,
             distinct=not placeholders,
         )
-        if placeholders:
-            labels = [f"{name}.host" for name in missing]
-            width = max(map(len, labels))
-            print(
-                "\n".join(
-                    [
-                        f"Note: {', '.join(labels)} are not set, so --check renders placeholders:",
-                        *(
-                            f"  {label.ljust(width)} = {config[name]['host']}"
-                            for label, name in zip(labels, missing, strict=True)
-                        ),
-                        "The install derives the real hosts from the cluster ingress apps domain.",
-                        "Pass --apps-domain <domain> to render the real hosts offline.",
-                    ]
-                ),
-                flush=True,
-            )
     else:
         resolve_hosts(config, installer.apps_domain() if missing else None)
     os.umask(0o077)

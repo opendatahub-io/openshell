@@ -1101,7 +1101,7 @@ class InstallTests(unittest.TestCase):
     def test_check_without_context_or_hosts_never_resolves_cluster(self):
         self.config = configuration(with_hosts=False)
         self.config.pop("context")
-        rendered, output = self.check_render()
+        rendered, _ = self.check_render()
         self.assertEqual(
             rendered[0]["openshiftRoute"]["host"],
             "gateway-openshell-team.apps.example.com",
@@ -1110,18 +1110,11 @@ class InstallTests(unittest.TestCase):
             rendered[1]["openshiftRoute"]["host"],
             "dashboard-openshell-team.apps.example.com",
         )
-        self.assertIn("renders placeholders", output)
-        self.assertIn("gateway.host", output)
-        self.assertIn("dashboard.host", output)
-        self.assertIn("gateway-openshell-team.apps.example.com", output)
-        self.assertIn("dashboard-openshell-team.apps.example.com", output)
 
     def test_check_with_apps_domain_derives_hosts_offline(self):
         self.config = configuration(with_hosts=False)
         self.config.pop("context")
-        rendered, output = self.check_render(
-            ["--apps-domain", "apps.cluster.example.com"]
-        )
+        rendered, _ = self.check_render(["--apps-domain", "apps.cluster.example.com"])
         self.assertEqual(
             rendered[0]["openshiftRoute"]["host"],
             "gateway-openshell-team.apps.cluster.example.com",
@@ -1130,13 +1123,11 @@ class InstallTests(unittest.TestCase):
             rendered[1]["openshiftRoute"]["host"],
             "dashboard-openshell-team.apps.cluster.example.com",
         )
-        self.assertNotIn("renders placeholders", output)
 
     def test_check_skips_distinctness_for_placeholder_derived_hosts(self):
         self.config = configuration(with_hosts=False)
         self.config["gateway"]["host"] = "dashboard-openshell-team.apps.example.com"
-        rendered, output = self.check_render()
-        self.assertIn("renders placeholders", output)
+        rendered, _ = self.check_render()
         self.assertEqual(
             rendered[1]["openshiftRoute"]["host"],
             "dashboard-openshell-team.apps.example.com",
