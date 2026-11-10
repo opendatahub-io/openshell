@@ -73,6 +73,17 @@ OPENSHELL_ODH_PYTHON_GATES_STRICT=1 \
 hide = true
 run_windows = "echo Skipping test:odh-python-gates: the Unix ODH scripts do not apply on Windows."
 
+["test:odh-python-quality"]
+description = "Check formatting, lint, and types for downstream ODH Python tooling"
+depends = ["python:dev"]
+run = [
+  "uv run ruff format --check deploy/konflux/e2e-odh/*.py odh/scripts/*.py",
+  "uv run ruff check deploy/konflux/e2e-odh/*.py odh/scripts/*.py",
+  "uv run ty check deploy/konflux/e2e-odh/*.py odh/scripts/*.py",
+]
+hide = true
+run_windows = "echo Skipping test:odh-python-quality: the Unix ODH tooling does not apply on Windows."
+
 ["test:odh-deploy-digests"]
 description = "Test ODH deploy script image-digest plumbing without a cluster"
 run = "odh/scripts/tests/test-openshell-deploy-from-quay.sh"
