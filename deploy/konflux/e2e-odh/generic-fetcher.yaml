@@ -26,9 +26,9 @@ artifacts:
     checksum: "sha256:8cf8f66ecbc252ac8f7f06cca68aba88508ddfde3a6a34feb1678ad1694b4f88"
     filename: helm-v4.3.1-linux-arm64.tar.gz
 
-  - download_url: https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-unknown-linux-gnu.tar.gz
+  - download_url: https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz
     checksum: "sha256:b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f"
-    filename: cargo-nextest-0.9.150-x86_64-unknown-linux-gnu.tar.gz
-  - download_url: https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-aarch64-unknown-linux-gnu.tar.gz
+    filename: cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz
+  - download_url: https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-aarch64-unknown-linux-gnu.tar.gz
     checksum: "sha256:9164568e9840c6509177086828ac7d3178c2d8feb0658b4d2bff62fa620e98c8"
-    filename: cargo-nextest-0.9.150-aarch64-unknown-linux-gnu.tar.gz
+    filename: cargo-nextest-0.9.151-aarch64-unknown-linux-gnu.tar.gz
