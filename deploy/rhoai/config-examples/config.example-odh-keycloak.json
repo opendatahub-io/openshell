@@ -2,27 +2,27 @@
   "namespace": "openshell-team",
   "gateway": {
     "chart": "oci://ghcr.io/nvidia/openshell/helm-chart",
-    "version": "0.1.6",
+    "version": "0.1.7",
     "values_files": [],
     "images": {
       "gateway": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-gateway",
-        "tag": "v0.1.6-rhaiv.3"
+        "tag": "v0.1.7-rhaiv.0"
       },
       "supervisor": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-supervisor",
-        "tag": "v0.1.6-rhaiv.3"
+        "tag": "v0.1.7-rhaiv.0"
       },
       "sandboxRuntime": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-sandbox",
-        "tag": "v0.1.6-rhaiv.3"
+        "tag": "v0.1.7-rhaiv.0"
       },
       "sandbox": {
         "repository": "quay.io/opendatahub/odh-openshell-sandbox",
-        "tag": "v0.1.6-rhaiv.3"
+        "tag": "v0.1.7-rhaiv.0"
       }
     }
   },

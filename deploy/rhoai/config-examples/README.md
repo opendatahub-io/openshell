@@ -51,8 +51,8 @@ so keep the same files. Omitting them installs the chart defaults.
 | File | Images | Gateway chart | Dashboard chart | OIDC | Use when |
 |---|---|---|---|---|---|
 | `config.example.json` | ODH repositories, digest placeholders | placeholder | placeholder | generic | custom registries or versions |
-| `config.example-odh.json` | ODH `v0.1.6-rhaiv.3` | `0.1.6` | `0.1.2` | generic | latest OpenShell with your own IdP |
-| `config.example-odh-keycloak.json` | ODH `v0.1.6-rhaiv.3` | `0.1.6` | `0.1.2` | Keycloak | latest OpenShell with Keycloak |
+| `config.example-odh.json` | ODH `v0.1.7-rhaiv.0` | `0.1.7` | `0.1.2` | generic | latest OpenShell with your own IdP |
+| `config.example-odh-keycloak.json` | ODH `v0.1.7-rhaiv.0` | `0.1.7` | `0.1.2` | Keycloak | latest OpenShell with Keycloak |
 | `config.example-rhoai-3.6.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.2` | generic | match the RHOAI 3.6 operator CSV |
 | `config.example-rhoai-3.6-keycloak.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.2` | Keycloak | default README walkthrough |
 
@@ -101,7 +101,7 @@ omitted hosts as `<component>-<namespace>.apps.example.com` unless you pass
 
 Konflux publishes ODH builds from `main` (`odh-stable`) and as
 `vX.Y.Z-rhaiv.N` tags. Use the `vX.Y.Z-rhaiv.N` tags, not `odh-stable`. The
-0.1.6 examples use `v0.1.6-rhaiv.3`, which is multi-architecture. All ODH
+0.1.7 examples use `v0.1.7-rhaiv.0`, which is multi-architecture. All ODH
 images come from `quay.io`, so no `registry.redhat.io` access or pull secret is
 needed. Pin a tag or digest, and match the gateway chart version to the
 OpenShell version.

@@ -74,7 +74,7 @@ RHOAI 3.6 builds by digest and pairs them with the Keycloak realm that
 
 For the latest OpenShell builds, use
 `config-examples/config.example-odh-keycloak.json`. It pins gateway chart
-`0.1.6` and the `v0.1.6-rhaiv.3` images. It uses only `quay.io` images, so it
+`0.1.7` and the `v0.1.7-rhaiv.0` images. It uses only `quay.io` images, so it
 can test Open Data Hub community builds without `registry.redhat.io` access or
 a pull secret.
 
@@ -180,11 +180,11 @@ then creates no ConfigMap and both workloads use the system trust roots.
 
 ### Chart and image pins
 
-- `version` in each section is the Helm chart version, not the image tag.
-- RHOAI image digests come from the operator CSV. Refresh them with the command
+- `version` in each section is the OpenShell Helm chart version, not the image tag.
+- RHOAI image digests come from the rhods-operator.3.6.0 CSV. Refresh them with the command
   in [config-examples/README.md](config-examples/README.md), or use the
   `rhoai-3.6` tag instead.
-- The ODH examples use `v0.1.6-rhaiv.3` images.
+- The ODH examples use `v0.1.7-rhaiv.0` images.
 - When both are present, `digest` takes precedence over `tag`.
 - `gateway.images.sandbox` uses a full repository path and has no separate
   registry key. The image must provide a shell at `/bin/bash`, `/usr/bin/bash`,
@@ -302,12 +302,12 @@ trust setup for custom identity providers.
 The installer prints these commands with the values from your configuration; use
 its output when it differs from the examples below.
 
-Install the OpenShell CLI. The examples in this guide use `v0.1.6`; install the
+Install the OpenShell CLI. The examples in this guide use `v0.1.7`; install the
 version that matches the gateway release you deployed:
 
 ```shell
 curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh \
-  | OPENSHELL_VERSION=v0.1.6 sh
+  | OPENSHELL_VERSION=v0.1.7 sh
 ```
 
 The gateway Route is TLS passthrough serving a private CA, and OIDC discovery
@@ -365,11 +365,12 @@ Replace the issuer with your configuration value. The gateway URL is the derived
 default `gateway-<namespace>.<apps-domain>`; use the URL the installer printed.
 The command opens a browser for the Authorization Code + PKCE login.
 
-Log in as a user that holds the gateway's admin role, configured in
-`oidc.admin_role` and named `openshell-admin` in the Keycloak examples. The
-admin role can create sandboxes and workspaces, and add users that hold the
-user role (`oidc.user_role`, `openshell-user` in the Keycloak examples) to
-workspaces.
+Sign in as a user that holds the gateway's admin role or user role. The admin
+role is configured in `oidc.admin_role` (`openshell-admin` in the Keycloak
+examples), and the user role in `oidc.user_role` (`openshell-user`). A user who
+holds neither role can complete the login, but the gateway rejects their API
+calls. An admin can create sandboxes and workspaces and add users that hold the
+user role to workspaces; a user works in the workspaces they were added to.
 
 Verify the registration and login:
 
