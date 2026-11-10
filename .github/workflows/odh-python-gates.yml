@@ -8,6 +8,7 @@ on:
       - "e2e/python/**"
       - "e2e/rust/tests/odh/tier_plan.py"
       - "e2e/rust/tests/odh/tiers.toml"
+      - "deploy/konflux/e2e-odh/**"
       - "mise.toml"
       - "mise.lock"
       - "odh/python-gates.toml"
@@ -44,6 +45,9 @@ jobs:
 
       - name: Install Python tools
         run: mise install --locked python uv
+
+      - name: Check ODH Python quality
+        run: mise run --skip-tools test:odh-python-quality
 
       - name: Test ODH Python gate tooling
         run: mise run --skip-tools test:odh-python-gates
