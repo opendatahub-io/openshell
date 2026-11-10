@@ -1,0 +1,17 @@
+{
+  "name": "agentic-openclaw-prefetch",
+  "private": true,
+  "allowScripts": {
+    "@google/genai": false,
+    "koffi@3.2.1": true,
+    "file:///cachi2/output/deps/npm/koffi-3.2.1.tgz": true,
+    "openclaw@2026.9.5": true,
+    "file:///cachi2/output/deps/npm/openclaw-2026.9.5.tgz": true,
+    "protobufjs": false,
+    "tree-sitter-bash@0.25.1": true,
+    "file:///cachi2/output/deps/npm/tree-sitter-bash-0.25.1.tgz": true
+  },
+  "dependencies": {
+    "openclaw": "2026.9.5"
+  }
+}

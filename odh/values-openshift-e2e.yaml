@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# ODH e2e overrides for the effective gateway configuration. The shared
+# OpenShift e2e overlay uses dev auth and mutable image tags; ODH requires mTLS
+# user authentication and stable image pull behavior.
+gatewayConfig:
+  openshell.gateway.auth:
+    allow_unauthenticated_users: false
+  openshell.drivers.kubernetes:
+    image_pull_policy: IfNotPresent
+    sandbox_runtime_image_pull_policy: IfNotPresent
+    supervisor_image_pull_policy: IfNotPresent
+    workspace_mode: shared
+
+# Upstream mutable-image tests use Always for the gateway pod; ODH provenance
+# requires IfNotPresent.
+gateway:
+  image:
+    pullPolicy: IfNotPresent

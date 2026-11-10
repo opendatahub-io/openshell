@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# opendatahub-io fork: downstream-only ODH/RHOAI e2e tasks.
+# Fork-only file — see e2e/rust/tests/odh/README.md.
+#
+# Normal runs require oc authenticated to an OpenShift cluster with ODH/RHOAI
+# installed and ALLOWED_IMAGE_REGISTRY_PREFIXES for the image provenance test.
+# Runtime images default to the installed operator CSV; explicit image env vars
+# override discovery. Bare repository overrides require IMAGE_TAG (or Git
+# metadata). See e2e/rust/tests/odh/README.md for no-deploy limits.
+
+["test:odh-infra"]
+description = "Test ODH e2e image discovery and deployment contracts without a cluster"
+run = 'uv run --no-project "${OPENSHELL_E2E_TEST_BASH:-bash}" odh/scripts/tests/test_discover_e2e_images.sh'
+run_windows = "echo Skipping test:odh-infra: Unix ODH deployment scripts do not apply on Windows."
+
+["build:openshell-cli"]
+description = "Build the OpenShell CLI for ODH e2e tests"
+run = "if [ -z \"${OPENSHELL_BIN:-}\" ]; then cargo build -p openshell-cli; fi"
+hide = true
+
+["e2e:odh"]
+description = "Run ODH scenarios and managed-workspace tests in their gateway modes"
+depends = ["build:openshell-cli"]
+run = "odh/scripts/e2e-odh-entrypoint.sh odh"
+
+["e2e:odh:python"]
+description = "Run supported upstream Python gateway E2E against an OpenShift deployment"
+depends = ["build:openshell-cli", "python:dev"]
+run = "odh/scripts/e2e-odh-entrypoint.sh python"
+
+["e2e:odh:full"]
+description = "Run all feature-enabled e2e binaries across shared and managed gateway modes"
+depends = ["build:openshell-cli"]
+run = "odh/scripts/e2e-odh-entrypoint.sh full"
+
+["e2e:odh:smoke"]
+description = "Run Smoke tier: upstream + ODH (5 min target)"
+depends = ["build:openshell-cli"]
+run = "odh/scripts/e2e-odh-entrypoint.sh smoke"
+
+["e2e:odh:tier1"]
+description = "Run Tier 1: upstream + ODH, high-priority (15 min target)"
+depends = ["build:openshell-cli"]
+run = "odh/scripts/e2e-odh-entrypoint.sh tier1"
+
+["e2e:odh:tier2"]
+description = "Run Tier 2: upstream + ODH, medium/low priority positive tests"
+# tier2's shared phase also runs the Python gateway suite, which needs the
+# project environment a fresh checkout does not have yet.
+depends = ["build:openshell-cli", "python:dev"]
+run = "odh/scripts/e2e-odh-entrypoint.sh tier2"
+
+["e2e:odh:tier3"]
+description = "Run Tier 3: upstream + ODH, negative and destructive tests"
+depends = ["build:openshell-cli"]
+run = "odh/scripts/e2e-odh-entrypoint.sh tier3"
+
+["test:odh-python-gates"]
+description = "Test the ODH Python E2E gates tooling without a cluster"
+depends = ["python:dev"]
+run = """
+odh/scripts/tests/test-pytest-odh-gates.sh
+odh/scripts/tests/test-strip-skipped-testcases.sh
+odh/scripts/tests/test-tier-plan.sh
+odh/scripts/tests/test-check-python-e2e-requirements.sh
+odh/scripts/tests/test-e2e-odh-entrypoint.sh
+OPENSHELL_E2E_OIDC=0 \
+OPENSHELL_ODH_PYTHON_GATES_STRICT=1 \
+"$PWD/odh/scripts/run-python-e2e.sh" --collect-only
+"""
+hide = true
+run_windows = "echo Skipping test:odh-python-gates: the Unix ODH scripts do not apply on Windows."
+
+["test:odh-deploy-digests"]
+description = "Test ODH deploy script image-digest plumbing without a cluster"
+run = "odh/scripts/tests/test-openshell-deploy-from-quay.sh"
+run_windows = "echo Skipping test:odh-deploy-digests: the Unix Quay deploy script does not apply on Windows."
+hide = true
+
+["test:odh-generic-fetcher"]
+description = "Test ODH generic-fetcher checksum synchronization"
+# Keep this invocation in sync with odh-deploy-contract.yml.
+run = "uv run --no-project --with \"pytest==9.0.3\" --with \"pytest-asyncio==1.3.0\" pytest -o \"python_files=*_test.py\" deploy/konflux/e2e-odh/"
+hide = true

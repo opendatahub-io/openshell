@@ -12,7 +12,7 @@ ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/build-env.sh"
 
 usage() {
-  echo "Usage: stage-prebuilt-binaries.sh <gateway|sandbox|supervisor|supervisor-output|all>" >&2
+  echo "Usage: stage-prebuilt-binaries.sh <gateway|sandbox|supervisor|supervisor-output|cli|all>" >&2
 }
 
 normalize_arch() {
@@ -93,8 +93,11 @@ components_for_target() {
     supervisor|supervisor-output)
       echo "supervisor"
       ;;
+    cli)
+      echo "cli"
+      ;;
     all)
-      echo "gateway sandbox supervisor"
+      echo "gateway sandbox supervisor cli"
       ;;
     *)
       usage
@@ -119,6 +122,11 @@ resolve_component() {
       crate=openshell-supervisor
       binary=openshell-supervisor
       target_libc=gnu
+      ;;
+    cli)
+      crate=openshell-cli
+      binary=openshell
+      target_libc=musl
       ;;
     *)
       echo "unsupported binary component: $1" >&2

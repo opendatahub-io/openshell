@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Example provider profile for the OpenClaw reference image
+# (odh-openshell-sandbox-openclaw). OpenShell does not load it; copy it, edit
+# it and import it explicitly:
+#   openshell profile lint   -f model-provider-profile.yaml
+#   openshell profile import -f model-provider-profile.yaml --global
+#   openshell provider create --name model --type openclaw-model \
+#     --credential CUSTOM_API_KEY=<token>
+#
+# Set `host` and `port` to the model Service exactly as MODEL_BASE_URL names
+# it (for example http://vllm.models.svc.cluster.local:8000/v1). The proxy
+# matches on host:port, so a different spelling of the same Service does not
+# get the credential.
+#
+# Client binaries:   node (OpenClaw runs on the image's Node.js).
+# Reference layout:  /usr/bin/node in odh-openshell-sandbox-openclaw.
+# Credential scope:  CUSTOM_API_KEY, sent as a bearer authorization header to
+#                    the host:port below and nowhere else. openclaw-start
+#                    stores it in the OpenClaw config as an env reference, so
+#                    OpenClaw only ever sees the provider placeholder.
+# Endpoint access:   one OpenAI-compatible endpoint, read-write, L7 enforced.
+# Smoke test:        see deploy/konflux/openclaw/README.md.
+
+id: openclaw-model
+display_name: OpenClaw model endpoint
+description: OpenAI-compatible model endpoint used by the OpenClaw reference image
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Bearer token for the model endpoint
+    env_vars: [CUSTOM_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: model.example.svc.cluster.local
+    port: 8000
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries: [/usr/bin/node]

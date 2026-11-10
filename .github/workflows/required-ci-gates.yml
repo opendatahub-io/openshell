@@ -275,7 +275,12 @@ jobs:
 
           resolve_context
 
-          evaluate_workflow "OpenShell / Branch Checks" "branch-checks.yml" "Branch Checks"
+          # CARRY: Branch Checks and Helm Lint are disabled upstream-only jobs in this
+          # downstream fork (see `if: false` in branch-checks.yml/helm-lint.yml). Their
+          # workflows only trigger from a "pull-request/<N>" mirror branch, so
+          # evaluate_workflow's verify_mirror would pend these gates forever downstream,
+          # since nothing creates that mirror branch here. Mark them passing directly.
+          post_status "OpenShell / Branch Checks" success "Disabled in downstream fork (job requires runners unavailable downstream)" "$STATUS_TARGET_URL"
           # E2E is opt-in on PRs and does not run for merge groups.
           if [ "$CONTEXT_KIND" != "merge_group" ]; then
             evaluate_workflow "OpenShell / E2E" "branch-e2e.yml" "Branch E2E Checks" "test:e2e" "Core E2E result"
@@ -284,4 +289,4 @@ jobs:
             post_status "OpenShell / E2E" success "Not applicable: E2E runs only on PRs" "$STATUS_TARGET_URL"
             post_status "OpenShell / GPU E2E" success "Not applicable: GPU E2E runs only on PRs" "$STATUS_TARGET_URL"
           fi
-          evaluate_workflow "OpenShell / Helm Lint" "helm-lint.yml" "Helm Lint"
+          post_status "OpenShell / Helm Lint" success "Disabled in downstream fork (job requires runners unavailable downstream)" "$STATUS_TARGET_URL"

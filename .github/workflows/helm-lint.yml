@@ -24,6 +24,7 @@ concurrency:
 
 jobs:
   pr_metadata:
+    if: false # CARRY: disable upstream-only job (requires runners unavailable in downstream fork)
     name: Resolve PR metadata
     runs-on: ubuntu-latest
     permissions:

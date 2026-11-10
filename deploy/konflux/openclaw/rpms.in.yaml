@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# RPM dependencies for Dockerfile.konflux.openclaw
+# Runtime (final) stage only; the builder stage installs no RPMs.
+#
+# The only requested package is crypto-policies-scripts, needed for
+# `update-crypto-policies --set DEFAULT:PQ` so Node's system OpenSSL policy
+# negotiates post-quantum key exchange, matching the cli, gateway and
+# supervisor images. python3 is pulled in as its dependency.
+#
+# Resolved with `context.bare: true` so the lockfile pins the full dependency
+# closure regardless of what the nodejs-24-minimal base already provides.
+#
+# Target arches and repos are declared in this file (not passed on the command
+# line) so Konflux MintMaker can regenerate the lockfile with no CLI flags.
+# Regenerate manually with:
+#   rpm-lockfile-prototype --outfile deploy/konflux/openclaw/rpms.lock.yaml \
+#       deploy/konflux/openclaw/rpms.in.yaml
+#
+# UBI content is public, so repos are inlined here rather than read from the
+# base image; rpm-lockfile-prototype resolves versions from the CDN and cannot
+# read /etc/yum.repos.d from inside the base image.
+contentOrigin:
+  repos:
+    - repoid: ubi-9-for-$basearch-baseos-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/baseos/os/
+    - repoid: ubi-9-for-$basearch-appstream-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/appstream/os/
+packages:
+  - crypto-policies-scripts
+arches:
+  - x86_64
+  - aarch64
+# Exclude weak dependencies (Recommends/Supplements) so the closure is minimal
+# and deterministic regardless of the regenerating host's DNF default. Must stay
+# in sync with the `--setopt=install_weak_deps=0` flag in the Dockerfile.
+installWeakDeps: false
+context:
+  bare: true

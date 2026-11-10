@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 OpenShell contributors
+# SPDX-License-Identifier: Apache-2.0
+# Optional operational overrides, referenced by dashboard.values_files.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+authProxy:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+# For custom/host-network routers, set networkPolicy.ingressFrom to peers
+# reviewed for your ingress controller. Keep the proxy restricted to the router.
