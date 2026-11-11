@@ -26,7 +26,7 @@ ARG NEXTEST_VERSION=0.9.151
 # renovate: datasource=github-releases depName=astral-sh/uv
 ARG UV_VERSION=0.13.7
 
-FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.1@sha256:cf69dc550002a80c8af670bf9ca3068ed6c9ddc8d94fd99513b06ecaac297921 AS builder
+FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.1@sha256:064c6dba006564ec348e5e2bf77da09992721e3e9c3406d14db4486e35f379cd AS builder
 
 # The builder image runs as 1001 and already ships gcc, gcc-c++, make,
 # cmake, openssl-devel, git and tar. Install Python for the locked E2E test
