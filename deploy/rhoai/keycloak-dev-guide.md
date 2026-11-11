@@ -339,7 +339,9 @@ oc -n "$KEYCLOAK_NS" get pods
 
 ## Cleanup
 
-Remove Keycloak and PostgreSQL:
+Remove Keycloak and PostgreSQL. These commands delete only the resources this
+guide creates, so they are safe when `KEYCLOAK_NS` is a shared or pre-existing
+namespace:
 
 ```shell
 oc delete keycloak keycloak -n "$KEYCLOAK_NS"
@@ -349,8 +351,13 @@ oc delete operatorgroup "$KEYCLOAK_NS" -n "$KEYCLOAK_NS"
 oc delete all -l app=keycloak-db -n "$KEYCLOAK_NS"
 oc delete pvc keycloak-db-data -n "$KEYCLOAK_NS"
 oc delete secret keycloak-db-secret -n "$KEYCLOAK_NS"
-oc delete namespace "$KEYCLOAK_NS"
 ```
 
-Deleting the namespace removes everything above; the individual commands allow
-partial removal.
+Optionally delete the namespace as well. This is a separate step because it
+deletes every workload, PersistentVolumeClaim, and resource in `KEYCLOAK_NS`,
+not only the Keycloak resources. Run it only when the namespace was created
+for this guide; skip it when the namespace is shared or already existed:
+
+```shell
+oc delete namespace "$KEYCLOAK_NS"
+```

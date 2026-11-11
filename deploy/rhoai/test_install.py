@@ -1287,6 +1287,8 @@ class InstallTests(unittest.TestCase):
         steps = installer.next_steps(config, "install-context")
         self.assertIn("1. Install the OpenShell CLI", steps)
         self.assertIn(f"OPENSHELL_VERSION=v{config['gateway']['version']} sh", steps)
+        self.assertIn("local", steps)
+        self.assertIn("limitation of the upstream installer", steps)
         self.assertIn("2. Register the gateway", steps)
         self.assertLess(
             steps.index("1. Install the OpenShell CLI"),

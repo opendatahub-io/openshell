@@ -315,6 +315,13 @@ curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh \
   | OPENSHELL_VERSION=v0.1.7 sh
 ```
 
+The upstream installer also deploys and starts a local gateway on the
+workstation that runs it: a user service on Linux and a Homebrew service on
+macOS. This is a limitation of the upstream installer. The local gateway is
+separate from the cluster gateway deployed above and is not used by this
+guide's remote-cluster workflow. If it conflicts with an existing local
+installation, remove it with `openshell gateway destroy`.
+
 The gateway Route is TLS passthrough serving a private CA, and OIDC discovery
 uses the ingress CA. Trust both paths before adding the gateway.
 
@@ -491,6 +498,21 @@ oc --context "$CTX" -n openshell-team create secret generic openshell-dashboard-
   --from-literal=client-secret="$(cat "$HOME/.config/openshell-rhoai/dashboard-client-secret.txt")" \
   --from-literal=cookie-secret="$COOKIE" \
   --dry-run=client -o yaml | oc --context "$CTX" apply -f -
+oc --context "$CTX" -n openshell-team rollout restart deployment openshell-dashboard
+```
+
+When the OIDC issuer's CA changes and `oidc.ca_file` is set, also rotate the
+`openshell-oidc-ca` ConfigMap that both releases mount. The Secret commands
+above do not update it, so the gateway and dashboard keep trusting the old CA
+and fail issuer TLS verification; the installer also rejects a rerun until the
+ConfigMap matches the new `ca_file`. Update the ConfigMap and restart both
+workloads:
+
+```shell
+oc --context "$CTX" -n openshell-team create configmap openshell-oidc-ca \
+  --from-file=ca.crt="$HOME/.config/openshell-rhoai/ingress-ca.crt" \
+  --dry-run=client -o yaml | oc --context "$CTX" apply -f -
+oc --context "$CTX" -n openshell-team rollout restart deployment openshell-gateway
 oc --context "$CTX" -n openshell-team rollout restart deployment openshell-dashboard
 ```
 
