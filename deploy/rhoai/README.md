@@ -46,6 +46,8 @@ here.
 - `uv`, Helm 3.17.3 or later, and `kubectl` for installation and preflight on
   the administrator's workstation. `--check` needs only Helm.
 - OpenShift 4.20 or newer.
+- amd64 nodes. The installer supports amd64 clusters only; arm64 support is
+  planned for a future version.
 - [Red Hat Build of Agent Sandbox
   Operator](https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.13/html/deploying_red_hat_build_of_agent_sandbox/index)
   deployed in the cluster.
@@ -189,7 +191,10 @@ then creates no ConfigMap and both workloads use the system trust roots.
 - `gateway.images.sandbox` uses a full repository path and has no separate
   registry key. The image must provide a shell at `/bin/bash`, `/usr/bin/bash`,
   or `/bin/sh`.
-- ODH dashboard images are amd64-only and pair with dashboard chart `0.1.2`.
+- Supported architectures: the installer runs on amd64 clusters only; arm64
+  support is planned for a future version. The RHOAI 3.6 images and the ODH
+  gateway, supervisor, and sandbox images are already multi-arch, but the ODH
+  dashboard image is amd64-only and pairs with dashboard chart `0.1.2`.
 - Use the `vX.Y.Z-rhaiv.N` tagged images for ODH, not the moving `odh-stable`
   tag.
 
@@ -533,6 +538,7 @@ namespace for you.
 |---|---|
 | `oidc.client_secret_file is required for the first install` | Create the client secret file before `--check`, or reuse installer state from an earlier successful install. |
 | No default StorageClass | Mark a StorageClass that provisions block volumes as default; the gateway's SQLite database needs it. |
+| Preflight fails with `This installer supports amd64 clusters only` | The cluster reports non-amd64 node architectures. arm64 support is planned for a future installer version; until then, run the installer against an amd64 cluster. |
 | Agent Sandbox readiness fails | Install or start the Agent Sandbox controller, or override `agent_sandbox_namespace` and `agent_sandbox_deployment`. |
 | `x509` error during `openshell gateway add` | Distinguish the two trust paths: copy the gateway CA into the CLI mtls directory, and build the `SSL_CERT_FILE` bundle for OIDC discovery. |
 | `dns error` from `openshell status` after `gateway add` succeeds | The gateway host is outside the router's `*.apps.<domain>` wildcard, so it has no DNS record. Registration only contacts the OIDC issuer; `status` is the first gateway connection. Correct `gateway.host`, or remove it to derive `gateway-<namespace>.<apps-domain>` from the ingress domain. Reinstall when the installer already recorded the old host. |

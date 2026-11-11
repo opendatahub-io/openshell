@@ -771,6 +771,24 @@ class Installer:
                 "Configured workspaceStorageClass does not exist",
             )
         nodes = json.loads(self.run([*self.kube, "get", "nodes", "-o", "json"]))
+        arches = sorted(
+            {
+                item.get("status", {})
+                .get("nodeInfo", {})
+                .get("architecture", "unknown")
+                for item in nodes["items"]
+            }
+        )
+        print(
+            f"{colorize('Node architectures:', '1')} {', '.join(arches) or 'none reported'}"
+        )
+        require(
+            arches == ["amd64"],
+            "This installer supports amd64 clusters only. "
+            f"This cluster reports node architectures: {', '.join(arches) or 'none'}. "
+            "arm64 support will be added in a future version; "
+            "until then, run the installer against an amd64 cluster.",
+        )
         kernels = sorted(
             {
                 item.get("status", {})

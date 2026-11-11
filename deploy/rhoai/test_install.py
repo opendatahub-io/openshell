@@ -69,7 +69,13 @@ class FakeCluster(installer.Installer):
         ]
         self.other_states = []
         self.denied_permission = None
-        self.nodes = []
+        self.nodes = [
+            {
+                "status": {
+                    "nodeInfo": {"architecture": "amd64", "kernelVersion": "6.1.0"}
+                }
+            }
+        ]
 
     def run(self, args, payload=None):
         self.calls.append((args, payload))
@@ -1219,7 +1225,14 @@ class InstallTests(unittest.TestCase):
         self.config["gateway"]["version"] = version
         cluster = FakeCluster(self.load())
         cluster.nodes = [
-            {"status": {"nodeInfo": {"kernelVersion": "5.14.0-687.el9.x86_64"}}}
+            {
+                "status": {
+                    "nodeInfo": {
+                        "architecture": "amd64",
+                        "kernelVersion": "5.14.0-687.el9.x86_64",
+                    }
+                }
+            }
         ]
         output = io.StringIO()
         with redirect_stdout(output):
@@ -1240,6 +1253,34 @@ class InstallTests(unittest.TestCase):
         self.assertIn("Warning: node kernel(s) below 5.19", output)
         self.assertIn("OpenShell 0.1.3 and later", output)
         self.assertIn("gateway.version is 0.1.2", output)
+
+    def test_preflight_prints_and_accepts_amd64_cluster(self):
+        cluster = self.cluster()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.cluster_checks(None)
+        self.assertIn("Node architectures: amd64", output.getvalue())
+
+    def test_preflight_rejects_non_amd64_clusters(self):
+        for arch in ("arm64", "unknown", None):
+            cluster = self.cluster()
+            node = {"status": {"nodeInfo": {"kernelVersion": "6.1.0"}}}
+            if arch is not None:
+                node["status"]["nodeInfo"]["architecture"] = arch
+            cluster.nodes = [
+                {
+                    "status": {
+                        "nodeInfo": {"architecture": "amd64", "kernelVersion": "6.1.0"}
+                    }
+                },
+                node,
+            ]
+            with (
+                self.subTest(arch=arch or "missing"),
+                self.assertRaisesRegex(ValueError, "amd64 clusters only"),
+                redirect_stdout(io.StringIO()),
+            ):
+                cluster.cluster_checks(None)
 
     def test_next_steps_include_registration_and_sandbox_commands(self):
         config = self.load()
