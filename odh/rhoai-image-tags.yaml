@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# RHOAI e2e streams. Each key is a git branch and the Konflux/Quay tag
+# quay.io/opendatahub/odh-openshell-e2e:<key>. The value is the NVIDIA
+# OpenShell version whose latest midstream vX.Y.Z-rhaiv.N commit that
+# branch tracks. A stream is a no-op until that version has a rhaiv tag.
+# Add a new key when a RHOAI train needs its own e2e image.
+#
+# Edit this file to add trains. Do not put product names into rhaiv-auto-tag.yml.
+
+tags:
+  rhoai-3.6-e2e: v0.1.3
+  rhoai-3.7-ea.1-e2e: v0.1.7
+  rhoai-3.7-ea.2-e2e: v0.1.7
+  rhoai-3.7-e2e: v0.1.7
+  rhoai-3.8-ea.1-e2e: v0.1.8
+  rhoai-3.8-ea.2-e2e: v0.1.8
+  rhoai-3.8-e2e: v0.1.8
+  rhoai-3.9-ea.1-e2e: v0.1.9
+  rhoai-3.9-ea.2-e2e: v0.1.9
+  rhoai-3.9-e2e: v0.1.9
