@@ -538,6 +538,7 @@ def next_steps(config, context):
     ]
     if oidc.get("ca_file"):
         bundle = system_ca_bundle()
+        config_dir = "${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"
         lines += [
             "",
             "   The OIDC issuer uses a private CA; add it to the trust bundle:",
@@ -548,10 +549,11 @@ def next_steps(config, context):
                 "   your platform's path below.",
             ]
         lines += [
+            f'   mkdir -p "{config_dir}"',
             f"   cat {bundle or '<system-ca-bundle>'} \\",
             f"     {shlex.quote(oidc['ca_file'])} \\",
-            '     > "$HOME/.config/openshell-rhoai/ca-bundle.pem"',
-            '   export SSL_CERT_FILE="$HOME/.config/openshell-rhoai/ca-bundle.pem"',
+            f'     > "{config_dir}/ca-bundle.pem"',
+            f'   export SSL_CERT_FILE="{config_dir}/ca-bundle.pem"',
             "",
             "   Platform paths: Fedora/RHEL",
             "   /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem,",

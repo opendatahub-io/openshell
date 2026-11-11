@@ -325,12 +325,20 @@ installation, remove it with `openshell gateway destroy`.
 The gateway Route is TLS passthrough serving a private CA, and OIDC discovery
 uses the ingress CA. Trust both paths before adding the gateway.
 
+Set `CTX` to the context you installed with — or the current context when
+`--context` was not passed — so the certificate commands below read from the
+same cluster:
+
+```shell
+CTX=YOUR_INSTALL_CONTEXT
+```
+
 Copy the gateway server CA into the CLI's per-gateway TLS directory. The
 directory name must match the `--name` value you use below:
 
 ```shell
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/openshell-team/mtls"
-oc -n openshell-team get secret openshell-client-tls \
+oc --context "$CTX" -n openshell-team get secret openshell-client-tls \
   -o jsonpath='{.data.ca\.crt}' | base64 -d \
   > "${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/openshell-team/mtls/ca.crt"
 ```
@@ -340,8 +348,11 @@ The CLI stores gateway metadata under `${XDG_CONFIG_HOME:-$HOME/.config}/openshe
 OIDC bearer authentication needs only `ca.crt` in this directory.
 
 Build an `SSL_CERT_FILE` bundle from the system roots plus the ingress CA.
-Setting `SSL_CERT_FILE` replaces the default bundle, so never point it at the
-ingress CA alone:
+Skip this and the ConfigMap command below when your OIDC issuer's certificate
+is publicly trusted (`oidc.ca_file` unset): the installer creates no
+`openshell-oidc-ca` ConfigMap, no ingress CA file exists, and the CLI uses the
+system trust roots unchanged. Setting `SSL_CERT_FILE` replaces the default
+bundle, so never point it at the ingress CA alone:
 
 ```shell
 cat /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
@@ -358,7 +369,7 @@ on. If you run these commands on another host, substitute the matching path:
 installer-created ConfigMap:
 
 ```shell
-oc -n openshell-team get configmap openshell-oidc-ca \
+oc --context "$CTX" -n openshell-team get configmap openshell-oidc-ca \
   -o jsonpath='{.data.ca\.crt}' > "$HOME/.config/openshell-rhoai/ingress-ca.crt"
 ```
 

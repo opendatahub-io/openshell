@@ -1343,7 +1343,11 @@ class InstallTests(unittest.TestCase):
         steps = installer.next_steps(config, "install-context")
         self.assertIn("/tmp/ingress-ca.crt", steps)
         self.assertIn(
-            'export SSL_CERT_FILE="$HOME/.config/openshell-rhoai/ca-bundle.pem"',
+            'mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"', steps
+        )
+        self.assertIn(
+            "export SSL_CERT_FILE="
+            '"${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai/ca-bundle.pem"',
             steps,
         )
 

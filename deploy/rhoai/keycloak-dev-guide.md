@@ -158,6 +158,14 @@ spec:
 EOF
 ```
 
+The Subscription installs asynchronously, and the Keycloak CRD may not exist
+yet when the next command runs. Wait for the operator Deployment to become
+ready before creating the instance:
+
+```shell
+oc -n "$KEYCLOAK_NS" rollout status deployment/rhbk-operator
+```
+
 ### Create the Keycloak instance
 
 ```shell
@@ -212,6 +220,15 @@ otherwise. The command-line script in this part creates the realm, roles, and
 clients; create the users in the console. When a Keycloak administrator already
 created the registrations, use their values instead and skip the sections you
 do not need.
+
+The Keycloak console does not expand shell variables, so enter the printed
+values below literally instead of `${NS}` and `${DASH_URL}`:
+
+```shell
+echo "API audience:      ${API_ID}"
+echo "Dashboard client:  ${DASH_ID}"
+echo "Dashboard URL:     ${DASH_URL}"
+```
 
 ### Create the realm and roles
 
@@ -307,6 +324,7 @@ Export the ingress CA, then run the script from the repository root after the
 Keycloak instance is ready:
 
 ```shell
+mkdir -p "$CONFIG_DIR"
 oc -n openshift-config-managed get configmap default-ingress-cert \
   -o jsonpath='{.data.ca-bundle\.crt}' > "${CONFIG_DIR}/ingress-ca.crt"
 ./deploy/rhoai/keycloak-dev-guide-create-openshell-clients.sh
