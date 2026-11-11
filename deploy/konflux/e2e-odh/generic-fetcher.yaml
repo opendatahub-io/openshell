@@ -6,17 +6,17 @@ metadata:
   version: "1.0"
 artifacts:
   - download_url: https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-unknown-linux-gnu.tar.gz
-    checksum: "sha256:f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645"
+    checksum: "sha256:c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83"
     filename: uv-0.13.7-x86_64-unknown-linux-gnu.tar.gz
   - download_url: https://github.com/astral-sh/uv/releases/download/0.13.7/uv-aarch64-unknown-linux-gnu.tar.gz
-    checksum: "sha256:229e194255c7958d86d56e8790d969a6f74736592133f0dfd0076f754c642c1d"
+    checksum: "sha256:71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc"
     filename: uv-0.13.7-aarch64-unknown-linux-gnu.tar.gz
 
   - download_url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.22/openshift-client-linux-amd64-rhel9-4.22.22.tar.gz
-    checksum: "sha256:319c74ab09064bd703e781da436a4da13a39ddfc6976df84a5872903a2ec1739"
+    checksum: "sha256:fa41d39396f22e8b0f46a3634244cf53bec368bb254107a5bf9701547c39fb58"
     filename: openshift-client-linux-amd64-rhel9-4.22.22.tar.gz
   - download_url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.22.22/openshift-client-linux-arm64-rhel9-4.22.22.tar.gz
-    checksum: "sha256:d42e4749f41cfa2567e49cf3a9846fd7add33cfd9db23a48815601d051169ee0"
+    checksum: "sha256:b84bd5c6700ab48a84ab0b3cbbab4c3b8ffc45539ad05b57dd02f6cf1c3dc982"
     filename: openshift-client-linux-arm64-rhel9-4.22.22.tar.gz
 
   - download_url: https://get.helm.sh/helm-v4.3.1-linux-amd64.tar.gz
@@ -27,8 +27,8 @@ artifacts:
     filename: helm-v4.3.1-linux-arm64.tar.gz
 
   - download_url: https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz
-    checksum: "sha256:b0959bc64232974224cf9fb22c915845398c0e8668fa7831eb5b43fb1eef781f"
+    checksum: "sha256:1d4ce302b820c41f4b89c5fb9bce45f0f0c94882c1cf08fc360caf08be6e7df4"
     filename: cargo-nextest-0.9.151-x86_64-unknown-linux-gnu.tar.gz
   - download_url: https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.151/cargo-nextest-0.9.151-aarch64-unknown-linux-gnu.tar.gz
-    checksum: "sha256:9164568e9840c6509177086828ac7d3178c2d8feb0658b4d2bff62fa620e98c8"
+    checksum: "sha256:3e35e8f6913af92558ba09d7155f74e35dd1f0024ef3cd891637433ae4eacbdd"
     filename: cargo-nextest-0.9.151-aarch64-unknown-linux-gnu.tar.gz
