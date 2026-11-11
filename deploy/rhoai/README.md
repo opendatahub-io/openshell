@@ -493,11 +493,14 @@ restart the dashboard:
 
 ```shell
 CTX=YOUR_INSTALL_CONTEXT
-COOKIE=$(oc --context "$CTX" -n openshell-team get secret openshell-dashboard-oidc -o jsonpath='{.data.cookie-secret}' | base64 -d)
+COOKIE_FILE=$(mktemp)
+oc --context "$CTX" -n openshell-team get secret openshell-dashboard-oidc \
+  -o jsonpath='{.data.cookie-secret}' | base64 -d > "$COOKIE_FILE"
 oc --context "$CTX" -n openshell-team create secret generic openshell-dashboard-oidc \
-  --from-literal=client-secret="$(cat "$HOME/.config/openshell-rhoai/dashboard-client-secret.txt")" \
-  --from-literal=cookie-secret="$COOKIE" \
+  --from-file=client-secret="$HOME/.config/openshell-rhoai/dashboard-client-secret.txt" \
+  --from-file=cookie-secret="$COOKIE_FILE" \
   --dry-run=client -o yaml | oc --context "$CTX" apply -f -
+rm -f "$COOKIE_FILE"
 oc --context "$CTX" -n openshell-team rollout restart deployment openshell-dashboard
 ```
 
