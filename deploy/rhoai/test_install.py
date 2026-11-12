@@ -27,7 +27,6 @@ spec.loader.exec_module(installer)
 def configuration(with_hosts=True):
     config_path = Path(__file__).with_name("config-examples") / "config.example.json"
     config = json.loads(config_path.read_text())
-    config["context"] = "test-context"
     if with_hosts:
         # Keep the existing suite deterministic; the examples omit these.
         config["gateway"]["host"] = "gateway-openshell-team.apps.example.com"
@@ -44,7 +43,7 @@ def configuration(with_hosts=True):
 
 class FakeCluster(installer.Installer):
     def __init__(self, config):
-        super().__init__(config, "10m")
+        super().__init__(config, "10m", "test-context")
         self.objects = {
             ("crd", "sandboxes.agents.x-k8s.io"): {
                 "spec": {"versions": [{"name": "v1beta1", "served": True}]}
@@ -1066,31 +1065,29 @@ class InstallTests(unittest.TestCase):
             cluster.apps_domain()
 
     def test_installer_does_not_resolve_context_on_construction(self):
-        self.config = configuration(with_hosts=False)
-        self.config.pop("context")
         config = self.load()
         with patch.object(
             installer,
             "current_context",
             side_effect=AssertionError("resolved eagerly"),
         ):
-            cluster = FakeCluster(config)
+            cluster = installer.Installer(config, "10m")
         self.assertIsNone(cluster._context)
 
     def test_default_context_is_resolved_once_and_used_for_kubectl_and_helm(self):
         self.config = configuration(with_hosts=False)
-        self.config.pop("context")
         with patch.object(
             installer, "current_context", return_value="current-context"
         ) as current:
             cluster = self.cluster()
+            cluster._context = None
             installer.resolve_hosts(cluster.config, cluster.apps_domain())
             cluster.install(["gateway.tgz", "dashboard.tgz"], ["g.json", "d.json"])
         self.assertEqual(current.call_count, 1)
         for args, _ in cluster.calls:
             self.assertIn("current-context", args)
 
-    def test_cli_context_overrides_config_context(self):
+    def test_cli_context_is_used_without_lookup(self):
         with patch.object(
             installer,
             "current_context",
@@ -1101,19 +1098,8 @@ class InstallTests(unittest.TestCase):
                 "cli-context",
             )
 
-    def test_config_context_is_used_without_lookup(self):
-        with patch.object(
-            installer,
-            "current_context",
-            side_effect=AssertionError("looked up the current context"),
-        ):
-            self.assertEqual(
-                installer.Installer(self.load(), "10m").context, "test-context"
-            )
-
     def test_check_without_context_or_hosts_never_resolves_cluster(self):
         self.config = configuration(with_hosts=False)
-        self.config.pop("context")
         rendered, _ = self.check_render()
         self.assertEqual(
             rendered[0]["openshiftRoute"]["host"],
@@ -1126,7 +1112,6 @@ class InstallTests(unittest.TestCase):
 
     def test_check_with_apps_domain_derives_hosts_offline(self):
         self.config = configuration(with_hosts=False)
-        self.config.pop("context")
         rendered, _ = self.check_render(["--apps-domain", "apps.cluster.example.com"])
         self.assertEqual(
             rendered[0]["openshiftRoute"]["host"],
@@ -1156,7 +1141,6 @@ class InstallTests(unittest.TestCase):
 
     def test_check_placeholder_hosts_follow_namespace_override(self):
         self.config = configuration(with_hosts=False)
-        self.config.pop("context")
         rendered, _ = self.check_render(["--namespace", "render-project"])
         self.assertEqual(
             rendered[0]["openshiftRoute"]["host"],

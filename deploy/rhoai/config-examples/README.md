@@ -20,8 +20,8 @@ examples also set `"ca_file": "ingress-ca.crt"`, so create that file with the
 command in [../README.md](../README.md#oidc-issuer-certificate) before running
 `--check`.
 
-The examples omit `context` and the hosts. The installer uses the current
-kubeconfig context (`--context` overrides it) and derives
+The examples omit the hosts. The installer targets the current kubeconfig
+context (`--context` selects another one) and derives
 `gateway-<namespace>.<apps-domain>` and `dashboard-<namespace>.<apps-domain>`
 from the cluster ingress domain.
 
@@ -56,8 +56,7 @@ so keep the same files. Omitting them installs the chart defaults.
 | `config.example-rhoai-3.6.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.2` | generic | match the RHOAI 3.6 operator CSV |
 | `config.example-rhoai-3.6-keycloak.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.2` | Keycloak | default README walkthrough |
 
-All examples omit `context` and the hosts and rely on the defaults described
-below.
+All examples omit the hosts and rely on the defaults described below.
 
 ## OIDC identifiers
 
@@ -77,7 +76,6 @@ These fields are optional; the installer derives or defaults them:
 
 | Field | Default |
 |---|---|
-| `context` | Current kubeconfig context; `--context` overrides it |
 | `gateway.host`, `dashboard.host` | `gateway-<namespace>.<apps-domain>` and `dashboard-<namespace>.<apps-domain>` |
 | `gateway.values_files`, `dashboard.values_files` | `[]` |
 | `gateway.images`, `dashboard.images` | Chart defaults |

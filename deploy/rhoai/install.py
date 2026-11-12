@@ -228,7 +228,7 @@ def load_config(path, namespace=None):
     fields(
         config,
         ("namespace", "gateway", "dashboard", "oidc"),
-        ("context", "agent_sandbox_namespace", "agent_sandbox_deployment"),
+        ("agent_sandbox_namespace", "agent_sandbox_deployment"),
     )
     ns = config["namespace"]
     require(
@@ -248,11 +248,6 @@ def load_config(path, namespace=None):
                 isinstance(config[key], str) and DNS.fullmatch(config[key]),
                 f"Invalid {key}",
             )
-    if "context" in config:
-        require(
-            isinstance(config["context"], str) and config["context"].strip(),
-            "context must be a nonempty string",
-        )
     for name in ("gateway", "dashboard"):
         item = config[name]
         fields(item, ("chart", "version"), ("host", "images", "values_files"))
@@ -594,7 +589,7 @@ class Installer:
     def __init__(self, config, timeout, context=None):
         self.config = config
         self.timeout = timeout
-        self._context = context if context is not None else config.get("context")
+        self._context = context
         require(
             self._context is None
             or (isinstance(self._context, str) and self._context.strip()),
@@ -1193,7 +1188,7 @@ def main():
     )
     parser.add_argument(
         "--context",
-        help="Kube context; overrides config.context and the current kubeconfig context",
+        help="Kube context; defaults to the current kubeconfig context",
     )
     parser.add_argument(
         "--apps-domain",

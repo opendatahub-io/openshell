@@ -64,9 +64,9 @@ here.
   `registry.access.redhat.com` is only needed when you use a Red Hat base image.
 
 The installer does not install an identity provider, Agent Sandbox, RHOAI, or
-console integration. It installs into the current kubeconfig context unless you
-pass `--context`, and never changes it. `--check` reads neither the context nor
-the cluster.
+console integration. It targets the current kubeconfig context unless you pass
+`--context`, and never changes it. Configurations do not select a context.
+`--check` reads neither the context nor the cluster.
 
 ## Choose a configuration
 
@@ -144,8 +144,8 @@ images; check them against [Chart and image pins](#chart-and-image-pins).
   distinct and sit under the router's `*.apps.<domain>` wildcard so DNS
   resolves. The dashboard's edge Route uses the router certificate; the gateway
   serves its own certificate through a passthrough Route.
-- `context` is optional. The installer uses the current kubeconfig context;
-  `--context` overrides it and also overrides this field when set.
+- `context` is not a configuration field. Pass `--context` to select a kube
+  context; otherwise the installer uses the current kubeconfig context.
 - `oidc.allowed_roles` is a dashboard login filter. The installer accepts it only
   when `oidc.provider` is `keycloak-oidc`; for generic `oidc`, use
   `oidc.allowed_groups`. The Keycloak examples list both roles that
@@ -325,9 +325,9 @@ installation, remove it with `openshell gateway destroy`.
 The gateway Route is TLS passthrough serving a private CA, and OIDC discovery
 uses the ingress CA. Trust both paths before adding the gateway.
 
-Set `CTX` to the context you installed with — or the current context when
-`--context` was not passed — so the certificate commands below read from the
-same cluster:
+Set `CTX` to the context you installed with — the value passed to `--context`,
+or the current kubeconfig context when `--context` was not passed — so the
+certificate commands below read from the same cluster:
 
 ```shell
 CTX=YOUR_INSTALL_CONTEXT
@@ -498,9 +498,9 @@ are omitted, changing the namespace or the cluster apps domain changes the
 derived gateway host and triggers the same check.
 
 A changed client secret or OIDC CA requires explicit rotation. Set `CTX` to the
-context used for the installation (or the current context when `--context` was
-not passed), then update the Secret while preserving `cookie-secret` and
-restart the dashboard:
+context used for the installation (the `--context` value, or the current
+kubeconfig context when `--context` was not passed), then update the Secret
+while preserving `cookie-secret` and restart the dashboard:
 
 ```shell
 CTX=YOUR_INSTALL_CONTEXT
@@ -536,8 +536,8 @@ followed by a dashboard failure leaves the upgraded gateway in place.
 ## Remove an installation
 
 The installer has no uninstall subcommand. Set `CTX` to the context used for the
-installation (or the current context when `--context` was not passed), then
-remove the dashboard first, then the gateway:
+installation (the `--context` value, or the current kubeconfig context when
+`--context` was not passed), then remove the dashboard first, then the gateway:
 
 ```shell
 CTX=YOUR_INSTALL_CONTEXT
