@@ -10,7 +10,7 @@ and OIDC placeholders before installing:
 
 ```shell
 cp deploy/rhoai/config-examples/config.example-odh-keycloak.json \
-  "$HOME/.config/openshell-rhoai/config.json"
+  "${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai/config.json"
 ```
 
 Paths in `oidc.client_secret_file` and `oidc.ca_file` resolve relative to the

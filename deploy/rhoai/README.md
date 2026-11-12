@@ -85,14 +85,17 @@ examples, including the generic and non-Keycloak variants.
 
 ## Copy the configuration
 
-Copy the example outside the checkout so local credentials cannot be committed:
+Copy the example outside the checkout so local credentials cannot be committed.
+The commands below keep the configuration and its files in `CONFIG_DIR`; set it
+to the directory that contains `config.json` if you keep it elsewhere:
 
 ```shell
-mkdir -p "$HOME/.config/openshell-rhoai"
-chmod 700 "$HOME/.config/openshell-rhoai"
+export CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"
+mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR"
 cp deploy/rhoai/config-examples/config.example-rhoai-3.6-keycloak.json \
-  "$HOME/.config/openshell-rhoai/config.json"
-chmod 600 "$HOME/.config/openshell-rhoai/config.json"
+  "$CONFIG_DIR/config.json"
+chmod 600 "$CONFIG_DIR/config.json"
 ```
 
 Users who want operational overrides also copy
@@ -171,7 +174,7 @@ Create that file before `--check`:
 ```shell
 oc -n openshift-config-managed get configmap default-ingress-cert \
   -o jsonpath='{.data.ca-bundle\.crt}' \
-  > "$HOME/.config/openshell-rhoai/ingress-ca.crt"
+  > "$CONFIG_DIR/ingress-ca.crt"
 ```
 
 When `ca_file` is set, the installer creates the `openshell-oidc-ca` ConfigMap
@@ -239,11 +242,11 @@ provider beside the configuration:
 
 ```shell
 umask 077
-mkdir -p "$HOME/.config/openshell-rhoai"
+mkdir -p "$CONFIG_DIR"
 IFS= read -rs -p 'Dashboard client secret: ' SECRET
-printf '%s' "$SECRET" > "$HOME/.config/openshell-rhoai/dashboard-client-secret.txt"
+printf '%s' "$SECRET" > "$CONFIG_DIR/dashboard-client-secret.txt"
 unset SECRET
-chmod 600 "$HOME/.config/openshell-rhoai/dashboard-client-secret.txt"
+chmod 600 "$CONFIG_DIR/dashboard-client-secret.txt"
 ```
 
 The `read -rs` prompt keeps the secret off the screen and out of the shell
@@ -261,7 +264,7 @@ Validate both charts without touching the cluster:
 
 ```shell
 ./deploy/rhoai/install.py \
-  --config "$HOME/.config/openshell-rhoai/config.json" --check
+  --config "$CONFIG_DIR/config.json" --check
 ```
 
 Expect `Both charts rendered successfully. This does not verify cluster or API
@@ -278,7 +281,7 @@ Run cluster preflight without installing:
 
 ```shell
 ./deploy/rhoai/install.py \
-  --config "$HOME/.config/openshell-rhoai/config.json" --preflight
+  --config "$CONFIG_DIR/config.json" --preflight
 ```
 
 Expect `Cluster preflight passed; no installation resources were changed.`
@@ -290,7 +293,7 @@ Install:
 
 ```shell
 ./deploy/rhoai/install.py \
-  --config "$HOME/.config/openshell-rhoai/config.json"
+  --config "$CONFIG_DIR/config.json"
 ```
 
 The installer prints the dashboard and gateway URLs. `--namespace` overrides the
@@ -362,9 +365,9 @@ bundle, so never point it at the ingress CA alone:
 
 ```shell
 cat /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
-  "$HOME/.config/openshell-rhoai/ingress-ca.crt" \
-  > "$HOME/.config/openshell-rhoai/ca-bundle.pem"
-export SSL_CERT_FILE="$HOME/.config/openshell-rhoai/ca-bundle.pem"
+  "$CONFIG_DIR/ingress-ca.crt" \
+  > "$CONFIG_DIR/ca-bundle.pem"
+export SSL_CERT_FILE="$CONFIG_DIR/ca-bundle.pem"
 ```
 
 The installer prints the system bundle path it detects for the host it runs
@@ -376,7 +379,7 @@ installer-created ConfigMap:
 
 ```shell
 oc --context "$CTX" -n openshell-team get configmap openshell-oidc-ca \
-  -o jsonpath='{.data.ca\.crt}' > "$HOME/.config/openshell-rhoai/ingress-ca.crt"
+  -o jsonpath='{.data.ca\.crt}' > "$CONFIG_DIR/ingress-ca.crt"
 ```
 
 Register the gateway:
@@ -514,7 +517,7 @@ COOKIE_FILE=$(mktemp)
 oc --context "$CTX" -n openshell-team get secret openshell-dashboard-oidc \
   -o jsonpath='{.data.cookie-secret}' | base64 -d > "$COOKIE_FILE"
 oc --context "$CTX" -n openshell-team create secret generic openshell-dashboard-oidc \
-  --from-file=client-secret="$HOME/.config/openshell-rhoai/dashboard-client-secret.txt" \
+  --from-file=client-secret="$CONFIG_DIR/dashboard-client-secret.txt" \
   --from-file=cookie-secret="$COOKIE_FILE" \
   --dry-run=client -o yaml | oc --context "$CTX" apply -f -
 rm -f "$COOKIE_FILE"
@@ -530,11 +533,17 @@ workloads:
 
 ```shell
 oc --context "$CTX" -n openshell-team create configmap openshell-oidc-ca \
-  --from-file=ca.crt="$HOME/.config/openshell-rhoai/ingress-ca.crt" \
+  --from-file=ca.crt="$CONFIG_DIR/ingress-ca.crt" \
   --dry-run=client -o yaml | oc --context "$CTX" apply -f -
-oc --context "$CTX" -n openshell-team rollout restart deployment openshell-gateway
+oc --context "$CTX" -n openshell-team rollout restart \
+  "$(oc --context "$CTX" -n openshell-team get statefulset,deployment \
+    -l app.kubernetes.io/name=openshell,app.kubernetes.io/instance=openshell -o name)"
 oc --context "$CTX" -n openshell-team rollout restart deployment openshell-dashboard
 ```
+
+The gateway runs as StatefulSet `openshell` with the default SQLite backend and
+as Deployment `openshell` when `server.externalDbSecret` is configured. The
+selector restarts whichever object the release uses without naming its kind.
 
 There is no cross-release transaction or automatic rollback: a gateway success
 followed by a dashboard failure leaves the upgraded gateway in place.

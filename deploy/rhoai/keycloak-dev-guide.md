@@ -22,7 +22,7 @@ export DASH_ID="openshell-dashboard-${NS}"
 export CLI_ID=openshell-cli
 export DASH_URL="https://dashboard-${NS}.${APPS_DOMAIN}"
 export KC_URL="https://keycloak.${APPS_DOMAIN}"
-export CONFIG_DIR="${HOME}/.config/openshell-rhoai"
+export CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/openshell-rhoai"
 ```
 
 The client IDs are namespace-qualified and match the example configurations, so

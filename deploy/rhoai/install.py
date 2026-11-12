@@ -508,7 +508,7 @@ def system_ca_bundle():
     return None
 
 
-def next_steps(config, context):
+def next_steps(config, context, config_dir):
     ns = config["namespace"]
     oidc = config["oidc"]
     gateway_dir = f"${{XDG_CONFIG_HOME:-$HOME/.config}}/openshell/gateways/{ns}/mtls"
@@ -533,7 +533,7 @@ def next_steps(config, context):
     ]
     if oidc.get("ca_file"):
         bundle = system_ca_bundle()
-        config_dir = "${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"
+        bundle_file = Path(config_dir) / "ca-bundle.pem"
         lines += [
             "",
             "   The OIDC issuer uses a private CA; add it to the trust bundle:",
@@ -544,11 +544,11 @@ def next_steps(config, context):
                 "   your platform's path below.",
             ]
         lines += [
-            f'   mkdir -p "{config_dir}"',
+            f"   mkdir -p {shlex.quote(str(config_dir))}",
             f"   cat {bundle or '<system-ca-bundle>'} \\",
             f"     {shlex.quote(oidc['ca_file'])} \\",
-            f'     > "{config_dir}/ca-bundle.pem"',
-            f'   export SSL_CERT_FILE="{config_dir}/ca-bundle.pem"',
+            f"     > {shlex.quote(str(bundle_file))}",
+            f"   export SSL_CERT_FILE={shlex.quote(str(bundle_file))}",
             "",
             "   Platform paths: Fedora/RHEL",
             "   /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem,",
@@ -586,9 +586,10 @@ def next_steps(config, context):
 
 
 class Installer:
-    def __init__(self, config, timeout, context=None):
+    def __init__(self, config, timeout, context=None, config_dir=None):
         self.config = config
         self.timeout = timeout
+        self.config_dir = Path(config_dir) if config_dir is not None else Path.cwd()
         self._context = context
         require(
             self._context is None
@@ -1176,7 +1177,7 @@ class Installer:
         )
         print(f"{colorize('Gateway:  ', '1')} https://{self.config['gateway']['host']}")
         print()
-        print(next_steps(self.config, self.context))
+        print(next_steps(self.config, self.context, self.config_dir))
 
 
 def main():
@@ -1235,7 +1236,9 @@ def main():
     for tool in ["helm"] if args.check else ["helm", "kubectl"]:
         require(shutil.which(tool), f"Required tool not found: {tool}")
     config = load_config(args.config.resolve(), args.namespace)
-    installer = Installer(config, args.timeout, args.context)
+    installer = Installer(
+        config, args.timeout, args.context, args.config.resolve().parent
+    )
     missing = [
         name for name in ("gateway", "dashboard") if config[name].get("host") is None
     ]
