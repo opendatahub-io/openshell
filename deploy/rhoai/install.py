@@ -37,12 +37,9 @@ CLI_INSTALL_URL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/main/insta
 # System trust bundles in preference order; the installer prints the first that
 # exists on its host and names the others for copy-paste on a different host.
 SYSTEM_CA_BUNDLES = (
-    # Fedora, RHEL
-    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
-    # Debian, Ubuntu
-    "/etc/ssl/certs/ca-certificates.crt",
-    # macOS
-    "/etc/ssl/cert.pem",
+    ("Fedora/RHEL", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"),
+    ("Debian/Ubuntu", "/etc/ssl/certs/ca-certificates.crt"),
+    ("macOS", "/etc/ssl/cert.pem"),
 )
 # Releases from this version onward include the pre-5.19 legacy-kernel fixes
 # (NVIDIA/OpenShell#4150). The gateway chart version tracks the OpenShell
@@ -502,7 +499,7 @@ def chart_values(config):
 def system_ca_bundle():
     # The CLI normally runs on the workstation where the installer runs, so
     # prefer the bundle that exists on this host.
-    for candidate in SYSTEM_CA_BUNDLES:
+    for _label, candidate in SYSTEM_CA_BUNDLES:
         if Path(candidate).is_file():
             return candidate
     return None
@@ -550,10 +547,9 @@ def next_steps(config, context, config_dir):
             f"     > {shlex.quote(str(bundle_file))}",
             f"   export SSL_CERT_FILE={shlex.quote(str(bundle_file))}",
             "",
-            "   Platform paths: Fedora/RHEL",
-            "   /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem,",
-            "   Debian/Ubuntu /etc/ssl/certs/ca-certificates.crt,",
-            "   macOS /etc/ssl/cert.pem.",
+            "   Platform paths: "
+            + ", ".join(f"{label} {path}" for label, path in SYSTEM_CA_BUNDLES)
+            + ".",
         ]
     lines += [
         "",

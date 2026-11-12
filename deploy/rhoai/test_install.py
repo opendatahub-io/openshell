@@ -1364,9 +1364,9 @@ class InstallTests(unittest.TestCase):
             installer, "system_ca_bundle", return_value="/etc/ssl/cert.pem"
         ):
             steps = installer.next_steps(config, "install-context", Path("/tmp/rhoai-config"))
-        self.assertIn("/etc/ssl/certs/ca-certificates.crt", steps)
-        self.assertIn("/etc/ssl/cert.pem", steps)
-        self.assertIn("/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", steps)
+        for label, path in installer.SYSTEM_CA_BUNDLES:
+            with self.subTest(label=label):
+                self.assertIn(path, steps)
 
     def test_next_steps_use_placeholder_when_no_bundle_is_detected(self):
         config = self.load()
