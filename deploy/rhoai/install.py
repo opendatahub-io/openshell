@@ -1090,11 +1090,11 @@ class Installer:
             )
             time.sleep(min(2, max(0, deadline - time.monotonic())))
 
-    def install(self, charts, values):
-        step(2, 3, "Running cluster preflight")
+    def install(self, charts, values, total_steps=3):
+        step(2, total_steps, "Running cluster preflight")
         namespace = self.preflight()
         print(colorize("Cluster preflight passed.", "32"), flush=True)
-        step(3, 3, "Installing the gateway and dashboard")
+        step(3, total_steps, "Installing the gateway and dashboard")
         if not namespace:
             self.create(
                 {
@@ -1328,7 +1328,7 @@ def main():
                 flush=True,
             )
         elif not args.check:
-            installer.install(charts, files)
+            installer.install(charts, files, total_steps)
 
 
 if __name__ == "__main__":
