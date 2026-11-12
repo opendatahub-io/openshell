@@ -783,10 +783,11 @@ class Installer:
         )
         require(
             arches == ["amd64"],
-            "This installer supports amd64 clusters only. "
-            f"This cluster reports node architectures: {', '.join(arches) or 'none'}. "
-            "arm64 support will be added in a future version; "
-            "until then, run the installer against an amd64 cluster.",
+            "This installer supports amd64 clusters only. Mixed amd64/arm64 "
+            "clusters are not supported because the Red Hat Build of Agent "
+            "Sandbox Operator is not available on arm64. This cluster reports "
+            f"node architectures: {', '.join(arches) or 'none'}. Run the "
+            "installer against an amd64-only cluster.",
         )
         kernels = sorted(
             {
