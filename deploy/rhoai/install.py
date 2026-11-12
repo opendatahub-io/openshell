@@ -217,6 +217,24 @@ def resolve_hosts(config, apps_domain=None, distinct=True):
         )
 
 
+def resolve_main_hosts(config, check, apps_domain, cluster_domain):
+    """Resolve omitted hosts for the requested mode and report placeholders."""
+    missing = [
+        name for name in ("gateway", "dashboard") if config[name].get("host") is None
+    ]
+    if check:
+        require(apps_domain != "", "--apps-domain must be a nonempty DNS name")
+        placeholders = bool(missing) and apps_domain is None
+        resolve_hosts(
+            config,
+            apps_domain or PLACEHOLDER_APPS_DOMAIN,
+            distinct=not placeholders,
+        )
+        return placeholders
+    resolve_hosts(config, cluster_domain() if missing else None)
+    return False
+
+
 def load_config(path, namespace=None):
     config = json.loads(path.read_text())
     if namespace is not None:
@@ -1236,30 +1254,20 @@ def main():
     installer = Installer(
         config, args.timeout, args.context, args.config.resolve().parent
     )
-    missing = [
-        name for name in ("gateway", "dashboard") if config[name].get("host") is None
-    ]
-    if args.check:
-        require(args.apps_domain != "", "--apps-domain must be a nonempty DNS name")
-        placeholders = bool(missing) and args.apps_domain is None
-        resolve_hosts(
-            config,
-            args.apps_domain or PLACEHOLDER_APPS_DOMAIN,
-            distinct=not placeholders,
+    placeholders = resolve_main_hosts(
+        config, args.check, args.apps_domain, installer.apps_domain
+    )
+    if placeholders:
+        print(
+            colorize(
+                "Note: the rendered hosts are derived from "
+                f"{PLACEHOLDER_APPS_DOMAIN} for this offline check; the install "
+                "derives them from the cluster ingress domain, or pass "
+                "--apps-domain.",
+                "33",
+            ),
+            flush=True,
         )
-        if placeholders:
-            print(
-                colorize(
-                    "Note: the rendered hosts are derived from "
-                    f"{PLACEHOLDER_APPS_DOMAIN} for this offline check; the install "
-                    "derives them from the cluster ingress domain, or pass "
-                    "--apps-domain.",
-                    "33",
-                ),
-                flush=True,
-            )
-    else:
-        resolve_hosts(config, installer.apps_domain() if missing else None)
     os.umask(0o077)
     total_steps = 1 if args.check else 2 if args.preflight else 3
     step(1, total_steps, "Rendering the gateway and dashboard charts")

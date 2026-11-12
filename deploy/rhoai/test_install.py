@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location(
     "installer", Path(__file__).with_name("install.py")
@@ -101,6 +101,10 @@ class FakeCluster(installer.Installer):
             self.objects[("configmap", installer.INSTALL_STATE)]["data"].update(
                 json.loads(args[args.index("-p") + 1])["data"]
             )
+            return ""
+        if args[:2] == ["helm", "pull"]:
+            destination = Path(args[args.index("--destination") + 1])
+            (destination / "chart.tgz").write_bytes(b"fake")
             return ""
         if args[:2] == ["helm", "list"]:
             offset = int(args[args.index("--offset") + 1])
@@ -998,6 +1002,91 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "distinct hosts"):
             installer.resolve_hosts(config)
 
+    def test_resolve_main_hosts_uses_the_cluster_domain(self):
+        config = configuration(with_hosts=False)
+        placeholders = installer.resolve_main_hosts(
+            config, False, None, lambda: "apps.test.example.com"
+        )
+        self.assertFalse(placeholders)
+        self.assertEqual(
+            config["gateway"]["host"],
+            "gateway-openshell-team.apps.test.example.com",
+        )
+        self.assertEqual(
+            config["dashboard"]["host"],
+            "dashboard-openshell-team.apps.test.example.com",
+        )
+
+    def test_resolve_main_hosts_skips_the_cluster_with_explicit_hosts(self):
+        config = configuration()
+        installer.resolve_main_hosts(
+            config, False, None, lambda: self.fail("looked up the cluster")
+        )
+
+    def test_resolve_main_hosts_uses_placeholders_for_check(self):
+        config = configuration(with_hosts=False)
+        self.assertTrue(installer.resolve_main_hosts(config, True, None, None))
+        self.assertEqual(
+            config["gateway"]["host"],
+            "gateway-openshell-team.apps.example.com",
+        )
+
+    def test_resolve_main_hosts_uses_apps_domain_for_check(self):
+        config = configuration(with_hosts=False)
+        self.assertFalse(
+            installer.resolve_main_hosts(
+                config, True, "apps.cluster.example.com", None
+            )
+        )
+        self.assertEqual(
+            config["gateway"]["host"],
+            "gateway-openshell-team.apps.cluster.example.com",
+        )
+
+    def test_main_install_derives_hosts_and_passes_cli_context(self):
+        self.config = configuration(with_hosts=False)
+        secret = self.root / "client.txt"
+        secret.write_text("a-secret-that-must-not-appear-in-argv\n")
+        self.config["oidc"]["client_secret_file"] = str(secret)
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        clusters = []
+
+        def factory(config, timeout, context=None, config_dir=None):
+            cluster = FakeCluster(config)
+            cluster._context = context
+            clusters.append(cluster)
+            return cluster
+
+        argv = [
+            "install.py",
+            "--config",
+            str(path),
+            "--context",
+            "cli-ctx",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(installer.shutil, "which", return_value="tool"),
+            patch.object(installer, "Installer", side_effect=factory),
+            redirect_stdout(io.StringIO()),
+        ):
+            installer.main()
+        cluster = clusters[0]
+        self.assertEqual(
+            cluster.config["gateway"]["host"],
+            "gateway-openshell-team.apps.test.example.com",
+        )
+        self.assertEqual(
+            cluster.config["dashboard"]["host"],
+            "dashboard-openshell-team.apps.test.example.com",
+        )
+        for args, _ in cluster.calls:
+            if args[0] == "kubectl":
+                self.assertIn("cli-ctx", args)
+            if args[0] == "helm" and args[1] in ("upgrade", "list", "get"):
+                self.assertIn("cli-ctx", args)
+
     def test_resolve_hosts_rejects_invalid_derived_host(self):
         self.config = configuration(with_hosts=False)
         config = self.load()
@@ -1097,6 +1186,23 @@ class InstallTests(unittest.TestCase):
                 installer.Installer(self.load(), "10m", "cli-context").context,
                 "cli-context",
             )
+
+    def test_current_context_reads_kubectl_stdout(self):
+        result = Mock(returncode=0, stdout="ctx\n")
+        with patch.object(installer.subprocess, "run", return_value=result):
+            self.assertEqual(installer.current_context(), "ctx")
+
+    def test_current_context_failure_is_clear(self):
+        for result in (
+            Mock(returncode=1, stdout="ctx\n"),
+            Mock(returncode=0, stdout="\n"),
+        ):
+            with (
+                self.subTest(returncode=result.returncode, stdout=result.stdout),
+                patch.object(installer.subprocess, "run", return_value=result),
+                self.assertRaisesRegex(ValueError, "current kubeconfig context"),
+            ):
+                installer.current_context()
 
     def test_check_without_context_or_hosts_never_resolves_cluster(self):
         self.config = configuration(with_hosts=False)
