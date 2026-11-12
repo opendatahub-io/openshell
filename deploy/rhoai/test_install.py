@@ -1034,9 +1034,7 @@ class InstallTests(unittest.TestCase):
     def test_resolve_main_hosts_uses_apps_domain_for_check(self):
         config = configuration(with_hosts=False)
         self.assertFalse(
-            installer.resolve_main_hosts(
-                config, True, "apps.cluster.example.com", None
-            )
+            installer.resolve_main_hosts(config, True, "apps.cluster.example.com", None)
         )
         self.assertEqual(
             config["gateway"]["host"],
@@ -1052,7 +1050,7 @@ class InstallTests(unittest.TestCase):
         path.write_text(json.dumps(self.config))
         clusters = []
 
-        def factory(config, timeout, context=None, config_dir=None):
+        def factory(config, _timeout, context=None, _config_dir=None):
             cluster = FakeCluster(config)
             cluster._context = context
             clusters.append(cluster)
@@ -1389,7 +1387,9 @@ class InstallTests(unittest.TestCase):
 
     def test_next_steps_include_registration_and_sandbox_commands(self):
         config = self.load()
-        steps = installer.next_steps(config, "install-context", Path("/tmp/rhoai-config"))
+        steps = installer.next_steps(
+            config, "install-context", Path("/tmp/rhoai-config")
+        )
         self.assertIn("1. Install the OpenShell CLI", steps)
         self.assertIn(f"OPENSHELL_VERSION=v{config['gateway']['version']} sh", steps)
         self.assertIn("local", steps)
@@ -1444,7 +1444,9 @@ class InstallTests(unittest.TestCase):
         config["oidc"]["issuer"] = "https://issuer.example.com/$(id)"
         config["oidc"]["audience"] = "aud with space"
         config["oidc"]["ca_file"] = "/tmp/ca;touch /tmp/x"
-        steps = installer.next_steps(config, "ctx;touch /tmp/x", Path("/tmp/rhoai-config"))
+        steps = installer.next_steps(
+            config, "ctx;touch /tmp/x", Path("/tmp/rhoai-config")
+        )
         self.assertIn("kubectl --context 'ctx;touch /tmp/x'", steps)
         self.assertIn("--oidc-issuer 'https://issuer.example.com/$(id)'", steps)
         self.assertIn("--oidc-audience 'aud with space'", steps)
@@ -1453,12 +1455,12 @@ class InstallTests(unittest.TestCase):
     def test_next_steps_add_private_ca_bundle_when_configured(self):
         config = self.load()
         config["oidc"]["ca_file"] = "/tmp/ingress-ca.crt"
-        steps = installer.next_steps(config, "install-context", Path("/tmp/rhoai-config"))
+        steps = installer.next_steps(
+            config, "install-context", Path("/tmp/rhoai-config")
+        )
         self.assertIn("/tmp/ingress-ca.crt", steps)
         self.assertIn("mkdir -p /tmp/rhoai-config", steps)
-        self.assertIn(
-            "export SSL_CERT_FILE=/tmp/rhoai-config/ca-bundle.pem", steps
-        )
+        self.assertIn("export SSL_CERT_FILE=/tmp/rhoai-config/ca-bundle.pem", steps)
 
     def test_system_ca_bundle_prefers_first_existing_candidate(self):
         def exists(candidate):
@@ -1482,7 +1484,9 @@ class InstallTests(unittest.TestCase):
         with patch.object(
             installer, "system_ca_bundle", return_value="/etc/ssl/cert.pem"
         ):
-            steps = installer.next_steps(config, "install-context", Path("/tmp/rhoai-config"))
+            steps = installer.next_steps(
+                config, "install-context", Path("/tmp/rhoai-config")
+            )
         self.assertIn("cat /etc/ssl/cert.pem \\", steps)
         self.assertNotIn("Could not detect a system CA bundle", steps)
 
@@ -1492,7 +1496,9 @@ class InstallTests(unittest.TestCase):
         with patch.object(
             installer, "system_ca_bundle", return_value="/etc/ssl/cert.pem"
         ):
-            steps = installer.next_steps(config, "install-context", Path("/tmp/rhoai-config"))
+            steps = installer.next_steps(
+                config, "install-context", Path("/tmp/rhoai-config")
+            )
         for label, path in installer.SYSTEM_CA_BUNDLES:
             with self.subTest(label=label):
                 self.assertIn(path, steps)
@@ -1501,7 +1507,9 @@ class InstallTests(unittest.TestCase):
         config = self.load()
         config["oidc"]["ca_file"] = "/tmp/ingress-ca.crt"
         with patch.object(installer, "system_ca_bundle", return_value=None):
-            steps = installer.next_steps(config, "install-context", Path("/tmp/rhoai-config"))
+            steps = installer.next_steps(
+                config, "install-context", Path("/tmp/rhoai-config")
+            )
         self.assertIn("Could not detect a system CA bundle", steps)
         self.assertIn("cat <system-ca-bundle> \\", steps)
 

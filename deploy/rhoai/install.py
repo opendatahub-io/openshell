@@ -532,8 +532,7 @@ def system_ca_bundle():
 def cli_client_id(config):
     """Return the public CLI client ID, namespace-qualified by default."""
     return (
-        config["oidc"].get("cli_client_id")
-        or f"{CLI_CLIENT_ID}-{config['namespace']}"
+        config["oidc"].get("cli_client_id") or f"{CLI_CLIENT_ID}-{config['namespace']}"
     )
 
 
