@@ -159,6 +159,20 @@ exists() {
 has_audience() {
   python3 -c "import sys,json;print(any(m.get('config',{}).get('included.client.audience')==sys.argv[1] for m in json.load(sys.stdin)))" "$1"
 }
+ensure_audience_mapper() {
+  # $1 is the client UUID, $2 the client ID used in messages.
+  local uuid="$1" client="$2"
+  if [ "$(curl -fsS --cacert "$CURL_CA" -K "$HDR_FILE" "$API/$uuid/protocol-mappers/models" \
+      | has_audience "$API_ID")" != "True" ]; then
+    echo "Adding audience mapper to ${client}..."
+    curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" "$API/$uuid/protocol-mappers/models" -d "{
+      \"name\":\"openshell-api-audience-$API_ID\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",
+      \"config\":{\"included.client.audience\":\"$API_ID\",\"id.token.claim\":\"false\",\"access.token.claim\":\"true\"}
+    }"
+  else
+    echo "Keeping existing audience mapper on ${client}."
+  fi
+}
 
 if [ -z "$(exists "$API_ID")" ]; then
   echo "Creating API audience client ${API_ID}..."
@@ -219,16 +233,7 @@ PY
   fi
 fi
 
-if [ "$(curl -fsS --cacert "$CURL_CA" -K "$HDR_FILE" "$API/$DASH_UUID/protocol-mappers/models" \
-    | has_audience "$API_ID")" != "True" ]; then
-  echo "Adding audience mapper to ${DASH_ID}..."
-  curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" "$API/$DASH_UUID/protocol-mappers/models" -d "{
-    \"name\":\"openshell-api-audience-$API_ID\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",
-    \"config\":{\"included.client.audience\":\"$API_ID\",\"id.token.claim\":\"false\",\"access.token.claim\":\"true\"}
-  }"
-else
-  echo "Keeping existing audience mapper on ${DASH_ID}."
-fi
+ensure_audience_mapper "$DASH_UUID" "$DASH_ID"
 
 if [ -z "$(exists "$CLI_ID")" ]; then
   echo "Creating CLI client ${CLI_ID}..."
@@ -236,7 +241,7 @@ if [ -z "$(exists "$CLI_ID")" ]; then
     \"clientId\":\"$CLI_ID\",\"enabled\":true,\"protocol\":\"openid-connect\",
     \"publicClient\":true,\"standardFlowEnabled\":true,\"directAccessGrantsEnabled\":false,
     \"redirectUris\":[\"http://127.0.0.1/*\",\"http://localhost/*\"],
-    \"attributes\":{\"pkce.code.challenge.method\":\"S256\",\"oauth2.device.authorization.grant.enabled\":\"true\"}
+    \"attributes\":{\"pkce.code.challenge.method\":\"S256\"}
   }"
 else
   echo "Keeping existing CLI client ${CLI_ID}."
@@ -244,16 +249,7 @@ fi
 CLI_UUID=$(exists "$CLI_ID")
 : "${CLI_UUID:?CLI client ${CLI_ID} was not found in realm ${REALM}}"
 
-if [ "$(curl -fsS --cacert "$CURL_CA" -K "$HDR_FILE" "$API/$CLI_UUID/protocol-mappers/models" \
-    | has_audience "$API_ID")" != "True" ]; then
-  echo "Adding audience mapper to ${CLI_ID}..."
-  curl -fsS --cacert "$CURL_CA" -X POST -K "$HDR_FILE" -H "Content-Type: application/json" "$API/$CLI_UUID/protocol-mappers/models" -d "{
-    \"name\":\"openshell-api-audience-$API_ID\",\"protocol\":\"openid-connect\",\"protocolMapper\":\"oidc-audience-mapper\",
-    \"config\":{\"included.client.audience\":\"$API_ID\",\"id.token.claim\":\"false\",\"access.token.claim\":\"true\"}
-  }"
-else
-  echo "Keeping existing audience mapper on ${CLI_ID}."
-fi
+ensure_audience_mapper "$CLI_UUID" "$CLI_ID"
 
 SECRET_FILE="${CONFIG_DIR}/dashboard-client-secret.txt"
 SECRET_TMP="${WORK_DIR}/dashboard-client-secret.txt"

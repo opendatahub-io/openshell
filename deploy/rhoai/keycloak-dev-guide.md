@@ -295,9 +295,10 @@ public client.
 - **Clients** → **Create client**
 - **Client ID**: `openshell-cli`
 - **Client authentication**: Off
-- **Authentication flow**: Standard flow; optionally enable
-  **OAuth 2.0 Device Authorization Grant** for headless login
-  (`OPENSHELL_NO_BROWSER=1`).
+- **Authentication flow**: Standard flow. For headless login
+  (`OPENSHELL_NO_BROWSER=1`), also enable **OAuth 2.0 Device Authorization
+  Grant**. The helper leaves it off because the grant allows device-code
+  phishing on a public client.
 - **Valid redirect URIs**: `http://127.0.0.1/*` and optionally
   `http://localhost/*`. The CLI binds `127.0.0.1` on a random port with path
   `/callback`, so the wildcard port is required.
