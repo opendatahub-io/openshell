@@ -33,7 +33,7 @@ umask 077
 : "${REALM:?set REALM, for example openshell}"
 : "${API_ID:?set API_ID, for example openshell-api-openshell-team}"
 : "${DASH_ID:?set DASH_ID, for example openshell-dashboard-openshell-team}"
-: "${CLI_ID:?set CLI_ID, for example openshell-cli}"
+: "${CLI_ID:?set CLI_ID, for example openshell-cli-openshell-team}"
 : "${DASH_URL:?set DASH_URL, for example https://dashboard-openshell-team.apps.example.com}"
 : "${CONFIG_DIR:?set CONFIG_DIR, for example ${HOME}/.config/openshell-rhoai}"
 
@@ -159,6 +159,9 @@ exists() {
 has_audience() {
   python3 -c "import sys,json;print(any(m.get('config',{}).get('included.client.audience')==sys.argv[1] for m in json.load(sys.stdin)))" "$1"
 }
+has_foreign_audience() {
+  python3 -c "import sys,json;print(any((m.get('config',{}).get('included.client.audience') or '') != sys.argv[1] for m in json.load(sys.stdin) if m.get('protocolMapper') == 'oidc-audience-mapper'))" "$1"
+}
 ensure_audience_mapper() {
   # $1 is the client UUID, $2 the client ID used in messages.
   local uuid="$1" client="$2"
@@ -249,7 +252,16 @@ fi
 CLI_UUID=$(exists "$CLI_ID")
 : "${CLI_UUID:?CLI client ${CLI_ID} was not found in realm ${REALM}}"
 
-ensure_audience_mapper "$CLI_UUID" "$CLI_ID"
+# A shared CLI client collects one audience per namespace, which lets tokens
+# from one gateway authenticate at another. Keep the legacy shared ID from
+# gaining a new audience; namespaced client IDs avoid the problem entirely.
+if [ "$CLI_ID" = "openshell-cli" ] && [ "$(curl -fsS --cacert "$CURL_CA" -K "$HDR_FILE" "$API/$CLI_UUID/protocol-mappers/models" \
+    | has_foreign_audience "$API_ID")" = "True" ]; then
+  echo "warning: ${CLI_ID} already carries an audience for another gateway; not adding ${API_ID}." >&2
+  echo "warning: set CLI_ID=openshell-cli-${NS:-<namespace>} to keep gateway audiences separate." >&2
+else
+  ensure_audience_mapper "$CLI_UUID" "$CLI_ID"
+fi
 
 SECRET_FILE="${CONFIG_DIR}/dashboard-client-secret.txt"
 SECRET_TMP="${WORK_DIR}/dashboard-client-secret.txt"

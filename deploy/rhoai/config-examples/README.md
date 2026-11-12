@@ -61,8 +61,8 @@ All examples omit the hosts and rely on the defaults described below.
 ## OIDC identifiers
 
 The Keycloak examples use namespace-qualified
-`openshell-dashboard-<namespace>` and `openshell-api-<namespace>` client IDs,
-with `openshell-team` as the default. The non-Keycloak examples follow the same
+`openshell-dashboard-<namespace>`, `openshell-api-<namespace>`, and
+`openshell-cli-<namespace>` client IDs, with `openshell-team` as the default. The non-Keycloak examples follow the same
 convention. When you change the namespace, update the client IDs and audience in
 `config.json`, the provider registrations, and
 `openshell gateway add --oidc-audience`.
@@ -77,6 +77,7 @@ These fields are optional; the installer derives or defaults them:
 | Field | Default |
 |---|---|
 | `gateway.host`, `dashboard.host` | `gateway-<namespace>.<apps-domain>` and `dashboard-<namespace>.<apps-domain>` |
+| `oidc.cli_client_id` | `openshell-cli-<namespace>` |
 | `gateway.values_files`, `dashboard.values_files` | `[]` |
 | `gateway.images`, `dashboard.images` | Chart defaults |
 | `agent_sandbox_namespace` | `agent-sandbox-system` |

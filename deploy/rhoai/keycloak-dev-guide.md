@@ -19,7 +19,7 @@ export KEYCLOAK_NS=keycloak
 export REALM=openshell
 export API_ID="openshell-api-${NS}"
 export DASH_ID="openshell-dashboard-${NS}"
-export CLI_ID=openshell-cli
+export CLI_ID="openshell-cli-${NS}"
 export DASH_URL="https://dashboard-${NS}.${APPS_DOMAIN}"
 export KC_URL="https://keycloak.${APPS_DOMAIN}"
 export CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/openshell-rhoai"
@@ -33,6 +33,10 @@ IDs, `DASH_URL`, and both derived hosts; update the OIDC identifiers in the
 OpenShell configuration from [README.md](README.md) and re-register
 `https://<new-dashboard-host>/oauth2/callback` with Keycloak. If the
 configuration sets explicit hosts, register that dashboard URL instead.
+
+Realm roles are realm-wide. In a shared realm, a user with `openshell-admin` is
+an administrator for every gateway in that realm, regardless of the client IDs.
+Use one realm per trust boundary when gateways serve different teams.
 
 ## Part 1 — PostgreSQL and Keycloak
 
@@ -293,7 +297,7 @@ The `openshell` CLI logs in with the Authorization Code + PKCE flow using a
 public client.
 
 - **Clients** → **Create client**
-- **Client ID**: `openshell-cli`
+- **Client ID**: `openshell-cli-${NS}`
 - **Client authentication**: Off
 - **Authentication flow**: Standard flow. For headless login
   (`OPENSHELL_NO_BROWSER=1`), also enable **OAuth 2.0 Device Authorization
@@ -303,7 +307,8 @@ public client.
   `http://localhost/*`. The CLI binds `127.0.0.1` on a random port with path
   `/callback`, so the wildcard port is required.
 - **Require PKCE**: On, and **PKCE Method**: `S256`.
-- **Client scopes** → `openshell-cli-dedicated` → **Add mapper** → **Audience**:
+- **Client scopes** → `openshell-cli-${NS}-dedicated` → **Add mapper** →
+  **Audience**:
   - Name: `openshell-api-audience`
   - Included Client Audience: `openshell-api-${NS}`
   - Add to access token: On

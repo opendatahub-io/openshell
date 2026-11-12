@@ -1411,7 +1411,7 @@ class InstallTests(unittest.TestCase):
         self.assertIn("openshell gateway add", steps)
         self.assertIn("--name openshell-team", steps)
         self.assertIn(f"--oidc-issuer {config['oidc']['issuer']}", steps)
-        self.assertIn("--oidc-client-id openshell-cli", steps)
+        self.assertIn("--oidc-client-id openshell-cli-openshell-team", steps)
         self.assertIn("--oidc-audience openshell-api-openshell-team", steps)
         self.assertIn("https://gateway-openshell-team.apps.example.com:443", steps)
         self.assertIn("openshell status", steps)
@@ -1430,6 +1430,14 @@ class InstallTests(unittest.TestCase):
         self.assertIn("--workspace <name> or export", steps)
         self.assertIn("OPENSHELL_WORKSPACE=<name>", steps)
         self.assertNotIn("SSL_CERT_FILE", steps)
+
+    def test_next_steps_use_the_configured_cli_client_id(self):
+        config = self.load()
+        config["oidc"]["cli_client_id"] = "custom-cli-client"
+        steps = installer.next_steps(
+            config, "install-context", Path("/tmp/rhoai-config")
+        )
+        self.assertIn("--oidc-client-id custom-cli-client", steps)
 
     def test_next_steps_shell_quote_untrusted_values(self):
         config = self.load()

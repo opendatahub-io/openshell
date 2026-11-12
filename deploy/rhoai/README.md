@@ -156,6 +156,9 @@ images; check them against [Chart and image pins](#chart-and-image-pins).
   not a requirement; with `keycloak-oidc`, any role list the provider emits works.
 - `oidc.scope` is the space-separated OAuth scope request, for example
   `openid email profile`. Omit it to keep the provider defaults.
+- `oidc.cli_client_id` is the public client the `openshell` CLI registers as.
+  It defaults to `openshell-cli-<namespace>`; keep that default so each
+  gateway's CLI client carries only its own audience.
 
 Register `https://<dashboard-host>/oauth2/callback` with the identity provider.
 With the default configuration, `<dashboard-host>` is
@@ -389,7 +392,7 @@ Register the gateway:
 openshell gateway add \
   --name openshell-team \
   --oidc-issuer "https://keycloak.apps.example.com/realms/openshell" \
-  --oidc-client-id openshell-cli \
+  --oidc-client-id openshell-cli-openshell-team \
   --oidc-audience openshell-api-openshell-team \
   "https://gateway-openshell-team.apps.example.com:443"
 ```

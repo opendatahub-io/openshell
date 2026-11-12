@@ -335,6 +335,7 @@ def load_config(path, namespace=None):
             "client_secret_file",
             "ca_file",
             "scope",
+            "cli_client_id",
         ),
     )
     for key in (
@@ -348,6 +349,11 @@ def load_config(path, namespace=None):
         require(
             isinstance(oidc[key], str) and oidc[key].strip(),
             f"oidc.{key} must be a nonempty string",
+        )
+    if "cli_client_id" in oidc:
+        require(
+            isinstance(oidc["cli_client_id"], str) and oidc["cli_client_id"].strip(),
+            "oidc.cli_client_id must be a nonempty string",
         )
     issuer = urlsplit(oidc["issuer"])
     require(
@@ -523,9 +529,18 @@ def system_ca_bundle():
     return None
 
 
+def cli_client_id(config):
+    """Return the public CLI client ID, namespace-qualified by default."""
+    return (
+        config["oidc"].get("cli_client_id")
+        or f"{CLI_CLIENT_ID}-{config['namespace']}"
+    )
+
+
 def next_steps(config, context, config_dir):
     ns = config["namespace"]
     oidc = config["oidc"]
+    cli_client = cli_client_id(config)
     gateway_dir = f"${{XDG_CONFIG_HOME:-$HOME/.config}}/openshell/gateways/{ns}/mtls"
     gateway_url = f"https://{config['gateway']['host']}:443"
     lines = [
@@ -574,11 +589,11 @@ def next_steps(config, context, config_dir):
         "   openshell gateway add \\",
         f"     --name {ns} \\",
         f"     --oidc-issuer {shlex.quote(oidc['issuer'])} \\",
-        f"     --oidc-client-id {CLI_CLIENT_ID} \\",
+        f"     --oidc-client-id {shlex.quote(cli_client)} \\",
         f"     --oidc-audience {shlex.quote(oidc['audience'])} \\",
         f'     "{gateway_url}"',
         "",
-        f"   Use your provider's CLI client ID if it is not {CLI_CLIENT_ID}.",
+        f"   Use your provider's CLI client ID if it is not {cli_client}.",
         "",
         "   The command opens a browser; sign in as a user that holds the",
         f"   gateway's admin role ({oidc['admin_role']}) or user role",
