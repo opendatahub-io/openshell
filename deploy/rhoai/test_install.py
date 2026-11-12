@@ -1156,6 +1156,21 @@ class InstallTests(unittest.TestCase):
         self.assertIn("Rendering the gateway and dashboard charts", output)
         self.assertIn("Both charts rendered successfully.", output)
 
+    def test_check_prints_placeholder_note_for_derived_hosts(self):
+        self.config = configuration(with_hosts=False)
+        _, output = self.check_render()
+        self.assertIn("rendered hosts are derived from apps.example.com", output)
+
+    def test_check_omits_placeholder_note_for_explicit_hosts(self):
+        self.config = configuration()
+        _, output = self.check_render()
+        self.assertNotIn("rendered hosts are derived from", output)
+
+    def test_check_omits_placeholder_note_with_apps_domain(self):
+        self.config = configuration(with_hosts=False)
+        _, output = self.check_render(["--apps-domain", "apps.cluster.example.com"])
+        self.assertNotIn("rendered hosts are derived from", output)
+
     def test_colorize_keeps_ansi_out_of_non_tty_output(self):
         class Tty(io.StringIO):
             def isatty(self):

@@ -1247,6 +1247,17 @@ def main():
             args.apps_domain or PLACEHOLDER_APPS_DOMAIN,
             distinct=not placeholders,
         )
+        if placeholders:
+            print(
+                colorize(
+                    "Note: the rendered hosts are derived from "
+                    f"{PLACEHOLDER_APPS_DOMAIN} for this offline check; the install "
+                    "derives them from the cluster ingress domain, or pass "
+                    "--apps-domain.",
+                    "33",
+                ),
+                flush=True,
+            )
     else:
         resolve_hosts(config, installer.apps_domain() if missing else None)
     os.umask(0o077)
