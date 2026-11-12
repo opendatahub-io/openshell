@@ -40,10 +40,13 @@ configuration sets explicit hosts, register that dashboard URL instead.
 
 ```shell
 oc new-project "$KEYCLOAK_NS"
-oc -n "$KEYCLOAK_NS" create secret generic keycloak-db-secret \
-  --from-literal=username=keycloak \
-  --from-literal=password="$(openssl rand -base64 24)"
+openssl rand -base64 24 | tr -d '\n' | \
+  oc -n "$KEYCLOAK_NS" create secret generic keycloak-db-secret \
+    --from-literal=username=keycloak --from-file=password=/dev/stdin
 ```
+
+Reading the generated password from stdin keeps it out of the process argument
+list.
 
 ### Deploy PostgreSQL with persistent storage
 
@@ -213,6 +216,10 @@ The operator names the bootstrap administrator `temp-admin`, not `admin`. Log
 in to the master realm with those credentials and create a permanent
 administrator afterwards; the bootstrap credentials are temporary.
 
+After the permanent administrator can log in, delete the bootstrap user:
+**Users** → `temp-admin` → **Delete**. Leaving it in place keeps a well-known
+development credential valid for the lifetime of the realm.
+
 ## Part 2 — Realm configuration
 
 Perform these steps in the Keycloak admin console unless a section says
@@ -364,7 +371,7 @@ namespace:
 ```shell
 oc delete keycloak keycloak -n "$KEYCLOAK_NS"
 oc delete subscription rhbk-operator -n "$KEYCLOAK_NS"
-oc delete csv -n "$KEYCLOAK_NS" -l operators.coreos.com/rhbk-operator.keycloak
+oc delete csv -n "$KEYCLOAK_NS" -l "operators.coreos.com/rhbk-operator.${KEYCLOAK_NS}"
 oc delete operatorgroup "$KEYCLOAK_NS" -n "$KEYCLOAK_NS"
 oc delete all -l app=keycloak-db -n "$KEYCLOAK_NS"
 oc delete pvc keycloak-db-data -n "$KEYCLOAK_NS"

@@ -239,12 +239,18 @@ provider beside the configuration:
 
 ```shell
 umask 077
-printf '%s' '<dashboard-client-secret>' \
-  > "$HOME/.config/openshell-rhoai/dashboard-client-secret.txt"
+mkdir -p "$HOME/.config/openshell-rhoai"
+IFS= read -rs -p 'Dashboard client secret: ' SECRET
+printf '%s' "$SECRET" > "$HOME/.config/openshell-rhoai/dashboard-client-secret.txt"
+unset SECRET
 chmod 600 "$HOME/.config/openshell-rhoai/dashboard-client-secret.txt"
 ```
 
-Do not put the secret in the JSON, Helm values, or command arguments.
+The `read -rs` prompt keeps the secret off the screen and out of the shell
+history. When the
+[Keycloak client helper](keycloak-dev-guide-create-openshell-clients.sh) created
+the client, it already wrote this file; skip this step in that case. Do not put
+the secret in the JSON, Helm values, or command arguments.
 
 ## Validate, preflight, and install
 
