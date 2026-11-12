@@ -232,14 +232,22 @@ clients; create the users in the console. When a Keycloak administrator already
 created the registrations, use their values instead and skip the sections you
 do not need.
 
-The Keycloak console does not expand shell variables, so enter the printed
-values below literally instead of `${NS}` and `${DASH_URL}`:
+The Keycloak console does not expand shell variables. Print the literal values
+and enter them verbatim:
 
 ```shell
-echo "API audience:      ${API_ID}"
-echo "Dashboard client:  ${DASH_ID}"
-echo "Dashboard URL:     ${DASH_URL}"
+echo "API audience:            ${API_ID}"
+echo "Dashboard client:        ${DASH_ID}"
+echo "Dashboard client scope:  ${DASH_ID}-dedicated"
+echo "Dashboard URL:           ${DASH_URL}"
+echo "Redirect URI:            ${DASH_URL}/oauth2/callback"
+echo "Post logout URI:         ${DASH_URL}/*"
 ```
+
+Replace each whole template in the console steps — `openshell-api-${NS}`,
+`openshell-dashboard-${NS}`, `openshell-cli-${NS}`, and `${DASH_URL}` — with
+the printed value. Keep the `/oauth2/callback` and `/*` suffixes. Do not
+replace only `${NS}`: the printed client IDs already include their prefixes.
 
 ### Create the realm and roles
 
