@@ -22,7 +22,7 @@
 # messages to set up. Each one has to travel through the port-forward tunnel, so
 # the connection never finishes and the test times out. To avoid this, on
 # OpenShift the harness reaches the gateway through a normal network path: a
-# passthrough OpenShift Route, secured with mandatory mTLS
+# passthrough OpenShift Route, secured with mTLS user authentication
 # (ci/values-openshift-e2e.yaml).
 #
 # Every OpenShift-specific branch below is gated on OPENSHIFT_DETECTED, so the
@@ -75,6 +75,10 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=e2e/support/gateway-common.sh
 source "${ROOT}/e2e/support/gateway-common.sh"
+# shellcheck source=e2e/support/route-auth.sh
+source "${ROOT}/e2e/support/route-auth.sh"
+# shellcheck source=e2e/support/child-process.sh
+source "${ROOT}/e2e/support/child-process.sh"
 
 # Upstream agent-sandbox release. The Kubernetes driver supports the v1beta1
 # Sandbox API introduced in v0.5.0 and falls back to v1alpha1 for v0.4.6
@@ -98,6 +102,8 @@ PORTFORWARD_LOG="${WORKDIR}/portforward.log"
 PORTFORWARD_HEALTH_PID=""
 PORTFORWARD_HEALTH_LOG="${WORKDIR}/portforward-health.log"
 HELM_INSTALLED=0
+KATA_RUNTIME_CLASS_NAME=""
+KATA_RUNTIME_CLASS_CREATED=0
 EXTERNAL_PG_FIXTURE_DEPLOYED=0
 EXTERNAL_PG_FIXTURE_SECRET=""
 EXTERNAL_PG_FIXTURE_MANIFEST="${ROOT}/e2e/kubernetes/postgres-fixture.yaml"
@@ -520,6 +526,8 @@ cleanup_vault_fixture() {
 
 cleanup() {
   local exit_code=$?
+  trap - EXIT
+  trap '' INT TERM
 
   stop_gateway_portforward
   e2e_stop_process "${ADDITIONAL_CA_SERVER_PID}" "additional CA HTTPS fixture"
@@ -660,6 +668,16 @@ cleanup() {
     ENVOY_HELM_INSTALLED=0
   fi
 
+  if [ "${KATA_RUNTIME_CLASS_CREATED}" = "1" ]; then
+    if ! kctl delete runtimeclass "${KATA_RUNTIME_CLASS_NAME}" \
+      --ignore-not-found --wait=false --request-timeout=15s; then
+      echo "ERROR: could not delete the per-run RuntimeClass; remove it manually:" >&2
+      printf 'kubectl --context %q delete runtimeclass %q\n' \
+        "${KUBE_CONTEXT}" "${KATA_RUNTIME_CLASS_NAME}" >&2
+      if [ "${exit_code}" -eq 0 ]; then exit_code=1; fi
+    fi
+  fi
+
   if [ "${CLUSTER_CREATED_BY_US}" = "1" ] && [ -n "${CLUSTER_NAME}" ]; then
     if command -v k3d >/dev/null 2>&1 && k3d cluster list "${CLUSTER_NAME}" \
         >/dev/null 2>&1; then
@@ -668,9 +686,13 @@ cleanup() {
     fi
   fi
 
+  # Credentials are disposable even if deleting the per-run class failed.
   rm -rf "${WORKDIR}" 2>/dev/null || true
+  exit "${exit_code}"
 }
 trap cleanup EXIT
+trap 'e2e_stop_child 130' INT
+trap 'e2e_stop_child 143' TERM
 
 # --- DB-scenario helpers (used only when OPENSHELL_E2E_KUBE_DB_SCENARIOS=1) ---
 
@@ -795,7 +817,7 @@ run_scenario() {
     "${OPENSHELL_BIN:-${ROOT}/target/debug/openshell}" "${ROOT}" || return 1
 
   echo "Running e2e command against ${GATEWAY_ENDPOINT}: ${E2E_CMD[*]}"
-  "${E2E_CMD[@]}" || scenario_exit=$?
+  E2E_CHILD_GRACE_SECONDS=30 e2e_run_child "${E2E_CMD[@]}" || scenario_exit=$?
 
   scenario_stop_portforward
   scenario_cleanup_release
@@ -836,12 +858,12 @@ configure_fixture_container_engine() {
 }
 
 # OpenShift only: extract the client mTLS material, wait for the passthrough
-# Route to serve mTLS, assert that a certless caller is rejected at the TLS
-# handshake, and register an mTLS CLI gateway pointing at the Route.
+# Route to serve TLS, verify that a protected RPC requires a client certificate,
+# and register an mTLS CLI gateway pointing at the Route.
 #
 # Sets GATEWAY_NAME and GATEWAY_ENDPOINT on success. Returns non-zero on failure
-# (unreachable Route or a certless request that was NOT rejected — a security
-# hole). Reads OPENSHIFT_ROUTE_HOST and OPENSHIFT_PKI_DIR.
+# (unreachable Route or unexpected RPC authentication results).
+# Reads OPENSHIFT_ROUTE_HOST and OPENSHIFT_PKI_DIR.
 openshift_register_route_gateway() {
   local pki_dir="${OPENSHIFT_PKI_DIR}"
 
@@ -862,7 +884,7 @@ openshift_register_route_gateway() {
   echo "Waiting for Route https://${OPENSHIFT_ROUTE_HOST} to serve mTLS..."
   local elapsed=0 timeout=180
   while [ "${elapsed}" -lt "${timeout}" ]; do
-    if curl -s --max-time 10 -o /dev/null \
+    if curl -q -s --max-time 10 -o /dev/null \
          --cacert "${pki_dir}/ca.crt" \
          --cert "${pki_dir}/client/tls.crt" \
          --key "${pki_dir}/client/tls.key" \
@@ -877,33 +899,7 @@ openshift_register_route_gateway() {
     return 1
   fi
 
-  # Security gate: a caller with no client certificate MUST be rejected during
-  # the TLS handshake (clientCaSecretName set + no OIDC => mTLS mandatory).
-  #
-  # Validate the server cert with --cacert (no -k) and inspect curl's exit code
-  # so an unrelated TLS/DNS/timeout failure is not silently accepted as "certless
-  # rejected". Only a handshake abort by the server (no client cert presented)
-  # counts as the expected rejection.
-  local certless_rc=0
-  curl -s --max-time 10 -o /dev/null \
-    --cacert "${pki_dir}/ca.crt" \
-    "https://${OPENSHIFT_ROUTE_HOST}/" || certless_rc=$?
-  case "${certless_rc}" in
-    0)
-      echo "ERROR: SECURITY HOLE — gateway accepted a certless request over the Route" >&2
-      return 1
-      ;;
-    35 | 56)
-      # 35 CURLE_SSL_CONNECT_ERROR / 56 CURLE_RECV_ERROR: the server aborted the
-      # TLS handshake because no client certificate was presented — the expected
-      # mTLS rejection.
-      echo "OK: Route reachable over mTLS; certless request rejected at TLS (curl ${certless_rc})."
-      ;;
-    *)
-      echo "ERROR: certless probe to ${OPENSHIFT_ROUTE_HOST} failed with curl exit ${certless_rc}, not a TLS client-auth rejection; cannot confirm mTLS is enforced" >&2
-      return 1
-      ;;
-  esac
+  e2e_verify_route_mtls "https://${OPENSHIFT_ROUTE_HOST}" "${pki_dir}" || return 1
 
   GATEWAY_NAME="openshell-e2e-openshift"
   GATEWAY_ENDPOINT="https://${OPENSHIFT_ROUTE_HOST}"
@@ -1325,6 +1321,17 @@ fi
 if [ "${OPENSHELL_E2E_KUBE_IMAGE_UPDATES:-1}" = "1" ]; then
   helm_extra_args+=(--set 'gatewayConfig.openshell\.gateway.enable_sandbox_updates=true')
 fi
+if [ -n "${KATA_CONTAINERS_RUNTIME_CLASS:-}" ]; then
+  # Keep the administrator's shared class untouched. A hard kill can leave only
+  # this uniquely named copy; the name in the log identifies manual cleanup.
+  KATA_RUNTIME_CLASS_NAME="openshell-e2e-$("${PYTHON_BIN:-python3}" -c 'import uuid; print(uuid.uuid4().hex)')"
+  echo "Creating per-run RuntimeClass ${KATA_RUNTIME_CLASS_NAME} from ${KATA_CONTAINERS_RUNTIME_CLASS}"
+  kctl get runtimeclass "${KATA_CONTAINERS_RUNTIME_CLASS}" -o json \
+    | "${PYTHON_BIN:-python3}" "${ROOT}/e2e/support/runtime-class.py" "${KATA_RUNTIME_CLASS_NAME}" \
+    | kctl create -f -
+  KATA_RUNTIME_CLASS_CREATED=1
+  helm_extra_args+=(--set-string "server.defaultRuntimeClassName=${KATA_RUNTIME_CLASS_NAME}")
+fi
 if [ "${OPENSHELL_E2E_EXTERNAL_COMPUTE_DRIVER:-0}" = "1" ]; then
   if [ "${OPENSHELL_E2E_KUBE_BUILD_IMAGES}" != "1" ]; then
     echo "ERROR: external Kubernetes driver e2e requires OPENSHELL_E2E_KUBE_BUILD_IMAGES=1." >&2
@@ -1631,5 +1638,5 @@ else
     "${OPENSHELL_BIN:-${ROOT}/target/debug/openshell}" "${ROOT}" || exit 1
 
   echo "Running e2e command against ${GATEWAY_ENDPOINT}: $*"
-  "$@"
+  E2E_CHILD_GRACE_SECONDS=30 e2e_run_child "$@"
 fi

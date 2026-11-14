@@ -25,6 +25,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_WITH_GATEWAY_COMMAND="__openshell_run_kubernetes_e2e"
 # shellcheck source=e2e/support/conformance.sh
 source "${ROOT}/e2e/support/conformance.sh"
+# shellcheck source=e2e/support/reports.sh
+source "${ROOT}/e2e/support/reports.sh"
 
 # Unset or empty selects Rust defaults; e2e-conformance-only skips Rust tests.
 # Reusable-workflow inputs are exported as an explicitly empty environment
@@ -44,16 +46,7 @@ JUNIT_XML="${ROOT}/results/e2e-kubernetes.xml"
 render_html() {
   local xml="${1:-${JUNIT_XML}}"
   local title="${2:-e2e-kubernetes}"
-  [ -f "${xml}" ] || return 0
-  local html="${xml%.xml}.html"
-  if command -v xsltproc >/dev/null 2>&1; then
-    xsltproc --stringparam title "${title}" \
-      "${ROOT}/scripts/junit-to-html.xsl" "${xml}" >"${html}" \
-      && echo "HTML report: ${html}" \
-      || echo "WARNING: failed to render HTML report from ${xml}" >&2
-  else
-    echo "WARNING: xsltproc not found; skipping HTML report (${xml} still written)" >&2
-  fi
+  e2e_render_html "${xml}" "${title}"
 }
 
 # Docker and Podman build their local gateway and CLI together in the shared

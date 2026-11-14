@@ -95,3 +95,12 @@ description = "Test ODH generic-fetcher checksum synchronization"
 # Keep this invocation in sync with odh-deploy-contract.yml.
 run = "uv run --no-project --with \"pytest==9.0.3\" --with \"pytest-asyncio==1.3.0\" pytest -o \"python_files=*_test.py\" deploy/konflux/e2e-odh/"
 hide = true
+
+["test:odh-image"]
+description = "Check packaged Kubernetes dispatch and OpenShift Route authentication"
+run = """
+bash odh/scripts/tests/test-route-auth.sh
+uv run --no-project python odh/scripts/tests/test_kubernetes_image.py
+"""
+run_windows = "echo Skipping test:odh-image: Unix cluster wrappers do not apply on Windows."
+hide = true
