@@ -37,6 +37,14 @@
 #   ROUTE_HOST       gateway Route hostname (default: openshell.<apps domain>)
 #   GATEWAY_NAME     local CLI gateway name (default: openshift)
 #   OPENSHELL_E2E_RUN_ID  run-scoped suffix used by the shared test entrypoint
+#   OPENSHELL_E2E_OIDC_VALUES_FILE  temporary OIDC Helm values overlay generated
+#                        by the ODH OIDC fixture; layers issuer, roles, scopes,
+#                        and mandatory-audience configuration onto the deployment
+#   OPENSHELL_E2E_OIDC_CA_CERT_FILE  PEM CA bundle for the OIDC issuer, copied
+#                        into the deployment namespace (required with the
+#                        values overlay; never printed)
+#   OPENSHELL_E2E_OIDC_CA_CONFIG_MAP_NAME  ConfigMap name for that bundle
+#                        (default: openshell-oidc-ca)
 
 set -euo pipefail
 
@@ -131,6 +139,14 @@ if [[ "${ACTION}" == deploy ]]; then
 	command -v curl >/dev/null 2>&1 || fail "curl is required"
 	[[ -d "${CHART}" ]] || fail "Helm chart not found at ${CHART}"
 	mode_json="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" --mode "${MODE}" "${TIERS_FILE}")"
+	if [[ -n "${OPENSHELL_E2E_OIDC_VALUES_FILE:-}" ]]; then
+		[[ -f "${OPENSHELL_E2E_OIDC_VALUES_FILE}" ]] \
+			|| fail "OPENSHELL_E2E_OIDC_VALUES_FILE not found: ${OPENSHELL_E2E_OIDC_VALUES_FILE}"
+		[[ -n "${OPENSHELL_E2E_OIDC_CA_CERT_FILE:-}" ]] \
+			|| fail "OPENSHELL_E2E_OIDC_CA_CERT_FILE is required with OPENSHELL_E2E_OIDC_VALUES_FILE"
+		[[ -r "${OPENSHELL_E2E_OIDC_CA_CERT_FILE}" ]] \
+			|| fail "OIDC issuer CA certificate is not readable: ${OPENSHELL_E2E_OIDC_CA_CERT_FILE}"
+	fi
 fi
 
 echo ">> Verifying oc session"
@@ -381,6 +397,18 @@ if [[ "${MODE}" == managed ]]; then
 		openshell.ai/sandbox-attachable=true
 fi
 
+# OIDC lane: publish the fixture CA bundle the gateway mounts for issuer TLS
+# verification, then layer the fixture-generated values overlay after the mode
+# overlays. The overlay is a bounded file, not an unbounded --set list, and is
+# never printed.
+OIDC_CA_CONFIG_MAP_NAME="${OPENSHELL_E2E_OIDC_CA_CONFIG_MAP_NAME:-openshell-oidc-ca}"
+if [[ -n "${OPENSHELL_E2E_OIDC_VALUES_FILE:-}" ]]; then
+	echo ">> Creating OIDC issuer CA ConfigMap '${OIDC_CA_CONFIG_MAP_NAME}'"
+	oc -n "${NAMESPACE}" create configmap "${OIDC_CA_CONFIG_MAP_NAME}" \
+		--from-file=ca.crt="${OPENSHELL_E2E_OIDC_CA_CERT_FILE}" \
+		--dry-run=client -o yaml | oc apply -f -
+fi
+
 echo ">> Deploying OpenShell via Helm"
 helm_value_args=()
 helm_value_args+=(--values "${REPO_ROOT}/deploy/helm/openshell/ci/values-openshift-scc.yaml")
@@ -391,6 +419,9 @@ if [[ -n "${overlay_lines}" ]]; then
 	while IFS= read -r value_file; do
 		helm_value_args+=(--values "${REPO_ROOT}/${value_file}")
 	done <<< "${overlay_lines}"
+fi
+if [[ -n "${OPENSHELL_E2E_OIDC_VALUES_FILE:-}" ]]; then
+	helm_value_args+=(--values "${OPENSHELL_E2E_OIDC_VALUES_FILE}")
 fi
 image_helm_args=()
 append_image_helm_args() {

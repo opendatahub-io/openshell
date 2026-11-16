@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1091,SC2329
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Shared local and image entrypoint for ODH tier phases.
@@ -187,10 +188,13 @@ TIERS_FILE="${ROOT}/e2e/rust/tests/odh/tiers.toml"
 DEPLOY_SCRIPT="${OPENSHELL_E2E_DEPLOY_SCRIPT:-${SCRIPT_DIR}/openshell-deploy-from-quay.sh}"
 TEST_SCRIPT="${OPENSHELL_E2E_PHASE_RUNNER:-${ROOT}/e2e/rust/tests/odh/run-odh-test-tier.sh}"
 MERGE_SCRIPT="${OPENSHELL_E2E_REPORT_MERGER:-${SCRIPT_DIR}/merge-e2e-odh-reports.py}"
+OIDC_FIXTURE="${OPENSHELL_E2E_OIDC_FIXTURE:-${SCRIPT_DIR}/odh-oidc-fixture.sh}"
+OIDC_SESSION_SCRIPT="${OPENSHELL_E2E_OIDC_SESSION_SCRIPT:-${SCRIPT_DIR}/odh-oidc-session.sh}"
+OIDC_IDENTITY_VALIDATOR="${OPENSHELL_E2E_OIDC_IDENTITY_VALIDATOR:-${SCRIPT_DIR}/validate-oidc-identity-fixture.py}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TIER="${1:-}"
 if [[ -z "${TIER}" || $# -ne 1 ]]; then
-	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full|python>" >&2
+	echo "Usage: $0 <smoke|tier1|tier2|tier3|odh|full|python|oidc>" >&2
 	exit 2
 fi
 
@@ -201,6 +205,22 @@ while IFS= read -r _; do ((phase_count+=1)); done <<< "${phase_lines}"
 has_python_runner=0
 if printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; sys.exit(0 if any("python" in p["runners"] for p in json.load(sys.stdin)["phases"]) else 1)'; then
 	has_python_runner=1
+fi
+is_oidc_lane=0
+if printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; sys.exit(0 if any("oidc" in p["runners"] for p in json.load(sys.stdin)["phases"]) else 1)'; then
+	is_oidc_lane=1
+fi
+if [[ "${is_oidc_lane}" == 1 ]]; then
+	# The OIDC lane deploys exactly one gateway with the per-run OIDC values
+	# overlay and runs only the OIDC Python suite against it.
+	if ! printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; phases=json.load(sys.stdin)["phases"]; sys.exit(0 if len(phases)==1 and phases[0]["runners"]==["oidc"] else 1)'; then
+		echo "ERROR: the OIDC lane must be a single phase running only the oidc runner" >&2
+		exit 2
+	fi
+	if [[ "${OPENSHELL_E2E_DEPLOY_GATEWAY:-1}" == 0 ]]; then
+		echo "ERROR: OPENSHELL_E2E_DEPLOY_GATEWAY=0 cannot be used with the OIDC lane: the gateway must be deployed with this run's OIDC configuration" >&2
+		exit 2
+	fi
 fi
 deploy_enabled="${OPENSHELL_E2E_DEPLOY_GATEWAY:-1}"
 if [[ "${deploy_enabled}" == 0 && "${phase_count}" -gt 1 ]]; then
@@ -219,8 +239,16 @@ if [[ "${deploy_enabled}" != 0 ]]; then
 	export OPENSHELL_E2E_RUN_ID
 	# Temporary compatibility with upstream managed-workspace tests, which
 	# currently assume the gateway namespace, release, and ID are all openshell.
-	NAMESPACE="${NAMESPACE:-openshell}"
-	RELEASE="${RELEASE:-openshell}"
+	# The OIDC lane runs no managed phase, so it gets run-scoped namespace and
+	# release defaults instead: concurrent invocations cannot collide on the
+	# shared "openshell" namespace/release.
+	if [[ "${is_oidc_lane}" == 1 ]]; then
+		NAMESPACE="${NAMESPACE:-openshell-oidc-${OPENSHELL_E2E_RUN_ID}}"
+		RELEASE="${RELEASE:-openshell-oidc-${OPENSHELL_E2E_RUN_ID}}"
+	else
+		NAMESPACE="${NAMESPACE:-openshell}"
+		RELEASE="${RELEASE:-openshell}"
+	fi
 	GATEWAY_NAME="${GATEWAY_NAME:-openshift-${OPENSHELL_E2E_RUN_ID}}"
 	OPENSHELL_GATEWAY="${GATEWAY_NAME}"
 	# A direct endpoint takes precedence over the selected gateway in the CLI.
@@ -260,6 +288,8 @@ active_mode=""
 child_pid=""
 kata_runtime_class="${KATA_CONTAINERS_RUNTIME_CLASS:-}"
 kata_label_restore=""
+oidc_state_dir=""
+oidc_diagnostics_collected=0
 results_dir="${OPENSHELL_E2E_RESULTS_DIR:-${ROOT}/results}"
 mkdir -p "${results_dir}"
 results_dir="$(cd "${results_dir}" && pwd)"
@@ -270,6 +300,7 @@ runner_report_path() {
 	case "${runner}" in
 		nextest) printf '%s/e2e-odh-%s-%s.xml\n' "${results_dir}" "${TIER}" "${phase}" ;;
 		python) printf '%s/e2e-odh-%s-%s-python.xml\n' "${results_dir}" "${TIER}" "${phase}" ;;
+		oidc) printf '%s/e2e-odh-%s-%s-oidc.xml\n' "${results_dir}" "${TIER}" "${phase}" ;;
 		*)
 			echo "ERROR: unknown runner ${runner} for ${TIER}/${phase}" >&2
 			return 1
@@ -329,6 +360,17 @@ cleanup_managed_namespaces() {
 	return "${cleanup_status}"
 }
 
+collect_oidc_diagnostics() {
+	[[ "${oidc_diagnostics_collected}" == 0 ]] || return 0
+	[[ -n "${oidc_state_dir}" && -f "${oidc_state_dir}/state.env" ]] || return 0
+	echo ">> Collecting OIDC diagnostics" >&2
+	if "${OIDC_FIXTURE}" diagnostics --state-dir "${oidc_state_dir}"; then
+		oidc_diagnostics_collected=1
+	else
+		echo "WARNING: OIDC diagnostics collection failed" >&2
+	fi
+}
+
 cleanup() {
 	local result=$?
 	trap - EXIT
@@ -339,6 +381,11 @@ cleanup() {
 		stop_child_tree TERM "${child_pid}"
 		wait "${child_pid}" 2>/dev/null || true
 		child_pid=""
+	fi
+	# Capture diagnostics while the gateway, supervisors, and sandboxes still
+	# exist. This is also the signal-cleanup path, before any teardown.
+	if [[ "${result}" != 0 ]]; then
+		collect_oidc_diagnostics
 	fi
 	if [[ -n "${active_state}" ]]; then
 		if ! cleanup_managed_namespaces "${active_state}"; then
@@ -355,6 +402,26 @@ cleanup() {
 			}
 		fi
 		rm -rf "${active_state}"
+	fi
+	if [[ -n "${oidc_state_dir}" ]]; then
+		if [[ ! -f "${oidc_state_dir}/state.env" ]]; then
+			# Setup failed before recording any cluster ownership state; there is
+			# nothing recoverable to retain or clean through the fixture CLI.
+			rm -rf "${oidc_state_dir}"
+			oidc_state_dir=""
+		elif [[ "${result}" != 0 && "${OPENSHELL_E2E_RETAIN_ON_FAILURE:-0}" == 1 ]]; then
+			echo ">> Retaining OIDC fixture for diagnosis (OPENSHELL_E2E_RETAIN_ON_FAILURE=1); state: ${oidc_state_dir}" >&2
+		else
+			if "${OIDC_FIXTURE}" cleanup --state-dir "${oidc_state_dir}"; then
+				rm -rf "${oidc_state_dir}"
+				oidc_state_dir=""
+			else
+				cleanup_status=$?
+				echo "ERROR: OIDC fixture cleanup failed (${cleanup_status})" >&2
+				[[ "${result}" != 0 ]] || result="${cleanup_status}"
+				echo ">> Preserving OIDC fixture state for retry: ${oidc_state_dir}" >&2
+			fi
+		fi
 	fi
 	if [[ -n "${kata_label_restore}" ]] &&
 		! oc label runtimeclass "${kata_runtime_class}" "${kata_label_restore}" --overwrite --request-timeout=15s; then
@@ -469,6 +536,12 @@ if [[ "${has_python_runner}" == 1 ]]; then
 	fi
 fi
 
+# OIDC lane: collect the OIDC suites before touching the cluster, then
+# provision the per-run RHBK Keycloak fixture whose derived issuer, gateway
+# endpoint, CA material, and temporary Helm values overlay drive the rest of
+# the invocation. fixture.env is the fixture's operational environment
+# (credential-free, mode 0600, never printed); the fixture keeps its private
+# run state separately in state.env.
 if [[ "${deploy_enabled}" != 0 && -n "${kata_runtime_class}" ]]; then
 	if [[ ! "${kata_runtime_class}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]]; then
 		echo "ERROR: KATA_CONTAINERS_RUNTIME_CLASS must be a valid RuntimeClass name" >&2
@@ -489,6 +562,48 @@ if [[ "${deploy_enabled}" != 0 && -n "${kata_runtime_class}" ]]; then
 	fi
 fi
 
+if [[ "${is_oidc_lane}" == 1 ]]; then
+	if ! run_child "${SCRIPT_DIR}/run-python-e2e.sh" --oidc --collect-only; then
+		echo "ERROR: OIDC Python E2E preflight failed; see preceding output" >&2
+		exit 2
+	fi
+	# Generate credentials per invocation. They are inherited by the fixture,
+	# identity preflight, CLI session, and pytest process, but are never written
+	# to fixture.env, state.env, or the realm source file.
+	if [[ -z "${OPENSHELL_E2E_OIDC_ADMIN_PASSWORD:-}" ]]; then
+			OPENSHELL_E2E_OIDC_ADMIN_PASSWORD="$("${PYTHON_BIN}" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+	fi
+	if [[ -z "${OPENSHELL_E2E_OIDC_USER_PASSWORD:-}" ]]; then
+			OPENSHELL_E2E_OIDC_USER_PASSWORD="$("${PYTHON_BIN}" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+	fi
+	if [[ -z "${OPENSHELL_E2E_OIDC_USER_B_PASSWORD:-}" ]]; then
+			OPENSHELL_E2E_OIDC_USER_B_PASSWORD="$("${PYTHON_BIN}" -c 'import secrets; print(secrets.token_urlsafe(32))')"
+	fi
+	if [[ -z "${OPENSHELL_E2E_OIDC_CI_CLIENT_SECRET:-}" ]]; then
+			OPENSHELL_E2E_OIDC_CI_CLIENT_SECRET="$("${PYTHON_BIN}" -c 'import secrets; print(secrets.token_urlsafe(48))')"
+	fi
+	export OPENSHELL_E2E_OIDC_ADMIN_PASSWORD OPENSHELL_E2E_OIDC_USER_PASSWORD
+	export OPENSHELL_E2E_OIDC_USER_B_PASSWORD OPENSHELL_E2E_OIDC_CI_CLIENT_SECRET
+	export OPENSHELL_E2E_OIDC_PASSWORD="${OPENSHELL_E2E_OIDC_ADMIN_PASSWORD}"
+	oidc_state_dir="$(mktemp -d)"
+	chmod 700 "${oidc_state_dir}"
+	if ! run_child "${OIDC_FIXTURE}" setup --state-dir "${oidc_state_dir}"; then
+		echo "ERROR: OIDC fixture setup failed for run ${OPENSHELL_E2E_RUN_ID}" >&2
+		exit 1
+	fi
+	# shellcheck disable=SC1090
+	source "${oidc_state_dir}/fixture.env"
+	export OPENSHELL_E2E_OIDC_ISSUER OPENSHELL_E2E_OIDC_GATEWAY_ENDPOINT OPENSHELL_KEYCLOAK_URL
+	export OPENSHELL_E2E_OIDC_CA_CERT_FILE OPENSHELL_E2E_OIDC_CA_CONFIG_MAP_NAME OPENSHELL_E2E_OIDC_VALUES_FILE
+	export ROUTE_HOST OPENSHELL_E2E_RHBK_NAMESPACE
+	# The OIDC suite authenticates with Bearer tokens over the gateway's own
+	# TLS, so it needs the serving CA the deploy step extracts into the
+	# registered gateway's mTLS directory (CA-only verification).
+	export OPENSHELL_E2E_GATEWAY_CA_CERT="${XDG_CONFIG_HOME:-${HOME}/.config}/openshell/gateways/${GATEWAY_NAME}/mtls/ca.crt"
+	echo ">> OIDC lane: issuer ${OPENSHELL_E2E_OIDC_ISSUER}"
+	echo ">> OIDC lane: gateway ${OPENSHELL_E2E_OIDC_GATEWAY_ENDPOINT}"
+fi
+
 for phase_line in ${phase_lines}; do
 	phase="${phase_line%%|*}"
 	phase_rest="${phase_line#*|}"
@@ -506,7 +621,36 @@ for phase_line in ${phase_lines}; do
 		if [[ "${OPENSHELL_E2E_REPLACE_EXISTING:-0}" == 1 ]]; then deploy_args+=(--replace-existing); fi
 		run_child "${DEPLOY_SCRIPT}" "${deploy_args[@]}" || phase_deploy_status=$?
 		if [[ "${phase_deploy_status}" == 0 ]]; then
-			run_child "${OPENSHELL_BIN:-openshell}" provider profile import --from "${ROOT}/providers" --global || phase_deploy_status=$?
+			if [[ "${is_oidc_lane}" == 1 ]]; then
+				# Identity preflight before any suite runs: it validates the
+				# three Keycloak-issued principals, the scoped-token contract,
+				# and the CI client-credentials grant directly against the
+				# issuer, so its failure names the identity provider and not
+				# the gateway (whose readiness the deploy step proved). The
+				# credentials are generated per invocation, passed by environment,
+				# and never written to a retained artifact.
+				if ! OIDC_IDENTITY_ISSUER="${OPENSHELL_E2E_OIDC_ISSUER}" \
+					OIDC_IDENTITY_CA_FILE="${OPENSHELL_E2E_OIDC_CA_CERT_FILE}" \
+					OIDC_IDENTITY_SUMMARY="${results_dir}/oidc-${OPENSHELL_E2E_RUN_ID}-identity.json" \
+					OIDC_IDENTITY_ADMIN_PASSWORD="${OPENSHELL_E2E_OIDC_ADMIN_PASSWORD}" \
+					OIDC_IDENTITY_USER_PASSWORD="${OPENSHELL_E2E_OIDC_USER_PASSWORD}" \
+					OIDC_IDENTITY_USER_B_PASSWORD="${OPENSHELL_E2E_OIDC_USER_B_PASSWORD}" \
+					OIDC_IDENTITY_CI_CLIENT_SECRET="${OPENSHELL_E2E_OIDC_CI_CLIENT_SECRET}" \
+					run_child "${PYTHON_BIN}" "${OIDC_IDENTITY_VALIDATOR}"; then
+					echo "ERROR: OIDC identity preflight failed for ${TIER}/${phase}" >&2
+					phase_deploy_status=1
+				fi
+			fi
+		fi
+		if [[ "${phase_deploy_status}" == 0 ]]; then
+			if [[ "${is_oidc_lane}" == 1 ]]; then
+				# With mandatory OIDC the mTLS-registered CLI holds no Bearer
+				# token: establish the administrator session first, then
+				# import the provider profiles through it.
+				run_child "${OIDC_SESSION_SCRIPT}" || phase_deploy_status=$?
+			else
+				run_child "${OPENSHELL_BIN:-openshell}" provider profile import --from "${ROOT}/providers" --global || phase_deploy_status=$?
+			fi
 		fi
 	fi
 	if [[ "${phase_deploy_status}" == 0 ]]; then
@@ -539,6 +683,9 @@ for phase_line in ${phase_lines}; do
 					python)
 						run_child "${SCRIPT_DIR}/run-python-e2e.sh" "${report_path}" || phase_test_status=$?
 						;;
+					oidc)
+						run_child "${SCRIPT_DIR}/run-python-e2e.sh" --oidc "${report_path}" || phase_test_status=$?
+						;;
 						*)
 						echo "ERROR: unknown runner ${runner} for ${TIER}/${phase}" >&2
 						phase_test_status=1
@@ -553,6 +700,11 @@ for phase_line in ${phase_lines}; do
 		if ! cleanup_managed_namespaces "${active_state}"; then
 			echo "ERROR: managed-workspace namespace cleanup failed for ${TIER}/${phase}" >&2
 			phase_managed_cleanup_status=1
+		fi
+		if [[ "${is_oidc_lane}" == 1 && ( "${phase_deploy_status}" != 0 || "${phase_test_status}" != 0 || "${phase_managed_cleanup_status}" != 0 ) ]]; then
+			# The per-phase teardown below removes the gateway and its workload
+			# pods, so collect failure evidence before invoking it.
+			collect_oidc_diagnostics
 		fi
 		if [[ -f "${active_state}/namespace" ]]; then
 			teardown_args=(teardown --yes --mode "${mode}")

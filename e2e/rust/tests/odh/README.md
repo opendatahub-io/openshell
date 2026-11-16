@@ -206,6 +206,7 @@ context you happen to have active elsewhere. This means:
 | `mise run e2e:odh:tier2` | Tier 2: mapped upstream tests + ODH `tier2::` + supported Python gateway E2E + image provenance |
 | `mise run e2e:odh:tier3` | Tier 3: mapped upstream tests + ODH `tier3::` + image provenance |
 | `mise run e2e:odh:python` | Supported upstream Python gateway E2E in the shared OpenShift mode |
+| `mise run e2e:odh:oidc` | Keycloak OIDC and workspace-authorization Python E2E with a per-run RHBK fixture |
 | `cargo nextest run --config-file "$PWD/.config/nextest.toml" --tool-config-file "odh:$PWD/e2e/rust/tests/odh/nextest.toml" --profile e2e-odh --manifest-path e2e/rust/Cargo.toml --features e2e-odh --test odh -E 'test(=module::test_name)'` | A single ODH test function |
 
 ### Python gateway E2E
@@ -230,6 +231,101 @@ The public `mise` tasks that include the Python runner (`e2e:odh:python` and
 tiers, prepare that environment yourself with `mise run python:dev`; this is
 intentional so the entrypoint fails before deploying when the test interpreter
 is unavailable.
+
+### Keycloak OIDC and workspace authorization
+
+`mise run e2e:odh:oidc` runs the OIDC Python suites — the upstream
+`e2e/python/oidc` plus the fork-only multi-user coverage in
+`odh/tests/oidc` — against a real Keycloak on the OpenShift cluster. It is a
+single-phase tier over the shared gateway mode: the runner provisions a
+per-run Red Hat build of Keycloak (RHBK) fixture, deploys the gateway with a
+temporary OIDC values overlay (explicit issuer, `realm_access.roles` role
+claim, `scope` scopes claim, mandatory audience, anonymous access disabled,
+and the fixture CA mounted for issuer TLS), validates the Keycloak-issued
+identities, runs the suites, and tears the fixture and the gateway down. The
+phase report is `e2e-odh-oidc-shared-oidc.xml`, merged into
+`e2e-odh-oidc-xunit.xml`. The downstream multi-user scenarios live in
+`odh/tests/oidc` rather than the upstream suite so the fork carries no diff
+in `e2e/python`; both directories run in one pytest invocation against the
+same fixture.
+
+The fixture is split into focused scripts under `odh/scripts/oidc-fixture/`
+(`setup.sh`, `cleanup.sh`, `diagnostics.sh`, over the shared `common.sh`),
+dispatched by `odh/scripts/odh-oidc-fixture.sh`. Run state is two files with
+different contracts: `fixture.env` is the operational environment the ODH
+entrypoint consumes (issuer, endpoint, CA material, values overlay), and
+`state.env` is the fixture-private record of namespaces, resource names, and
+the ownership label. Neither ever holds a credential: the database password
+is generated in memory and passed to its Secret through a file descriptor, and
+the TLS private keys are deleted as soon as the serving certificate is stored
+in the cluster.
+
+Prerequisites:
+
+- The lane installs `rhbk-operator` through OLM in the run-scoped namespace
+  when the Keycloak and KeycloakRealmImport CRDs are not already served. Set
+  `OPENSHELL_E2E_RHBK_CHANNEL` to select another supported channel. An
+  existing `OPENSHELL_E2E_RHBK_NAMESPACE` is treated as caller-owned and is
+  never deleted; the default run-scoped namespace is owned by the lane.
+- The kubeconfig needs permission to create the fixture resources (Secrets,
+  ConfigMaps, Services, PVCs, Deployments, Routes, Keycloak,
+  KeycloakRealmImports) in that namespace.
+- The fixture reuses `scripts/keycloak-realm.json`: users `admin@test`,
+  `user@test`, and `user-b@test` with per-run generated passwords, the
+  `openshell-admin`/`openshell-user` realm roles, the `openshell-cli` and
+  `openshell-ci` clients with a per-run client secret, and the `openshell:all`
+  and per-resource scopes.
+
+```bash
+umask 077
+oc --kubeconfig ~/.kube/config config view --minify --flatten > kubeconfig
+chmod 600 kubeconfig
+KUBECONFIG="$PWD/kubeconfig" \
+OPENSHELL_E2E_RHBK_NAMESPACE=<operator-namespace> \
+GATEWAY_IMAGE=<repo>@sha256:<digest> \
+SUPERVISOR_IMAGE=<repo>@sha256:<digest> \
+SANDBOX_IMAGE=<repo>@sha256:<digest> \
+mise run e2e:odh:oidc
+```
+
+Runtime images default to the installed operator CSV like every other tier.
+Unlike the nextest-backed tiers, the OIDC lane deploys into a run-scoped
+namespace and Helm release (`openshell-oidc-<run id>`), so concurrent OIDC
+invocations cannot collide with each other or with the `openshell`
+namespace other tiers use. The OIDC runner requires the generated OpenShift
+Route endpoint and issuer explicitly (`OPENSHELL_E2E_OIDC_GATEWAY_ENDPOINT`,
+`OPENSHELL_E2E_OIDC_ISSUER`); it never derives or falls back to a local
+Docker endpoint. The normal Python lane keeps forcing
+`OPENSHELL_E2E_OIDC=0`; only this lane sets `OPENSHELL_E2E_OIDC=1` and runs
+the OIDC suites single-process.
+
+The identity preflight runs between gateway readiness and the suites: it
+requests one token per fixture user directly from the issuer, checks the
+issuer, distinct subjects, realm roles, and scope claims, and also exercises
+the scoped-token and `openshell-ci` client-credentials contracts the suites
+depend on, writing fingerprinted evidence to
+`results/oidc-<run id>-identity.json`. Any failure there is reported as an
+identity-provider failure, while gateway failures surface in the deployment
+readiness probes and the authenticated administrator session used to import
+provider profiles.
+
+On failure the lane collects redacted, per-component diagnostics under
+`results/oidc-<run id>-diagnostics/` — one directory each for Keycloak,
+PostgreSQL, the gateway, supervisors, sandbox workloads, and the test run
+(resources, events, pod logs, the pytest log, and the reports). Tokens,
+credentials, and fixture identities are redacted from every retained
+artifact, and the pytest output is captured and redacted next to the phase
+report as `oidc-<run id>-pytest.log`. Cleanup runs after both success and
+failure, deletes only resources labelled with the run identifier, and
+verifies the deletions completed; a cleanup failure never masks the original
+result. Set `OPENSHELL_E2E_RETAIN_ON_FAILURE=1` to keep the fixture and its
+state directory for diagnosis after a failure — no credential or private
+key is retained either way.
+
+The upstream Docker OIDC lane (`mise run e2e:oidc-python:docker`) remains
+unchanged and runs the upstream suite. The downstream full-coverage lane is
+`mise run e2e:odh:oidc:docker`; it adds the fork-only OIDC suite without
+modifying the shared upstream task.
 
 Example, running the Smoke tier against a real cluster:
 
