@@ -963,6 +963,20 @@ class InstallTests(unittest.TestCase):
                 self.assertNotIn("host", raw["gateway"])
                 self.assertNotIn("host", raw["dashboard"])
 
+    def test_pinned_example_configs_load(self):
+        examples = Path(__file__).with_name("config-examples")
+        for path in sorted(examples.glob("config.example-*.json")):
+            with self.subTest(path=path.name):
+                target = self.root / path.name
+                target.write_text(path.read_text())
+                (self.root / "dashboard-client-secret.txt").write_text("secret\n")
+                (self.root / "ingress-ca.crt").write_text("test CA\n")
+                config = installer.load_config(target)
+                installer.resolve_hosts(config, "apps.example.com")
+                self.assertNotEqual(
+                    config["gateway"]["host"], config["dashboard"]["host"]
+                )
+
     def test_resolve_hosts_derives_namespace_qualified_hosts(self):
         self.config = configuration(with_hosts=False)
         config = self.load()
