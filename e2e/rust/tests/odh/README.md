@@ -106,12 +106,13 @@ upstream_tests = ["workspace_namespace_managed"]
 ```
 
 Smoke covers gateway reachability, sandbox lifecycle, and image provenance.
-Tier 1 checks the process-supervisor SELinux label and its mapped upstream
-tests. It excludes four sandbox lifecycle tests after intermittent OpenShift
-failures: `canonical_main_disconnect_reconnect_replays_history_for_same_process`,
-`canonical_main_exit_255_is_not_retried_as_transport_failure`,
-`on_failure_policy_replaces_runtime_and_preserves_workspace`, and
-`canonical_main_and_exec_receive_declared_environment`. Full still includes all four.
+Tier 1 checks the process-supervisor SELinux label and its ODH-specific tests.
+Its former upstream lifecycle selections have moved to testkit conformance:
+[#5431](https://github.com/NVIDIA/OpenShell/pull/5431) moved the environment
+coverage, and [#5442](https://github.com/NVIDIA/OpenShell/pull/5442) moved the
+CLI exec, attached-create, attach, and SSH-supervision coverage. Full still runs
+the remaining legacy lifecycle test,
+`on_failure_policy_replaces_runtime_and_preserves_workspace`.
 Tier 2 runs `workspace_lifecycle`, ODH Tier 2, and image provenance in
 shared mode, then runs `workspace_namespace_managed` against a separate
 managed-mode deployment. The `odh` and `full` tiers use the same shared then
