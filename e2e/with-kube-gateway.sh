@@ -83,6 +83,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${ROOT}/e2e/support/gateway-common.sh"
 # shellcheck source=e2e/support/route-auth.sh
 source "${ROOT}/e2e/support/route-auth.sh"
+# shellcheck source=e2e/support/child-process.sh
+source "${ROOT}/e2e/support/child-process.sh"
 
 # Upstream agent-sandbox release. The Kubernetes driver supports the v1beta1
 # Sandbox API introduced in v0.5.0 and falls back to v1alpha1 for v0.4.6
@@ -570,6 +572,8 @@ cleanup_vault_fixture() {
 
 cleanup() {
   local exit_code=$?
+  trap - EXIT
+  trap '' INT TERM
 
   stop_gateway_portforward
   e2e_stop_process "${ADDITIONAL_CA_SERVER_PID}" "additional CA HTTPS fixture"
@@ -735,10 +739,13 @@ cleanup() {
     fi
   fi
 
+  # Credentials are disposable even if deleting the per-run class failed.
   rm -rf "${WORKDIR}" 2>/dev/null || true
   exit "${exit_code}"
 }
 trap cleanup EXIT
+trap 'e2e_stop_child 130' INT
+trap 'e2e_stop_child 143' TERM
 
 # --- DB-scenario helpers (used only when OPENSHELL_E2E_KUBE_DB_SCENARIOS=1) ---
 
@@ -863,7 +870,7 @@ run_scenario() {
     "${OPENSHELL_BIN:-${ROOT}/target/debug/openshell}" "${ROOT}" || return 1
 
   echo "Running e2e command against ${GATEWAY_ENDPOINT}: ${E2E_CMD[*]}"
-  "${E2E_CMD[@]}" || scenario_exit=$?
+  E2E_CHILD_GRACE_SECONDS=30 e2e_run_child "${E2E_CMD[@]}" || scenario_exit=$?
 
   scenario_stop_portforward
   scenario_cleanup_release
@@ -1692,5 +1699,5 @@ else
     "${OPENSHELL_BIN:-${ROOT}/target/debug/openshell}" "${ROOT}" || exit 1
 
   echo "Running e2e command against ${GATEWAY_ENDPOINT}: $*"
-  "$@"
+  E2E_CHILD_GRACE_SECONDS=30 e2e_run_child "$@"
 fi
