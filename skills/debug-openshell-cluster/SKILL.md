@@ -511,6 +511,13 @@ the release. Look for failed installs, unexpected values, missing namespace, wro
 image tag, TLS settings that do not match the registered endpoint, and
 scheduling failures.
 
+If Kubernetes rejects `app.kubernetes.io/version` on a resource or certgen hook,
+inspect the rendered label and chart app version. Charts normalize SemVer build
+metadata for labels (`0.1.9+build.1` becomes `0.1.9_build.1`) without changing
+the app version or image references. Upgrade older charts that emit `+` in
+labels; use explicit image tags or digests when the app version is not a valid
+container image tag.
+
 When checking a Helm values migration, compare the rendered `gateway.toml`
 with the intended `gatewayConfig` tables. Explicit resource-admission settings
 and the Kubernetes Secrets credential namespace take precedence over deprecated
@@ -672,7 +679,7 @@ configuration, policy status, and endpoint status reports. Lifecycle paths
 (start, stop, delete, restart, supervisor connection and process-exit state,
 driver-watch updates, and reconcile) take only a process-local shared global
 and exclusive sandbox lock, with no time limit and no mutation advisory lock
-(start, restart, and delete also take the SSH identity key below), so only
+(start, restart, and delete also take the SSH identity keys below), so only
 a global change on the same replica blocks them directly. Provider,
 workspace-profile, and other replicas' global changes delay them only while
 another operation on the same sandbox waits behind the change, holding that
@@ -808,13 +815,27 @@ key exclusively for every guarded mutation, so mutations can queue behind
 them until the rollout finishes.
 
 SSH host identity provisioning and cleanup, in sandbox create, start,
-restart, and delete, take one more fleet-wide key, `classid = 1330860872` and
-`objid = 1213158228` (key `0x4F535348484F5354`), on a data connection instead
-of the lock pool, with a 10-second PostgreSQL `lock_timeout`. Sandbox create
-holds its mutation guard while it waits for that key. A wait that runs out
-returns `UNAVAILABLE` with "lock sandbox SSH identity failed", and neither
+restart, and delete, take two more keys on one data connection instead of the
+lock pool, with one 10-second deadline covering the data-pool lock slot, the
+connection, and both keys: the legacy fleet-wide key,
+`classid = 1330860872` and `objid = 1213158228` (key
+`0x4F535348484F5354`), and then an exclusive key derived from the sandbox id,
+so different sandboxes don't wait on each other. Current gateways hold the
+legacy key as `ShareLock` and older gateways as `ExclusiveLock`, so during a
+rolling upgrade an older gateway's SSH identity step still waits for, and
+blocks, every other one. A backend that holds the legacy key as `ShareLock`
+holds or waits for exactly one sandbox's SSH identity key, so its other
+advisory lock row in `pg_locks` is that sandbox's key.
+Sandbox create holds its mutation guard while it waits for those keys. A wait
+that runs out returns `UNAVAILABLE` with "lock sandbox SSH identity failed",
+and neither
 `openshell_server_mutation_lock_timeouts_total` nor
-`openshell_server_mutation_lock_errors_total` counts it.
+`openshell_server_mutation_lock_errors_total` counts it. A 10-second wait for
+one of the replica's data-pool lock slots (half of
+`database_max_connections`), which provider refresh shares, fails the same way (or with "credential refresh
+coordination unavailable") and logs "data-pool lock slots stayed busy". At a
+small `database_max_connections`, slow refresh mints or slow credential
+drivers cause it, and raising the pool fixes it.
 
 For multi-replica gateway installs, supervisor and client session traffic may
 be served by a non-owner gateway replica and relayed to the current supervisor
@@ -1749,7 +1770,6 @@ verify workload identity/memory survives and new connections reach the replaceme
 Shared serving leases last at most fifteen seconds from issuance, independently
 of configuration renewal; include membership failure detection when measuring a
 partition's stale-owner interval. Storage failures prevent renewal.
-
 
 Application ingress consumers call the separate `openshell.v1.ServiceDiscovery`
 service, rather than `OpenShell`. Discovery snapshots share a one-second cache
