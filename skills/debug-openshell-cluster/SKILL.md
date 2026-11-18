@@ -281,6 +281,18 @@ See [gateway configuration](https://docs.nvidia.com/openshell/latest/how-it-work
 
 ### Step 4: Check Docker-Backed Gateways
 
+For stopped workload image updates, check both Docker `persist_workspace` and
+gateway `enable_sandbox_updates`. Only newly created persistent `/sandbox`
+workspaces support image-only changes; cached images must retain non-root
+UID/GID and declare no volumes. An interrupted accepted update can temporarily
+have no workload container. Retry the same gateway operation before Start; do
+not treat that gap as an orphan or delete its volumes. The private driver update
+record can contain environment and bootstrap material: do not export it in logs
+or diagnostics. Workspace ownership requires the protected driver record and
+matching runtime claim; caller container labels cannot enable persistence or
+authorize volume adoption/removal. Preserve that record after failed creation
+until explicit deletion. See the published sandbox update and Docker configuration docs.
+
 The sandbox container's log holds the sandbox runtime's warnings and the
 main process's stdout and stderr when it runs without a TTY. The supervisor
 container's log holds supervisor diagnostics and OCSF shorthand. With
@@ -1628,7 +1640,9 @@ credential failures.
 
 | Symptom | Likely cause | Check |
 |---|---|---|
+| Collector receives no gateway metrics | OTLP metric export is off, or its collector cannot accept metrics | Set `enabled = true` in `[openshell.gateway.otlp.metrics]`, inspect `metrics_endpoint` in the gateway's `OTLP exporting enabled` log, and check exporter errors. Metrics use their table's collector, or inherit the shared collector when no endpoint is set; the Prometheus listener is configured independently. See [OTLP metrics](https://docs.nvidia.com/openshell/latest/how-it-works/gateways/configuration#otlp-metrics). |
 | `openshell status` fails | Gateway endpoint unreachable or auth mismatch | `openshell gateway info`, gateway logs |
+| Probes get `connection refused` on an IPv6 cluster | Listeners bind `0.0.0.0` by default | Set `gateway.listenAddress=::` and `supervisor.listenAddress=::` |
 | Collector receives no OCSF log records, or `openshell.ocsf.gap` records | `[openshell.gateway.otlp.ocsf]` missing or without `enabled = true`, an unreachable endpoint or one that does not speak the table's `protocol`, or export failures and queue pressure | Check `[openshell.gateway.otlp.ocsf]` for `enabled = true` and the endpoint it resolves to, the gateway's `OTLP exporting enabled` startup log for `ocsf_endpoint` and `ocsf_protocol`, export warnings, and `openshell_ocsf_otlp_*` metrics. See the published [gateway configuration reference](https://docs.nvidia.com/openshell/latest/how-it-works/gateways/configuration). |
 | Gateway OCSF JSONL stops growing, has gaps, or is rejected by a SIEM | File errors, queue pressure, or shipper falling behind retention | Inspect gateway warnings and `openshell_ocsf_log_*` metrics; check `[openshell.gateway.ocsf_log]`, directory permissions, free space, per-replica paths, and shipper rotation checkpoints. See the published [gateway configuration reference](https://docs.nvidia.com/openshell/latest/how-it-works/gateways/configuration). |
 | `BatchSpanProcessor.ExportError` repeatedly reports connection refused on `127.0.0.1:4317` | The local gateway started with `OPENSHELL_DEV_OTLP_ENDPOINT` set but no collector is listening, for example because `helm:k3s:forward` stopped | Start the collector forwarding again, or restart the gateway task without `OPENSHELL_DEV_OTLP_ENDPOINT`; inspect the generated `gateway.toml` for `[openshell.gateway.otlp]` |
