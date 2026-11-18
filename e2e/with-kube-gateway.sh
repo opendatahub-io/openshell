@@ -22,7 +22,7 @@
 # messages to set up. Each one has to travel through the port-forward tunnel, so
 # the connection never finishes and the test times out. To avoid this, on
 # OpenShift the harness reaches the gateway through a normal network path: a
-# passthrough OpenShift Route, secured with mandatory mTLS
+# passthrough OpenShift Route, secured with mTLS user authentication
 # (ci/values-openshift-e2e.yaml).
 #
 # Every OpenShift-specific branch below is gated on OPENSHIFT_DETECTED, so the
@@ -81,6 +81,8 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=e2e/support/gateway-common.sh
 source "${ROOT}/e2e/support/gateway-common.sh"
+# shellcheck source=e2e/support/route-auth.sh
+source "${ROOT}/e2e/support/route-auth.sh"
 
 # Upstream agent-sandbox release. The Kubernetes driver supports the v1beta1
 # Sandbox API introduced in v0.5.0 and falls back to v1alpha1 for v0.4.6
@@ -889,12 +891,12 @@ configure_fixture_container_engine() {
 }
 
 # OpenShift only: extract the client mTLS material, wait for the passthrough
-# Route to serve mTLS, assert that a certless caller is rejected at the TLS
-# handshake, and register an mTLS CLI gateway pointing at the Route.
+# Route to serve TLS, verify that a protected RPC requires a client certificate,
+# and register an mTLS CLI gateway pointing at the Route.
 #
 # Sets GATEWAY_NAME and GATEWAY_ENDPOINT on success. Returns non-zero on failure
-# (unreachable Route or a certless request that was NOT rejected — a security
-# hole). Reads OPENSHIFT_ROUTE_HOST and OPENSHIFT_PKI_DIR.
+# (unreachable Route or unexpected RPC authentication results).
+# Reads OPENSHIFT_ROUTE_HOST and OPENSHIFT_PKI_DIR.
 openshift_register_route_gateway() {
   local pki_dir="${OPENSHIFT_PKI_DIR}"
 
@@ -915,7 +917,7 @@ openshift_register_route_gateway() {
   echo "Waiting for Route https://${OPENSHIFT_ROUTE_HOST} to serve mTLS..."
   local elapsed=0 timeout=180
   while [ "${elapsed}" -lt "${timeout}" ]; do
-    if curl -s --max-time 10 -o /dev/null \
+    if curl -q -s --max-time 10 -o /dev/null \
          --cacert "${pki_dir}/ca.crt" \
          --cert "${pki_dir}/client/tls.crt" \
          --key "${pki_dir}/client/tls.key" \
@@ -930,33 +932,7 @@ openshift_register_route_gateway() {
     return 1
   fi
 
-  # Security gate: a caller with no client certificate MUST be rejected during
-  # the TLS handshake (clientCaSecretName set + no OIDC => mTLS mandatory).
-  #
-  # Validate the server cert with --cacert (no -k) and inspect curl's exit code
-  # so an unrelated TLS/DNS/timeout failure is not silently accepted as "certless
-  # rejected". Only a handshake abort by the server (no client cert presented)
-  # counts as the expected rejection.
-  local certless_rc=0
-  curl -s --max-time 10 -o /dev/null \
-    --cacert "${pki_dir}/ca.crt" \
-    "https://${OPENSHIFT_ROUTE_HOST}/" || certless_rc=$?
-  case "${certless_rc}" in
-    0)
-      echo "ERROR: SECURITY HOLE — gateway accepted a certless request over the Route" >&2
-      return 1
-      ;;
-    35 | 56)
-      # 35 CURLE_SSL_CONNECT_ERROR / 56 CURLE_RECV_ERROR: the server aborted the
-      # TLS handshake because no client certificate was presented — the expected
-      # mTLS rejection.
-      echo "OK: Route reachable over mTLS; certless request rejected at TLS (curl ${certless_rc})."
-      ;;
-    *)
-      echo "ERROR: certless probe to ${OPENSHIFT_ROUTE_HOST} failed with curl exit ${certless_rc}, not a TLS client-auth rejection; cannot confirm mTLS is enforced" >&2
-      return 1
-      ;;
-  esac
+  e2e_verify_route_mtls "https://${OPENSHIFT_ROUTE_HOST}" "${pki_dir}" || return 1
 
   GATEWAY_NAME="openshell-e2e-openshift"
   GATEWAY_ENDPOINT="https://${OPENSHIFT_ROUTE_HOST}"
