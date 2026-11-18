@@ -247,14 +247,16 @@ provider beside the configuration:
 ```shell
 umask 077
 mkdir -p "$CONFIG_DIR"
-IFS= read -rs -p 'Dashboard client secret: ' SECRET
+printf 'Dashboard client secret: '
+IFS= read -rs SECRET
+echo
 printf '%s' "$SECRET" > "$CONFIG_DIR/dashboard-client-secret.txt"
 unset SECRET
 chmod 600 "$CONFIG_DIR/dashboard-client-secret.txt"
 ```
 
-The `read -rs` prompt keeps the secret off the screen and out of the shell
-history. When the
+The `printf` prompt and `read -rs` keep the secret off the screen and out of the
+shell history. When the
 [Keycloak client helper](keycloak-dev-guide-create-openshell-clients.sh) created
 the client, it already wrote this file; skip this step in that case. Do not put
 the secret in the JSON, Helm values, or command arguments.
