@@ -28,21 +28,13 @@ odh_filter = "smoke::"
 
 [tier1]
 description = "High-priority tests excluding Smoke (15 min target)"
-upstream_tests = ["sandbox_lifecycle", "landlock", "user_namespaces"]
+upstream_tests = []
 odh_filter = "tier1::"
-
-[tier1.upstream_test_exclusions]
-sandbox_lifecycle = [
-  "canonical_main_disconnect_reconnect_replays_history_for_same_process",
-  "canonical_main_exit_255_is_not_retried_as_transport_failure",
-  "on_failure_policy_replaces_runtime_and_preserves_workspace",
-  "canonical_main_and_exec_receive_declared_environment",
-]
 
 [tier2]
 description = "Medium/low priority positive tests"
-# Corporate proxy needs a cluster-reachable fixture configured before Helm install.
-upstream_tests = ["workspace_lifecycle"]
+# Workspace lifecycle coverage moved to the testkit conformance suite.
+upstream_tests = []
 odh_filter = "tier2::"
 excluded_odh_filters = ["tier2::managed_identity::"]
 # The Python gateway suite rides tier2's shared deployment: the DevTestOps
