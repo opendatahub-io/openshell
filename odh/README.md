@@ -43,3 +43,25 @@ Push the branch and open a pull request against `opendatahub-io/openshell` `main
 ```shell
 git push -u origin HEAD
 ```
+
+## Run the existing ODH image tests on Kata
+
+Add `--env KATA_CONTAINERS_RUNTIME_CLASS=kata` to your existing test-image
+invocation and keep the same image command, such as `smoke` or `tier2`. Use
+the name of a RuntimeClass configured for Kata on the target cluster. A
+cluster administrator must approve it with the label
+`openshell.ai/sandbox-attachable=true`. Check its handler on that cluster:
+
+```shell
+oc get runtimeclass kata -o custom-columns=NAME:.metadata.name,HANDLER:.handler
+```
+
+The ODH deploy script passes the class as the gateway's default for sandbox
+pods on each Helm install. With `OPENSHELL_E2E_DEPLOY_GATEWAY=0`, configure
+the RuntimeClass on the existing gateway before starting the tests. During a
+run, check the class selected by each pod:
+
+```shell
+oc get pods -A -l openshell.ai/sandbox-id \
+  -o custom-columns=POD:.metadata.name,RUNTIMECLASS:.spec.runtimeClassName
+```
