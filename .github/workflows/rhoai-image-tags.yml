@@ -1,0 +1,40 @@
+# After rhaiv-auto-tag, point each rhoai-*-e2e branch at the latest
+# vX.Y.Z-rhaiv.N commit from odh/rhoai-image-tags.yaml. Konflux builds
+# quay.io/opendatahub/odh-openshell-e2e:<branch> from that push.
+# Streams whose OpenShell version has no rhaiv tag yet are skipped.
+
+name: RHOAI E2E Branches
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 16,20 * * 1-5"  # after weekday rhaiv-auto-tag (14:30 UTC)
+
+permissions: {}
+
+concurrency:
+  group: rhoai-e2e-branches
+  cancel-in-progress: false
+
+jobs:
+  sync-branches:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync RHOAI e2e branches
+        run: |
+          python3 odh/scripts/rhoai_image_tags.py --apply \
+            --ensure-pipelinerun .tekton/odh-openshell-e2e-rhoai.yaml

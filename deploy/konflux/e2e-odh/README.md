@@ -72,8 +72,14 @@ Python dependencies at `odh`:
 }
 ```
 
-The image name is `odh-openshell-e2e`; Konflux automation generates the
-Tekton YAML files.
+The image name is `odh-openshell-e2e`. Konflux PipelineRuns are authored in
+[`odh-konflux-central`](https://github.com/opendatahub-io/odh-konflux-central)
+under `pipelineruns/openshell/` and synced into `.tekton/` by the onboarder.
+Push and pull-request files already exist there (`:odh-stable` and `:odh-pr`).
+Copy `odh-openshell-e2e-rhoai.yaml` into konflux-central so Konflux publishes
+`:{{target_branch}}` on every push to a `rhoai-*-e2e` branch. `rhaiv-auto-tag`
+creates `vX.Y.Z-rhaiv.N` git tags; `rhoai-image-tags.yml` then points each
+stream in `odh/rhoai-image-tags.yaml` at the latest matching rhaiv commit.
 Before merging, validate the local hermetic build on both `linux/amd64` and
 `linux/arm64` using `PLATFORM` with `deploy/konflux/build-local.sh e2e-odh`.
 

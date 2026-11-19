@@ -11,6 +11,8 @@
 #
 # Once a new stable upstream vX.Y.Z is synced, the next run creates -rhaiv.0.
 # Prereleases are ignored; upstream tags never overwrite midstream tags.
+# RHOAI e2e streams (rhoai-3.7-ea.1-e2e, …) are created afterwards by
+# rhoai-image-tags.yml from odh/rhoai-image-tags.yaml.
 
 name: RHAIV Auto-Tag
 
