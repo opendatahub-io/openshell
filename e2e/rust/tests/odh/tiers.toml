@@ -67,6 +67,17 @@ description = "Supported upstream Python gateway E2E on OpenShift"
 # through odh/python-gates.toml (validated strictly before deployment).
 runners = ["python"]
 
+[oidc]
+description = "Keycloak OIDC authentication and workspace authorization on OpenShift"
+# Single-phase OIDC lane over the shared gateway mode: the oidc runner
+# provisions the per-run RHBK Keycloak fixture, deploys the gateway with a
+# mandatory-issuer OIDC values overlay, validates real Keycloak-issued
+# identities, and runs the upstream and fork-only OIDC suites with distinct
+# authenticated subjects.
+# The runner writes the e2e-odh-oidc-shared-oidc.xml phase report and refuses
+# to run without an explicit OpenShift gateway endpoint and issuer.
+runners = ["oidc"]
+
 [odh]
 description = "All ODH-specific tests"
 odh_only = true

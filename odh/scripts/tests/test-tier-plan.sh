@@ -43,6 +43,19 @@ print("ok")
 ')"
 printf '%s\n' "${python_phases}"
 
+echo ">> the oidc tier resolves from plan data with the oidc runner only"
+oidc_plan="$(plan_json oidc)"
+printf '%s' "${oidc_plan}" | "${PYTHON_BIN}" -c '
+import json, sys
+plan = json.load(sys.stdin)
+phases = plan["phases"]
+assert len(phases) == 1, "expected 1 phase, got %d" % len(phases)
+phase = phases[0]
+assert phase["mode"] == "shared", phase["mode"]
+assert phase["runners"] == ["oidc"], phase["runners"]
+print("ok")
+'
+
 echo ">> tier2's shared phase runs nextest and the python ride-along as data"
 tier2_plan="$(plan_json tier2)"
 printf '%s' "${tier2_plan}" | "${PYTHON_BIN}" -c '
@@ -83,12 +96,46 @@ echo ">> validation: unknown runner, phase-scoped python runner, python-only wit
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "${WORKDIR}"' EXIT
 
+sed_in_place() {
+	if sed --version > /dev/null 2>&1; then
+		sed -i "$@"
+	else
+		sed -i '' "$@"
+	fi
+}
+
 sed 's/^runners = \["python"\]$/runners = ["pythn"]/' "${TIERS_FILE}" > "${WORKDIR}/bad-runner.toml"
 if "${PYTHON_BIN}" "${PLAN_RESOLVER}" python "${WORKDIR}/bad-runner.toml" > /dev/null 2>&1; then
 	echo "FAIL: unknown runner accepted" >&2
 	exit 1
 fi
 echo "ok: unknown runner rejected"
+
+echo ">> validation: oidc-only phase cannot carry a nextest selection"
+cp "${TIERS_FILE}" "${WORKDIR}/oidc-mixed-runner.toml"
+sed_in_place '/^runners = \["oidc"\]$/a\
+upstream_tests = ["workspace_lifecycle"]' "${WORKDIR}/oidc-mixed-runner.toml"
+if mixed_error="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" oidc "${WORKDIR}/oidc-mixed-runner.toml" 2>&1)"; then
+	echo "FAIL: an oidc-only phase accepted a nextest selection" >&2
+	exit 1
+fi
+if [[ "${mixed_error}" != *"runners omit nextest"* ]]; then
+	echo "FAIL: expected oidc/nextest selection validation, got: ${mixed_error}" >&2
+	exit 1
+fi
+echo "ok: oidc-only phase rejects a nextest selection"
+
+echo ">> validation: duplicate oidc runner within one phase rejected"
+sed 's/^runners = \["oidc"\]$/runners = ["oidc", "oidc"]/' "${TIERS_FILE}" > "${WORKDIR}/oidc-duplicate-runner.toml"
+if oidc_duplicate_error="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" oidc "${WORKDIR}/oidc-duplicate-runner.toml" 2>&1)"; then
+	echo "FAIL: duplicate oidc runner within one phase accepted" >&2
+	exit 1
+fi
+if [[ "${oidc_duplicate_error}" != *"duplicate runner"* ]]; then
+	echo "FAIL: expected same-phase duplicate validation, got: ${oidc_duplicate_error}" >&2
+	exit 1
+fi
+echo "ok: duplicate oidc runner within one phase rejected"
 
 cp "${TIERS_FILE}" "${WORKDIR}/dup-python.toml"
 printf '\n[python.managed]\ndescription = "second python phase"\nrunners = ["python"]\n' >> "${WORKDIR}/dup-python.toml"
@@ -103,13 +150,6 @@ fi
 echo "ok: python runner may appear in multiple phases"
 
 cp "${TIERS_FILE}" "${WORKDIR}/python-rust-selection.toml"
-sed_in_place() {
-	if sed --version > /dev/null 2>&1; then
-		sed -i "$@"
-	else
-		sed -i '' "$@"
-	fi
-}
 sed_in_place '/^runners = \["python"\]$/a\
 upstream_tests = ["workspace_lifecycle"]' "${WORKDIR}/python-rust-selection.toml"
 if selection_error="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" python "${WORKDIR}/python-rust-selection.toml" 2>&1)"; then

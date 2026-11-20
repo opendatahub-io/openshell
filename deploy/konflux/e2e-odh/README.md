@@ -51,7 +51,11 @@ for selection rules, permissions, and fallback behavior.
 The image also carries a fully prefetched Python 3.11 test environment and
 generated protobuf bindings. The `python` entrypoint mode uses that environment
 to run the supported upstream Python gateway E2E on OpenShift without runtime
-dependency downloads.
+dependency downloads. The `oidc` entrypoint mode reuses the same environment
+for the Keycloak OIDC lane; the lane installs `rhbk-operator` through OLM when
+the required CRDs are not already served. See the ODH E2E README for the
+`OPENSHELL_E2E_RHBK_CHANNEL` and optional `OPENSHELL_E2E_RHBK_NAMESPACE`
+settings.
 
 Konflux onboarding must use the `linux-m2xlarge/*` builders and retain the
 three Hermeto prefetch inputs: Cargo at `.` and `e2e/rust`, plus the locked

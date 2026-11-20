@@ -17,8 +17,9 @@ GLOBAL_EXCLUSIONS_KEY = "global_test_exclusions"
 _BINARY = re.compile(r"[A-Za-z0-9_-]+\Z")
 _FILTER = re.compile(r"[A-Za-z0-9_:]+\Z")
 # The runners a phase may execute, in order. "nextest" runs the Rust test
-# selection; "python" runs the upstream Python gateway E2E suite.
-_RUNNERS = frozenset({"nextest", "python"})
+# selection; "python" runs the upstream Python gateway E2E suite; "oidc" runs
+# the Keycloak-backed OIDC Python suite with the ODH OIDC fixture.
+_RUNNERS = frozenset({"nextest", "python", "oidc"})
 
 
 def _validate_mode(mode_name: str, mode: dict) -> dict:
@@ -99,7 +100,8 @@ def load_plan(tier: str, plan_path: Path = PLAN_FILE) -> dict:
         if len(set(runners)) != len(runners):
             raise ValueError(f"duplicate runner in phase {name!r}")
         for runner in runners:
-            report_path = f"{name}{'-python' if runner == 'python' else ''}"
+            suffix = {"python": "-python", "oidc": "-oidc"}.get(runner, "")
+            report_path = f"{name}{suffix}"
             if report_path in report_paths:
                 raise ValueError(
                     f"duplicate derived report path for phase {name!r}: {report_path!r}"
