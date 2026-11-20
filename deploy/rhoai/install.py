@@ -1,8 +1,8 @@
-#!/usr/bin/env -S uv run --script
+#!/usr/bin/env -S uv run --no-project --python 3.12 --script
 # SPDX-FileCopyrightText: Copyright (c) 2026 OpenShell contributors
 # SPDX-License-Identifier: Apache-2.0
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = ["PyYAML==6.0.3"]
 # ///
 """Install the gateway and dashboard as separate Helm releases on OpenShift."""
@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,24 @@ INSTALL_STATE = "openshell-installer"
 OIDC_SECRET = "openshell-dashboard-oidc"
 OIDC_CA = "openshell-oidc-ca"
 MIN_DASHBOARD_USER_ROLE_CHART = (0, 1, 2)
+CLI_CLIENT_ID = "openshell-cli"
+CLI_INSTALL_URL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh"
+# System trust bundles in preference order; the installer prints the first that
+# exists on its host and names the others for copy-paste on a different host.
+SYSTEM_CA_BUNDLES = (
+    ("Fedora/RHEL", "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"),
+    ("Debian/Ubuntu", "/etc/ssl/certs/ca-certificates.crt"),
+    ("macOS", "/etc/ssl/cert.pem"),
+)
+# Releases from this version onward include the pre-5.19 legacy-kernel fixes
+# (NVIDIA/OpenShell#4150). The gateway chart version tracks the OpenShell
+# release, so downstream images must match it.
+LEGACY_KERNEL_FIX_RELEASE = (0, 1, 3)
+PLACEHOLDER_APPS_DOMAIN = "apps.example.com"
+CONTEXT_ERROR = (
+    "Cannot determine the current kubeconfig context; pass --context or "
+    "select a context with kubectl config use-context"
+)
 VERSION = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?P<prerelease>-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -101,6 +120,23 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def colorize(text, code, stream=None):
+    # Keep piped output, logs, and test captures free of ANSI escapes.
+    stream = sys.stdout if stream is None else stream
+    if (
+        os.environ.get("NO_COLOR")
+        or os.environ.get("TERM") == "dumb"
+        or not getattr(stream, "isatty", lambda: False)()
+    ):
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def step(index, total, title):
+    label = f"Step {index}/{total}: " if total > 1 else ""
+    print(f"\n{colorize(label + title, '1;36')}", flush=True)
+
+
 def fields(obj, required, optional=()):
     require(isinstance(obj, dict), "Configuration sections must be JSON objects")
     require(
@@ -111,6 +147,94 @@ def fields(obj, required, optional=()):
         require(key in obj and obj[key] != "", f"Missing configuration field: {key}")
 
 
+def current_context():
+    # Local kubeconfig read, not a cluster call. Keep it lazy so --check never
+    # requires kubectl or a kubeconfig.
+    result = subprocess.run(
+        ["kubectl", "config", "current-context"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    context = result.stdout.strip()
+    require(result.returncode == 0 and context, CONTEXT_ERROR)
+    return context
+
+
+def version_at_least(version, minimum):
+    match = VERSION.fullmatch(version)
+    require(match, f"Invalid version: {version}")
+    numbers = tuple(int(match.group(index)) for index in (1, 2, 3))
+    if numbers != minimum:
+        return numbers > minimum
+    # A prerelease sorts before its release, even when it already carries the fix.
+    return not match.group("prerelease")
+
+
+def require_host(name, host):
+    require(
+        isinstance(host, str)
+        and len(host) <= 253
+        and DNS.fullmatch(host)
+        and all(
+            0 < len(label) <= 63
+            and not label.startswith("-")
+            and not label.endswith("-")
+            for label in host.split(".")
+        ),
+        f"Invalid {name}.host",
+    )
+
+
+def resolve_hosts(config, apps_domain=None, distinct=True):
+    domain = apps_domain.strip().rstrip(".").lower() if apps_domain else ""
+    ns = config["namespace"]
+    for name in ("gateway", "dashboard"):
+        item = config[name]
+        if item.get("host") is None:
+            require(domain, f"An apps domain is required to derive {name}.host")
+            label = f"{name}-{ns}"
+            host = f"{label}.{domain}"
+            # Name the derived label, since the namespace is otherwise valid.
+            require(
+                len(label) <= 63,
+                f"Cannot derive {name}.host for namespace {ns!r}: the {label!r} "
+                "label exceeds the 63-character DNS limit; set "
+                f"{name}.host explicitly",
+            )
+            require(
+                len(host) <= 253,
+                f"Cannot derive {name}.host for namespace {ns!r}: {host!r} "
+                "exceeds the 253-character DNS limit; set "
+                f"{name}.host explicitly",
+            )
+            item["host"] = host
+        require_host(name, item["host"])
+    if distinct:
+        require(
+            config["gateway"]["host"] != config["dashboard"]["host"],
+            "Gateway and dashboard need distinct hosts",
+        )
+
+
+def resolve_main_hosts(config, check, apps_domain, cluster_domain):
+    """Resolve omitted hosts for the requested mode and report placeholders."""
+    missing = [
+        name for name in ("gateway", "dashboard") if config[name].get("host") is None
+    ]
+    if check:
+        require(apps_domain != "", "--apps-domain must be a nonempty DNS name")
+        placeholders = bool(missing) and apps_domain is None
+        resolve_hosts(
+            config,
+            apps_domain or PLACEHOLDER_APPS_DOMAIN,
+            distinct=not placeholders,
+        )
+        return placeholders
+    resolve_hosts(config, cluster_domain() if missing else None)
+    return False
+
+
 def load_config(path, namespace=None):
     config = json.loads(path.read_text())
     if namespace is not None:
@@ -118,7 +242,7 @@ def load_config(path, namespace=None):
         config["namespace"] = namespace
     fields(
         config,
-        ("namespace", "context", "gateway", "dashboard", "oidc"),
+        ("namespace", "gateway", "dashboard", "oidc"),
         ("agent_sandbox_namespace", "agent_sandbox_deployment"),
     )
     ns = config["namespace"]
@@ -139,13 +263,9 @@ def load_config(path, namespace=None):
                 isinstance(config[key], str) and DNS.fullmatch(config[key]),
                 f"Invalid {key}",
             )
-    require(
-        isinstance(config["context"], str) and config["context"].strip(),
-        "context is required",
-    )
     for name in ("gateway", "dashboard"):
         item = config[name]
-        fields(item, ("chart", "version", "host"), ("images", "values_files"))
+        fields(item, ("chart", "version"), ("host", "images", "values_files"))
         require(
             isinstance(item["chart"], str) and item["chart"].startswith("oci://"),
             f"{name}.chart must be an OCI chart reference",
@@ -179,19 +299,8 @@ def load_config(path, namespace=None):
                 raise ValueError(f"Invalid YAML in {name} values file") from None
             merge_values(overrides, overlay, EXTRA_VALUES[name])
         item["values"] = overrides
-        host = item["host"]
-        require(
-            isinstance(host, str)
-            and len(host) <= 253
-            and DNS.fullmatch(host)
-            and all(
-                0 < len(label) <= 63
-                and not label.startswith("-")
-                and not label.endswith("-")
-                for label in host.split(".")
-            ),
-            f"Invalid {name}.host",
-        )
+        if item.get("host") is not None:
+            require_host(name, item["host"])
         components = (
             ("gateway", "supervisor", "sandboxRuntime", "sandbox")
             if name == "gateway"
@@ -215,10 +324,6 @@ def load_config(path, namespace=None):
                     f"{name}.images.{component}.digest must be sha256: followed by "
                     "64 lowercase hexadecimal characters",
                 )
-    require(
-        config["gateway"]["host"] != config["dashboard"]["host"],
-        "Gateway and dashboard need distinct hosts",
-    )
     oidc = config["oidc"]
     fields(
         oidc,
@@ -230,6 +335,7 @@ def load_config(path, namespace=None):
             "client_secret_file",
             "ca_file",
             "scope",
+            "cli_client_id",
         ),
     )
     for key in (
@@ -243,6 +349,11 @@ def load_config(path, namespace=None):
         require(
             isinstance(oidc[key], str) and oidc[key].strip(),
             f"oidc.{key} must be a nonempty string",
+        )
+    if "cli_client_id" in oidc:
+        require(
+            isinstance(oidc["cli_client_id"], str) and oidc["cli_client_id"].strip(),
+            "oidc.cli_client_id must be a nonempty string",
         )
     issuer = urlsplit(oidc["issuer"])
     require(
@@ -332,6 +443,10 @@ def warn_if_dashboard_user_role_missing(manifest, role, chart_version):
 
 def chart_values(config):
     ns, oidc = config["namespace"], config["oidc"]
+    require(
+        config["gateway"].get("host") and config["dashboard"].get("host"),
+        "Hosts must be resolved before rendering chart values",
+    )
     ca = OIDC_CA if oidc.get("ca_file") else ""
     security = {"runAsUser": None, "seccompProfile": {"type": "RuntimeDefault"}}
     gateway = {
@@ -405,12 +520,122 @@ def chart_values(config):
     return gateway, dashboard
 
 
+def system_ca_bundle():
+    # The CLI normally runs on the workstation where the installer runs, so
+    # prefer the bundle that exists on this host.
+    for _label, candidate in SYSTEM_CA_BUNDLES:
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def cli_client_id(config):
+    """Return the public CLI client ID, namespace-qualified by default."""
+    return (
+        config["oidc"].get("cli_client_id") or f"{CLI_CLIENT_ID}-{config['namespace']}"
+    )
+
+
+def next_steps(config, context, config_dir):
+    ns = config["namespace"]
+    oidc = config["oidc"]
+    cli_client = cli_client_id(config)
+    gateway_dir = f"${{XDG_CONFIG_HOME:-$HOME/.config}}/openshell/gateways/{ns}/mtls"
+    gateway_url = f"https://{config['gateway']['host']}:443"
+    lines = [
+        colorize("Next steps:", "1"),
+        "",
+        "1. Install the OpenShell CLI that matches this gateway release:",
+        f"   curl -LsSf {CLI_INSTALL_URL} \\",
+        f"     | OPENSHELL_VERSION=v{config['gateway']['version']} sh",
+        "",
+        "   Note: the upstream installer also deploys and starts a local",
+        "   gateway on this workstation (a user service on Linux, a Homebrew",
+        "   service on macOS). This is a limitation of the upstream installer;",
+        "   this guide uses only the CLI. See the README for details.",
+        "",
+        "2. Register the gateway with the OpenShell CLI:",
+        f'   mkdir -p "{gateway_dir}"',
+        f"   kubectl --context {shlex.quote(context)} -n {ns} get secret openshell-client-tls \\",
+        "     -o jsonpath='{.data.ca\\.crt}' | base64 -d \\",
+        f'     > "{gateway_dir}/ca.crt"',
+    ]
+    if oidc.get("ca_file"):
+        bundle = system_ca_bundle()
+        bundle_file = Path(config_dir) / "ca-bundle.pem"
+        lines += [
+            "",
+            "   The OIDC issuer uses a private CA; add it to the trust bundle:",
+        ]
+        if bundle is None:
+            lines += [
+                "   Could not detect a system CA bundle on this host; substitute",
+                "   your platform's path below.",
+            ]
+        lines += [
+            f"   mkdir -p {shlex.quote(str(config_dir))}",
+            f"   cat {bundle or '<system-ca-bundle>'} \\",
+            f"     {shlex.quote(oidc['ca_file'])} \\",
+            f"     > {shlex.quote(str(bundle_file))}",
+            f"   export SSL_CERT_FILE={shlex.quote(str(bundle_file))}",
+            "",
+            "   Platform paths: "
+            + ", ".join(f"{label} {path}" for label, path in SYSTEM_CA_BUNDLES)
+            + ".",
+        ]
+    lines += [
+        "",
+        "   openshell gateway add \\",
+        f"     --name {ns} \\",
+        f"     --oidc-issuer {shlex.quote(oidc['issuer'])} \\",
+        f"     --oidc-client-id {shlex.quote(cli_client)} \\",
+        f"     --oidc-audience {shlex.quote(oidc['audience'])} \\",
+        f'     "{gateway_url}"',
+        "",
+        f"   Use your provider's CLI client ID if it is not {cli_client}.",
+        "",
+        "   The command opens a browser; sign in as a user that holds the",
+        f"   gateway's admin role ({oidc['admin_role']}) or user role",
+        f"   ({oidc['user_role']}). The gateway rejects API calls from a",
+        "   user with neither role.",
+        "",
+        "3. Check the connection:",
+        "   openshell status",
+        "",
+        "4. Create a sandbox:",
+        "   openshell sandbox create",
+        "",
+        "An administrator must add users to a workspace before they can work there.",
+        "The CLI targets the default workspace; pass --workspace <name> or export",
+        "OPENSHELL_WORKSPACE=<name> to use the workspace you were added to.",
+        "See deploy/rhoai/README.md#register-the-gateway-and-log-in for details.",
+    ]
+    return "\n".join(lines)
+
+
 class Installer:
-    def __init__(self, config, timeout):
+    def __init__(self, config, timeout, context=None, config_dir=None):
         self.config = config
         self.timeout = timeout
-        self.kube = ["kubectl", "--context", config["context"], "--request-timeout=30s"]
+        self.config_dir = Path(config_dir) if config_dir is not None else Path.cwd()
+        self._context = context
+        require(
+            self._context is None
+            or (isinstance(self._context, str) and self._context.strip()),
+            "context must be a nonempty string",
+        )
         self.ns = config["namespace"]
+
+    @property
+    def context(self):
+        # Resolved lazily so --check never reads the kubeconfig or runs kubectl.
+        if self._context is None:
+            self._context = current_context()
+        return self._context
+
+    @property
+    def kube(self):
+        return ["kubectl", "--context", self.context, "--request-timeout=30s"]
 
     def run(self, args, payload=None):
         # Never log stdin: it can contain Secret data. Do not echo commands.
@@ -428,6 +653,17 @@ class Installer:
         )
         return json.loads(output) if output.strip() else None
 
+    def apps_domain(self):
+        ingress = self.get("ingresses.config.openshift.io", "cluster", False)
+        domain = ((ingress or {}).get("spec") or {}).get("domain")
+        require(
+            isinstance(domain, str) and domain.strip(),
+            "Could not resolve the OpenShift apps domain from "
+            "ingresses.config.openshift.io/cluster; set gateway.host and "
+            "dashboard.host explicitly",
+        )
+        return domain.strip().rstrip(".").lower()
+
     def create(self, resource):
         self.run([*self.kube, "create", "-f", "-"], json.dumps(resource))
 
@@ -441,7 +677,7 @@ class Installer:
                 "manifest",
                 release,
                 "--kube-context",
-                self.config["context"],
+                self.context,
                 "--namespace",
                 self.ns,
             ]
@@ -478,7 +714,7 @@ class Installer:
                         "helm",
                         "list",
                         "--kube-context",
-                        self.config["context"],
+                        self.context,
                         "--namespace",
                         self.ns,
                         "--output",
@@ -524,7 +760,8 @@ class Installer:
     def cluster_checks(self, namespace):
         version = self.get("clusterversion.config.openshift.io", "version", False)
         print(
-            f"OpenShift: {(version or {}).get('status', {}).get('desired', {}).get('version', 'unknown')}"
+            f"{colorize('OpenShift version:', '1')} "
+            f"{(version or {}).get('status', {}).get('desired', {}).get('version', 'unknown')}"
         )
         storage = json.loads(
             self.run([*self.kube, "get", "storageclasses", "-o", "json"])
@@ -542,10 +779,16 @@ class Installer:
         ]
         require(
             defaults,
-            "No default StorageClass; the gateway chart's SQLite PVC requires one",
+            "No default StorageClass; the gateway's SQLite database needs one "
+            "that provisions block storage",
         )
+        classes = ", ".join(defaults)
         print(
-            f"Default storage: {', '.join(defaults)} (verify block-backed SQLite storage)"
+            f"{colorize('Default StorageClass:', '1')} {classes}\n"
+            "  The gateway's SQLite database runs on a PersistentVolumeClaim, so the\n"
+            "  default StorageClass must provision block volumes. The installer cannot\n"
+            "  detect the volume type; verify the default class is block-backed (not NFS\n"
+            "  or a shared filesystem) before installing."
         )
         custom = (
             self.config["gateway"]
@@ -559,6 +802,25 @@ class Installer:
                 "Configured workspaceStorageClass does not exist",
             )
         nodes = json.loads(self.run([*self.kube, "get", "nodes", "-o", "json"]))
+        arches = sorted(
+            {
+                item.get("status", {})
+                .get("nodeInfo", {})
+                .get("architecture", "unknown")
+                for item in nodes["items"]
+            }
+        )
+        print(
+            f"{colorize('Node architectures:', '1')} {', '.join(arches) or 'none reported'}"
+        )
+        require(
+            arches == ["amd64"],
+            "This installer supports amd64 clusters only. Mixed amd64/arm64 "
+            "clusters are not supported because the Red Hat Build of Agent "
+            "Sandbox Operator is not available on arm64. This cluster reports "
+            f"node architectures: {', '.join(arches) or 'none'}. Run the "
+            "installer against an amd64-only cluster.",
+        )
         kernels = sorted(
             {
                 item.get("status", {})
@@ -567,15 +829,38 @@ class Installer:
                 for item in nodes["items"]
             }
         )
-        print(f"Node kernels: {', '.join(kernels) or 'none reported'}")
-        if any(
-            (match := re.match(r"(\d+)\.(\d+)", kernel))
-            and tuple(map(int, match.groups())) < (5, 19)
+        print(
+            f"{colorize('Node kernels:', '1')} {', '.join(kernels) or 'none reported'}"
+        )
+        legacy = [
+            kernel
             for kernel in kernels
-        ):
+            if (match := re.match(r"(\d+)\.(\d+)", kernel))
+            and tuple(map(int, match.groups())) < (5, 19)
+        ]
+        if legacy:
+            fixes = ".".join(str(part) for part in LEGACY_KERNEL_FIX_RELEASE)
+            version = self.config["gateway"]["version"]
+            fixed = version_at_least(version, LEGACY_KERNEL_FIX_RELEASE)
             print(
-                "Note: kernels before 5.19 need an OpenShell build with the legacy-kernel fixes; verify sandbox networking."
+                colorize(
+                    f"{'Note' if fixed else 'Warning'}: node kernel(s) below 5.19: "
+                    f"{', '.join(legacy)}",
+                    "33",
+                )
             )
+            if fixed:
+                print(
+                    f"  The legacy-kernel fixes are included in OpenShell {fixes} and later.\n"
+                    "  No action is required if gateway.version and the images match this release."
+                )
+            else:
+                print(
+                    "  The default OpenShell network path requires kernel 5.19 or later.\n"
+                    f"  The legacy-kernel fixes are included in OpenShell {fixes} and later, but gateway.version is {version}.\n"
+                    f"  Pin a chart version of {fixes} or newer with matching images, then verify sandbox networking after the install.\n"
+                    "  This warning does not stop preflight."
+                )
         # Check actual installation operations instead of requiring wildcard
         # cluster-admin. These checks cannot prove RBAC bind/escalate or SCC admission.
         scoped = [
@@ -665,7 +950,11 @@ class Installer:
             data = other.get("data", {})
             if "oidc-issuer" not in data:
                 print(
-                    f"Note: legacy installer state in {other['metadata']['namespace']} has no identity metadata; verify audience isolation manually."
+                    colorize(
+                        f"Note: legacy installer state in {other['metadata']['namespace']} "
+                        "has no identity metadata; verify audience isolation manually.",
+                        "33",
+                    )
                 )
                 continue
             if data["oidc-issuer"].rstrip("/") == desired["oidc-issuer"].rstrip("/"):
@@ -676,6 +965,12 @@ class Installer:
                 )
 
     def preflight(self):
+        print(
+            f"{colorize('Target:', '1')}\n"
+            f"  kube context: {self.context}\n"
+            f"  namespace:    {self.ns}",
+            flush=True,
+        )
         self.run([*self.kube, "get", "--raw", "/apis/route.openshift.io/v1"])
         crd = self.get("crd", "sandboxes.agents.x-k8s.io", False)
         require(
@@ -827,8 +1122,11 @@ class Installer:
             )
             time.sleep(min(2, max(0, deadline - time.monotonic())))
 
-    def install(self, charts, values):
+    def install(self, charts, values, total_steps=3):
+        step(2, total_steps, "Running cluster preflight")
         namespace = self.preflight()
+        print(colorize("Cluster preflight passed.", "32"), flush=True)
+        step(3, total_steps, "Installing the gateway and dashboard")
         if not namespace:
             self.create(
                 {
@@ -870,7 +1168,10 @@ class Installer:
             )
         self.credentials()
         for index, release in enumerate(("openshell", "openshell-dashboard")):
-            print(f"Installing {release} in {self.ns}...", flush=True)
+            print(
+                f"{colorize(f'Installing {release}', '1')} in {self.ns}...",
+                flush=True,
+            )
             self.run(
                 [
                     "helm",
@@ -879,7 +1180,7 @@ class Installer:
                     release,
                     str(charts[index]),
                     "--kube-context",
-                    self.config["context"],
+                    self.context,
                     "--namespace",
                     self.ns,
                     "--values",
@@ -900,14 +1201,12 @@ class Installer:
                     "Gateway did not create its CA Secret",
                 )
             self.wait_for_route(release)
-        print(f"Dashboard: https://{self.config['dashboard']['host']}")
-        print(f"Gateway: https://{self.config['gateway']['host']}")
         print(
-            "Register the gateway with the CLI using its CA, then log in through customer OIDC."
+            f"{colorize('Dashboard:', '1')} https://{self.config['dashboard']['host']}"
         )
-        print(
-            "An administrator must add users to workspaces. Verify login, denied access, sandbox creation and terminals."
-        )
+        print(f"{colorize('Gateway:  ', '1')} https://{self.config['gateway']['host']}")
+        print()
+        print(next_steps(self.config, self.context, self.config_dir))
 
 
 def main():
@@ -916,6 +1215,14 @@ def main():
     parser.add_argument(
         "--namespace",
         help="Administrator-selected namespace; overrides config.namespace (created if missing)",
+    )
+    parser.add_argument(
+        "--context",
+        help="Kube context; defaults to the current kubeconfig context",
+    )
+    parser.add_argument(
+        "--apps-domain",
+        help="Apps domain used to derive omitted hosts during --check",
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
@@ -948,14 +1255,36 @@ def main():
         "Local source charts are only supported with --check; install versioned OCI artifacts",
     )
     require(
+        args.apps_domain is None or args.check,
+        "--apps-domain is only supported with --check",
+    )
+    require(
         re.fullmatch(r"[1-9][0-9]*[smh]", args.timeout),
         "Timeout must be a positive duration such as 10m",
     )
     for tool in ["helm"] if args.check else ["helm", "kubectl"]:
         require(shutil.which(tool), f"Required tool not found: {tool}")
     config = load_config(args.config.resolve(), args.namespace)
-    installer = Installer(config, args.timeout)
+    installer = Installer(
+        config, args.timeout, args.context, args.config.resolve().parent
+    )
+    placeholders = resolve_main_hosts(
+        config, args.check, args.apps_domain, installer.apps_domain
+    )
+    if placeholders:
+        print(
+            colorize(
+                "Note: the rendered hosts are derived from "
+                f"{PLACEHOLDER_APPS_DOMAIN} for this offline check; the install "
+                "derives them from the cluster ingress domain, or pass "
+                "--apps-domain.",
+                "33",
+            ),
+            flush=True,
+        )
     os.umask(0o077)
+    total_steps = 1 if args.check else 2 if args.preflight else 3
+    step(1, total_steps, "Rendering the gateway and dashboard charts")
     with tempfile.TemporaryDirectory(prefix="openshell-install-") as temporary:
         root = Path(temporary)
         charts, files = [], []
@@ -1017,22 +1346,31 @@ def main():
             charts.append(chart)
             files.append(value_file)
         print(
-            "Both charts rendered successfully. This does not verify cluster or API compatibility.",
+            f"{colorize('Both charts rendered successfully.', '32')} "
+            "This does not verify cluster or API compatibility.",
             flush=True,
         )
         if args.preflight:
+            step(2, total_steps, "Running cluster preflight")
             installer.preflight()
-            print("Cluster preflight passed; no installation resources were changed.")
+            print(
+                colorize(
+                    "Cluster preflight passed; no installation resources were changed.",
+                    "32",
+                ),
+                flush=True,
+            )
         elif not args.check:
-            installer.install(charts, files)
+            installer.install(charts, files, total_steps)
 
 
 if __name__ == "__main__":
     try:
         main()
     except (ValueError, RuntimeError, OSError, KeyError, TypeError) as error:
+        stopped = colorize("Installation stopped:", "1;31", sys.stderr)
         print(
-            f"Installation stopped: {error}\nCluster resources were not rolled back or deleted.",
+            f"{stopped} {error}\nCluster resources were not rolled back or deleted.",
             file=sys.stderr,
         )
         sys.exit(1)
