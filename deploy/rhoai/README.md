@@ -37,6 +37,7 @@ gateway highly available on its own.
   - [Database backend](#database-backend)
 - [Save the client secret](#save-the-client-secret)
 - [Save the database URI](#save-the-database-uri)
+- [Development PostgreSQL](#development-postgresql)
 - [Validate, preflight, and install](#validate-preflight-and-install)
 - [Register the gateway and log in](#register-the-gateway-and-log-in)
 - [Create and use a sandbox](#create-and-use-a-sandbox)
@@ -62,7 +63,9 @@ gateway highly available on its own.
 - A PostgreSQL database reachable from the cluster and a connection URI with
   the credentials the gateway uses. The installer creates the gateway Secret
   but does not provision PostgreSQL, validate connectivity, or check schema
-  compatibility. Only the SQLite opt-in avoids this requirement.
+  compatibility. Only the SQLite opt-in avoids this requirement. For
+  development, [Development PostgreSQL](#development-postgresql) deploys one
+  in the OpenShell namespace.
 - A default StorageClass for sandbox workspace volumes. SQLite mode also uses
   it for the gateway's database PVC; in PostgreSQL mode a configured
   `server.workspaceStorageClass` can satisfy the workspace requirement when
@@ -326,6 +329,106 @@ a `postgres://` or `postgresql://` scheme, a host, and no fragment. It never
 prints the URI and stores it only in the `openshell-gateway-db` Secret. Do not
 put credentials in the JSON, Helm values, or command arguments. Skip this step
 in SQLite mode.
+
+To deploy a development database in the OpenShell namespace and build this file
+from it, see [Development PostgreSQL](#development-postgresql).
+
+## Development PostgreSQL
+
+For development and evaluation, you can run PostgreSQL in the OpenShell
+namespace and build `gateway-db-uri.txt` from it. Use this instead of an
+external database. Substitute your namespace for `openshell-team` and your
+configuration directory for `$CONFIG_DIR`.
+
+The database must be running before the gateway starts. Create the namespace if
+it does not exist yet:
+
+```shell
+export NS=openshell-team
+export CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"
+oc get namespace "$NS" >/dev/null 2>&1 || oc create namespace "$NS"
+```
+
+Generate a hex password and store it in a Secret. A hex password needs no
+percent-encoding in the URI:
+
+```shell
+openssl rand -hex 16 | tr -d '\n' | \
+  oc -n "$NS" create secret generic openshell-db-secret \
+    --from-literal=username=openshell --from-file=password=/dev/stdin
+```
+
+Create the claim:
+
+```shell
+oc -n "$NS" apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openshell-db-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+EOF
+```
+
+Deploy PostgreSQL from the Red Hat hardened image:
+
+```shell
+oc -n "$NS" new-app registry.access.redhat.com/hi/postgresql:18.4 \
+  -e POSTGRES_USER=openshell \
+  -e POSTGRES_DATABASE=openshell \
+  -e PGDATA=/var/lib/postgresql/data/pgdata \
+  --name=openshell-db
+```
+
+Do not pass the password through `oc new-app`; it would appear in the process
+table and in the Deployment. Add the Secret reference and swap the emptyDir
+volume for the claim:
+
+```shell
+oc -n "$NS" patch deployment/openshell-db --type=json -p \
+  '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"POSTGRES_PASSWORD","valueFrom":{"secretKeyRef":{"name":"openshell-db-secret","key":"password"}}}}]'
+oc -n "$NS" set volume deployment/openshell-db \
+  --add --overwrite --name=openshell-db-volume-1 \
+  --type=persistentVolumeClaim \
+  --claim-name=openshell-db-data \
+  --mount-path=/var/lib/postgresql
+oc -n "$NS" rollout status deployment/openshell-db
+```
+
+The image names its volume `openshell-db-volume-1`. Inspect the Deployment if
+another image version uses a different name.
+
+Build the URI file from the Secret so the password appears neither on screen nor
+in the shell history:
+
+```shell
+umask 077
+DB_PASSWORD="$(oc -n "$NS" get secret openshell-db-secret \
+  -o jsonpath='{.data.password}' | base64 -d)"
+printf 'postgresql://openshell:%s@openshell-db.%s.svc.cluster.local:5432/openshell' \
+  "$DB_PASSWORD" "$NS" > "$CONFIG_DIR/gateway-db-uri.txt"
+unset DB_PASSWORD
+chmod 600 "$CONFIG_DIR/gateway-db-uri.txt"
+```
+
+During the install, the installer copies the URI into the
+`openshell-gateway-db` Secret. It does not create the database or check that the
+gateway can reach it. Because both run in the same namespace, the Service name
+resolves without cross-namespace policy. A default-deny egress policy still
+needs a rule that allows port 5432 to the database Service.
+
+The database is not part of a Helm release or the installer state. Remove it
+separately when you remove the installation:
+
+```shell
+oc -n "$NS" delete all -l app=openshell-db
+oc -n "$NS" delete pvc openshell-db-data secret openshell-db-secret
+```
 
 ## Validate, preflight, and install
 
@@ -711,6 +814,9 @@ holds the database password; it is not part of a Helm release, so
 SQLite installs leave the gateway's `openshell-data` PersistentVolumeClaim.
 PersistentVolumeClaims are not deleted by any of these commands; inspect and
 remove them deliberately. The installer never deletes the namespace for you.
+The development PostgreSQL from
+[Development PostgreSQL](#development-postgresql) is not installer-managed;
+delete its Deployment, Service, claim, and Secret separately.
 
 ## Troubleshoot common failures
 

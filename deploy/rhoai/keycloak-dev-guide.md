@@ -71,8 +71,7 @@ spec:
 EOF
 ```
 
-Deploy PostgreSQL from the Red Hat hardened image. `PGDATA` points to a
-subdirectory to avoid the `lost+found` conflict at the mount point:
+Deploy PostgreSQL from the Red Hat hardened image:
 
 ```shell
 oc -n "$KEYCLOAK_NS" new-app registry.access.redhat.com/hi/postgresql:18.4 \
