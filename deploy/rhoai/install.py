@@ -267,11 +267,10 @@ def load_config(path, namespace=None):
             )
     for name in ("gateway", "dashboard"):
         item = config[name]
-        fields(
-            item,
-            ("chart", "version"),
-            ("host", "images", "values_files", "database"),
-        )
+        optional = ["host", "images", "values_files"]
+        if name == "gateway":
+            optional.append("database")
+        fields(item, ("chart", "version"), tuple(optional))
         require(
             isinstance(item["chart"], str) and item["chart"].startswith("oci://"),
             f"{name}.chart must be an OCI chart reference",
@@ -614,7 +613,9 @@ def next_steps(config, context, config_dir):
             f"   mkdir -p {shlex.quote(str(config_dir))}",
             f"   cat {bundle or '<system-ca-bundle>'} \\",
             f"     {shlex.quote(oidc['ca_file'])} \\",
-            f"     > {shlex.quote(str(bundle_file))}",
+            f"     > {shlex.quote(str(bundle_file))}.tmp",
+            f"   mv {shlex.quote(str(bundle_file))}.tmp \\",
+            f"     {shlex.quote(str(bundle_file))}",
             f"   export SSL_CERT_FILE={shlex.quote(str(bundle_file))}",
             "",
             "   Platform paths: "

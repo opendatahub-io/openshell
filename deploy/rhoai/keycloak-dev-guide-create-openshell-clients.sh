@@ -42,6 +42,17 @@ umask 077
 : "${DASH_URL:?set DASH_URL, for example https://dashboard-openshell-team.apps.example.com}"
 : "${CONFIG_DIR:?set CONFIG_DIR, for example ${HOME}/.config/openshell-rhoai}"
 
+# Both URLs carry credentials or register OAuth origins, so refuse cleartext.
+for name in KC_URL DASH_URL; do
+  case "${!name}" in
+    https://?*) ;;
+    *)
+      echo "error: ${name} must be an https:// URL." >&2
+      exit 1
+      ;;
+  esac
+done
+
 assume_yes=false
 case "${1:-}" in
   -y | --yes) assume_yes=true ;;
@@ -137,7 +148,7 @@ echo "Requesting a Keycloak admin token from ${KC_URL}..."
 # Keep the admin password out of the process argument list, and keep both the
 # credentials and the token response in memory only.
 response=$(printf '%s' "$AP" | curl -sS --cacert "$CURL_CA" -w '\n%{http_code}' \
-  -d client_id=admin-cli -d "username=$AU" --data-urlencode "password@-" -d grant_type=password \
+  -d client_id=admin-cli --data-urlencode "username=$AU" --data-urlencode "password@-" -d grant_type=password \
   "$KC_URL/realms/master/protocol/openid-connect/token") || {
   echo "error: cannot reach ${KC_URL}." >&2
   exit 1
