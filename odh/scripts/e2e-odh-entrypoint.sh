@@ -258,6 +258,8 @@ status=0
 active_state=""
 active_mode=""
 child_pid=""
+kata_runtime_class="${KATA_CONTAINERS_RUNTIME_CLASS:-}"
+kata_label_restore=""
 results_dir="${OPENSHELL_E2E_RESULTS_DIR:-${ROOT}/results}"
 mkdir -p "${results_dir}"
 results_dir="$(cd "${results_dir}" && pwd)"
@@ -353,6 +355,11 @@ cleanup() {
 			}
 		fi
 		rm -rf "${active_state}"
+	fi
+	if [[ -n "${kata_label_restore}" ]] &&
+		! oc label runtimeclass "${kata_runtime_class}" "${kata_label_restore}" --overwrite --request-timeout=15s; then
+		echo "ERROR: could not restore the approval label on RuntimeClass ${kata_runtime_class}" >&2
+		[[ "${result}" != 0 ]] || result=1
 	fi
 	exit "${result}"
 }
@@ -459,6 +466,26 @@ if [[ "${has_python_runner}" == 1 ]]; then
 		"${SCRIPT_DIR}/run-python-e2e.sh" --collect-only; then
 		echo "ERROR: Python E2E preflight failed; see preceding output" >&2
 		exit 2
+	fi
+fi
+
+if [[ "${deploy_enabled}" != 0 && -n "${kata_runtime_class}" ]]; then
+	if [[ ! "${kata_runtime_class}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]]; then
+		echo "ERROR: KATA_CONTAINERS_RUNTIME_CLASS must be a valid RuntimeClass name" >&2
+		exit 1
+	fi
+	# Read key=value so an absent label and an explicitly empty value are distinct.
+	# shellcheck disable=SC2016
+	if ! previous_kata_label="$(oc get runtimeclass "${kata_runtime_class}" --request-timeout=15s \
+		-o 'go-template={{range $key, $value := .metadata.labels}}{{if eq $key "openshell.ai/sandbox-attachable"}}{{$key}}={{$value}}{{end}}{{end}}')"; then
+		echo "ERROR: could not read RuntimeClass ${kata_runtime_class}" >&2
+		exit 1
+	fi
+	if [[ "${previous_kata_label}" != openshell.ai/sandbox-attachable=true ]]; then
+		kata_label_restore="${previous_kata_label:-openshell.ai/sandbox-attachable-}"
+		printf '>> Temporarily approving RuntimeClass %s. Manual restoration command: oc label runtimeclass %q %q --overwrite\n' \
+			"${kata_runtime_class}" "${kata_runtime_class}" "${kata_label_restore}"
+		oc label runtimeclass "${kata_runtime_class}" openshell.ai/sandbox-attachable=true --overwrite --request-timeout=15s
 	fi
 fi
 

@@ -428,7 +428,7 @@ helm upgrade --install "${RELEASE}" "${CHART}" \
 	--namespace "${NAMESPACE}" --create-namespace \
 	"${helm_value_args[@]}" \
 	"${image_helm_args[@]}" \
-	"${runtime_class_args[@]}" \
+	${runtime_class_args[0]+"${runtime_class_args[@]}"} \
 	--set "openshiftRoute.host=${ROUTE_HOST}" \
 	--set "pkiInitJob.serverDnsNames[0]=${ROUTE_HOST}"
 
