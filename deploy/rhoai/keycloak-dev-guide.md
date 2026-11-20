@@ -1,11 +1,11 @@
 # Install Keycloak for OpenShell development on OpenShift
 
-This guide is for development only. It is not a production Keycloak
+This guide is for development only and is not a production Keycloak
 deployment: it runs one PostgreSQL instance and one Keycloak instance with
 bootstrap credentials, and the client helper verifies the Keycloak Route
 against the cluster ingress CA.
 
-This guide deploys and removes a development Keycloak instance only. Use
+It deploys and removes a development Keycloak instance only. Use
 [README.md](README.md) to install OpenShell and the OpenShell Dashboard admin UI.
 Follow this guide first when you need a local identity provider; skip it when
 your cluster already has an OIDC provider.
@@ -38,7 +38,7 @@ Realm roles are realm-wide. In a shared realm, a user with `openshell-admin` is
 an administrator for every gateway in that realm, regardless of the client IDs.
 Use one realm per trust boundary when gateways serve different teams.
 
-## Part 1 — PostgreSQL and Keycloak
+## Part 1: PostgreSQL and Keycloak
 
 ### Create the namespace and database secret
 
@@ -224,7 +224,7 @@ After the permanent administrator can log in, delete the bootstrap user:
 **Users** → `temp-admin` → **Delete**. Leaving it in place keeps a well-known
 development credential valid for the lifetime of the realm.
 
-## Part 2 — Realm configuration
+## Part 2: Realm configuration
 
 Perform these steps in the Keycloak admin console unless a section says
 otherwise. The command-line script in this part creates the realm, roles, and
@@ -244,8 +244,8 @@ echo "Redirect URI:            ${DASH_URL}/oauth2/callback"
 echo "Post logout URI:         ${DASH_URL}/*"
 ```
 
-Replace each whole template in the console steps — `openshell-api-${NS}`,
-`openshell-dashboard-${NS}`, `openshell-cli-${NS}`, and `${DASH_URL}` — with
+Replace each whole template in the console steps (`openshell-api-${NS}`,
+`openshell-dashboard-${NS}`, `openshell-cli-${NS}`, and `${DASH_URL}`) with
 the printed value. Keep the `/oauth2/callback` and `/*` suffixes. Do not
 replace only `${NS}`: the printed client IDs already include their prefixes.
 

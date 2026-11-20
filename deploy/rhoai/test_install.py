@@ -25,7 +25,9 @@ spec.loader.exec_module(installer)
 
 
 def configuration(with_hosts=True):
-    config_path = Path(__file__).with_name("config-examples") / "config.example.json"
+    config_path = (
+        Path(__file__).with_name("config-examples") / "config.example-sqlite.json"
+    )
     config = json.loads(config_path.read_text())
     if with_hosts:
         # Keep the existing suite deterministic; the examples omit these.
@@ -163,6 +165,19 @@ class InstallTests(unittest.TestCase):
         secret.write_text("a-secret-that-must-not-appear-in-argv\n")
         self.config["oidc"]["client_secret_file"] = str(secret)
         return FakeCluster(self.load())
+
+    def database_config(self, mode="postgresql", uri=None):
+        if mode == "postgresql":
+            value = (
+                uri
+                if uri is not None
+                else "postgresql://openshell:secret@db.example.com:5432/openshell"
+            )
+            (self.root / "gateway-db-uri.txt").write_text(value + "\n")
+        self.config["gateway"]["database"] = {"mode": mode}
+        if mode == "postgresql":
+            self.config["gateway"]["database"]["uri_file"] = "gateway-db-uri.txt"
+        return self.config
 
     def test_rejects_unpinned_versions_and_unknown_keys(self):
         for version in (
@@ -328,6 +343,182 @@ class InstallTests(unittest.TestCase):
             self.assertFalse(
                 any(args[:2] == ["helm", "upgrade"] for args, _ in cluster.calls)
             )
+
+    def test_postgresql_is_the_default_and_renders_a_deployment(self):
+        (self.root / installer.DB_URI_FILE).write_text(
+            "postgresql://openshell:secret@db.example.com:5432/openshell\n"
+        )
+        self.config["gateway"].pop("database")
+        config = self.load()
+        self.assertEqual(config["gateway"]["database"]["mode"], "postgresql")
+        self.assertEqual(
+            config["gateway"]["database"]["uri_file"],
+            str(self.root / installer.DB_URI_FILE),
+        )
+        gateway, _ = installer.chart_values(config)
+        self.assertEqual(gateway["workload"], {"kind": "deployment"})
+        self.assertEqual(gateway["server"]["externalDbSecret"], installer.DB_SECRET)
+        self.assertNotIn("dbUrl", gateway["server"])
+        self.assertEqual(gateway["replicaCount"], 1)
+
+    def test_sqlite_mode_keeps_chart_defaults_and_needs_no_uri_file(self):
+        config = self.load()
+        self.assertEqual(config["gateway"]["database"], {"mode": "sqlite"})
+        gateway, _ = installer.chart_values(config)
+        self.assertNotIn("workload", gateway)
+        self.assertNotIn("externalDbSecret", gateway["server"])
+        cluster = self.cluster()
+        self.assertIsNone(cluster.database_uri())
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        self.assertNotIn(("secret", installer.DB_SECRET), cluster.objects)
+
+    def test_database_configuration_validation(self):
+        (self.root / installer.DB_URI_FILE).write_text(
+            "postgresql://openshell:secret@db.example.com:5432/openshell\n"
+        )
+        cases = (
+            ({"mode": "mysql"}, "must be sqlite or postgresql"),
+            (
+                {"mode": "sqlite", "uri_file": installer.DB_URI_FILE},
+                "only valid for postgresql",
+            ),
+            (
+                {
+                    "mode": "postgresql",
+                    "uri": "postgresql://openshell:secret@db.example.com/db",
+                },
+                "Unknown configuration fields",
+            ),
+            (
+                {"mode": "postgresql", "uri_file": "missing.txt"},
+                "Missing or empty",
+            ),
+            ({"mode": None}, "must be sqlite or postgresql"),
+        )
+        for database, message in cases:
+            with self.subTest(database=database):
+                self.config = configuration()
+                self.config["gateway"]["database"] = database
+                with self.assertRaisesRegex(ValueError, message):
+                    self.load()
+
+    def test_database_uri_validation(self):
+        accepted = (
+            "postgres://openshell:secret@db.example.com:5432/openshell",
+            "postgresql://openshell:secret@db.example.com/openshell?sslmode=require",
+        )
+        rejected = (
+            "mysql://openshell:secret@db.example.com/openshell",
+            "",
+            "\n",
+            "postgresql://openshell:secret@db.example.com/openshell#fragment",
+            "postgresql://openshell:sécrét@db.example.com/openshell",
+        )
+        for uri in accepted + rejected:
+            with self.subTest(uri=uri):
+                self.config = configuration()
+                self.database_config(uri=uri)
+                try:
+                    cluster = self.cluster()
+                except ValueError:
+                    self.assertNotIn(uri, accepted)
+                    continue
+                if uri in accepted:
+                    self.assertEqual(cluster.database_uri(), uri.encode())
+                else:
+                    with self.assertRaises(ValueError):
+                        cluster.database_uri()
+
+    def test_database_secret_is_stdin_only_and_rotation_is_explicit(self):
+        self.database_config()
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        secret = cluster.objects[("secret", installer.DB_SECRET)]
+        uri = "postgresql://openshell:secret@db.example.com:5432/openshell"
+        self.assertEqual(base64.b64decode(secret["data"]["uri"]), uri.encode())
+        self.assertEqual(
+            secret["metadata"]["labels"][installer.OWNER], installer.OWNER_VALUE
+        )
+        self.assertEqual(
+            cluster.objects[("configmap", installer.INSTALL_STATE)]["data"][
+                "database-mode"
+            ],
+            "postgresql",
+        )
+        for args, _payload in cluster.calls:
+            self.assertNotIn("openshell:secret", " ".join(args))
+            self.assertNotIn("db.example.com", " ".join(args))
+
+        cluster.calls.clear()
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        self.assertFalse(
+            any("create" in args and "can-i" not in args for args, _ in cluster.calls)
+        )
+
+        Path(cluster.config["gateway"]["database"]["uri_file"]).write_text(
+            "postgresql://openshell:other@db.example.com:5432/openshell\n"
+        )
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "differs"):
+            cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        self.assertEqual(cluster.objects, before)
+
+    def test_postgresql_storage_requirements(self):
+        self.database_config()
+        cluster = self.cluster()
+        cluster.storage = []
+        with self.assertRaisesRegex(ValueError, "workspaceStorageClass"):
+            cluster.preflight()
+        cluster.config["gateway"]["values"] = {
+            "server": {"workspaceStorageClass": "nfs"}
+        }
+        cluster.storage = [{"metadata": {"name": "nfs"}}]
+        cluster.preflight()
+
+        self.config = configuration()
+        cluster = self.cluster()
+        cluster.config["gateway"]["values"] = {
+            "server": {"workspaceStorageClass": "nfs"}
+        }
+        cluster.storage = [{"metadata": {"name": "nfs"}}]
+        with self.assertRaisesRegex(ValueError, "SQLite"):
+            cluster.preflight()
+
+    def test_database_state_blocks_switching_and_reads_legacy_state_as_sqlite(self):
+        cluster = self.cluster()
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        self.database_config()
+        cluster.config = self.load()
+        with self.assertRaisesRegex(ValueError, "Database backend differs"):
+            cluster.preflight()
+
+        self.config = configuration()
+        legacy = self.cluster()
+        legacy.objects[("namespace", legacy.ns)] = {"metadata": {}}
+        legacy.objects[("configmap", installer.INSTALL_STATE)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
+            "data": {"gateway-host": legacy.config["gateway"]["host"]},
+        }
+        legacy.preflight()
+        self.config = configuration()
+        self.config["gateway"].pop("database")
+        (self.root / installer.DB_URI_FILE).write_text(
+            "postgresql://openshell:secret@db.example.com:5432/openshell\n"
+        )
+        legacy.config = self.load()
+        with self.assertRaisesRegex(ValueError, "Database backend differs"):
+            legacy.preflight()
+
+    def test_database_preflight_reports_without_creating_the_secret(self):
+        self.database_config()
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.preflight()
+        self.assertIn("will be created", output.getvalue())
+        self.assertNotIn(("secret", installer.DB_SECRET), cluster.objects)
 
     def test_cross_namespace_identity_reuse_is_rejected(self):
         for field in ("oidc-audience", "oidc-client-id"):
@@ -966,16 +1157,30 @@ class InstallTests(unittest.TestCase):
     def test_pinned_example_configs_load(self):
         examples = Path(__file__).with_name("config-examples")
         for path in sorted(examples.glob("config.example-*.json")):
+            # The generic example keeps placeholders; only pinned examples load.
+            if "REPLACE_WITH" in path.read_text():
+                continue
             with self.subTest(path=path.name):
                 target = self.root / path.name
                 target.write_text(path.read_text())
                 (self.root / "dashboard-client-secret.txt").write_text("secret\n")
                 (self.root / "ingress-ca.crt").write_text("test CA\n")
+                (self.root / "gateway-db-uri.txt").write_text(
+                    "postgresql://openshell:secret@db.example.com:5432/openshell\n"
+                )
                 config = installer.load_config(target)
                 installer.resolve_hosts(config, "apps.example.com")
                 self.assertNotEqual(
                     config["gateway"]["host"], config["dashboard"]["host"]
                 )
+
+    def test_example_filenames_name_the_database_mode(self):
+        examples = Path(__file__).with_name("config-examples")
+        for path in sorted(examples.glob("config.example*.json")):
+            database = json.loads(path.read_text())["gateway"]["database"]
+            expected = "sqlite" if "sqlite" in path.name else "postgresql"
+            with self.subTest(path=path.name):
+                self.assertEqual(database["mode"], expected)
 
     def test_resolve_hosts_derives_namespace_qualified_hosts(self):
         self.config = configuration(with_hosts=False)

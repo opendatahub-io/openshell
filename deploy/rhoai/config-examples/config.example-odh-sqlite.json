@@ -4,6 +4,9 @@
     "chart": "oci://ghcr.io/nvidia/openshell/helm-chart",
     "version": "0.1.7",
     "values_files": [],
+    "database": {
+      "mode": "sqlite"
+    },
     "images": {
       "gateway": {
         "registry": "quay.io",

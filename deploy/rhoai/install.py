@@ -31,6 +31,8 @@ GATEWAY_HOST = "openshell.ai/installer-gateway-host"
 INSTALL_STATE = "openshell-installer"
 OIDC_SECRET = "openshell-dashboard-oidc"
 OIDC_CA = "openshell-oidc-ca"
+DB_SECRET = "openshell-gateway-db"
+DB_URI_FILE = "gateway-db-uri.txt"
 MIN_DASHBOARD_USER_ROLE_CHART = (0, 1, 2)
 CLI_CLIENT_ID = "openshell-cli"
 CLI_INSTALL_URL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh"
@@ -265,7 +267,11 @@ def load_config(path, namespace=None):
             )
     for name in ("gateway", "dashboard"):
         item = config[name]
-        fields(item, ("chart", "version"), ("host", "images", "values_files"))
+        fields(
+            item,
+            ("chart", "version"),
+            ("host", "images", "values_files", "database"),
+        )
         require(
             isinstance(item["chart"], str) and item["chart"].startswith("oci://"),
             f"{name}.chart must be an OCI chart reference",
@@ -324,6 +330,35 @@ def load_config(path, namespace=None):
                     f"{name}.images.{component}.digest must be sha256: followed by "
                     "64 lowercase hexadecimal characters",
                 )
+        if name == "gateway":
+            database = item.get("database")
+            if database is None:
+                database = {"mode": "postgresql"}
+            fields(database, (), ("mode", "uri_file"))
+            mode = database.get("mode", "postgresql")
+            require(
+                mode in ("sqlite", "postgresql"),
+                "gateway.database.mode must be sqlite or postgresql",
+            )
+            if mode == "sqlite":
+                require(
+                    "uri_file" not in database,
+                    "gateway.database.uri_file is only valid for postgresql",
+                )
+            else:
+                uri_file = database.get("uri_file", DB_URI_FILE)
+                require(
+                    isinstance(uri_file, str) and uri_file.strip(),
+                    "gateway.database.uri_file must be a nonempty path",
+                )
+                source = (path.parent / uri_file).resolve()
+                require(
+                    source.is_file() and source.stat().st_size > 0,
+                    "Missing or empty gateway.database.uri_file",
+                )
+                database["uri_file"] = str(source)
+            database["mode"] = mode
+            item["database"] = database
     oidc = config["oidc"]
     fields(
         oidc,
@@ -483,6 +518,9 @@ def chart_values(config):
         },
         "openshiftRoute": {"enabled": True, "host": config["gateway"]["host"]},
     }
+    if config["gateway"]["database"]["mode"] == "postgresql":
+        gateway["workload"] = {"kind": "deployment"}
+        gateway["server"]["externalDbSecret"] = DB_SECRET
     dashboard = {
         "fullnameOverride": "openshell-dashboard",
         "podSecurityContext": None,
@@ -777,25 +815,40 @@ class Installer:
                 )
             )
         ]
-        require(
-            defaults,
-            "No default StorageClass; the gateway's SQLite database needs one "
-            "that provisions block storage",
-        )
-        classes = ", ".join(defaults)
-        print(
-            f"{colorize('Default StorageClass:', '1')} {classes}\n"
-            "  The gateway's SQLite database runs on a PersistentVolumeClaim, so the\n"
-            "  default StorageClass must provision block volumes. The installer cannot\n"
-            "  detect the volume type; verify the default class is block-backed (not NFS\n"
-            "  or a shared filesystem) before installing."
-        )
+        mode = self.config["gateway"]["database"]["mode"]
         custom = (
             self.config["gateway"]
             .get("values", {})
             .get("server", {})
             .get("workspaceStorageClass")
         )
+        if mode == "sqlite":
+            require(
+                defaults,
+                "No default StorageClass; the gateway's SQLite database needs one "
+                "that provisions block storage",
+            )
+            print(
+                f"{colorize('Default StorageClass:', '1')} {', '.join(defaults)}\n"
+                "  SQLite mode stores the gateway database on a PersistentVolumeClaim,\n"
+                "  so the default StorageClass must provision block volumes. The\n"
+                "  installer cannot detect the volume type; verify the default class is\n"
+                "  block-backed (not NFS or a shared filesystem) before installing."
+            )
+        else:
+            require(
+                defaults or custom,
+                "No default StorageClass and no server.workspaceStorageClass; "
+                "sandbox workspace volumes require one",
+            )
+            print(
+                f"{colorize('Default StorageClass:', '1')} "
+                f"{', '.join(defaults) or 'none (using server.workspaceStorageClass)'}\n"
+                "  PostgreSQL mode keeps the gateway database outside the cluster and\n"
+                "  creates no gateway PVC. Sandbox workspace volumes still need a\n"
+                "  StorageClass; a configured server.workspaceStorageClass can provide\n"
+                "  one when the cluster has no default class."
+            )
         if custom:
             require(
                 any(item["metadata"]["name"] == custom for item in storage["items"]),
@@ -913,6 +966,7 @@ class Installer:
     def identity_state(self):
         return {
             "gateway-host": self.config["gateway"]["host"],
+            "database-mode": self.config["gateway"]["database"]["mode"],
             **{
                 f"oidc-{key.replace('_', '-')}": self.config["oidc"][key]
                 for key in ("issuer", "audience", "client_id")
@@ -921,6 +975,16 @@ class Installer:
 
     def check_identity(self, state):
         desired = self.identity_state()
+        if state is not None:
+            recorded = state.get("data", {}).get("database-mode", "sqlite")
+            require(
+                recorded == desired["database-mode"],
+                "Database backend differs from the installer state "
+                f"({recorded!r} recorded, {desired['database-mode']!r} "
+                "configured); keep SQLite by setting gateway.database.mode to "
+                '"sqlite", or migrate the data explicitly before changing the '
+                "backend",
+            )
         for key, value in (state or {}).get("data", {}).items():
             if key in desired:
                 require(
@@ -1042,8 +1106,77 @@ class Installer:
             state or legacy_host or self.config["oidc"].get("client_secret_file"),
             "oidc.client_secret_file is required for the first install",
         )
+        self.database(namespace_exists=bool(namespace), check_only=True)
         self.credentials(check_only=True, namespace_exists=bool(namespace))
         return namespace
+
+    def database_uri(self):
+        database = self.config["gateway"]["database"]
+        if database["mode"] != "postgresql":
+            return None
+        uri = Path(database["uri_file"]).read_bytes().rstrip(b"\r\n")
+        require(uri, "Database URI file contains no URI")
+        try:
+            text = uri.decode("ascii")
+        except UnicodeDecodeError:
+            raise ValueError("Database URI must be ASCII") from None
+        parsed = None
+        try:
+            parsed = urlsplit(text)
+            hostname = parsed.hostname
+        except ValueError:
+            hostname = None
+        require(
+            parsed is not None
+            and parsed.scheme in ("postgresql", "postgres")
+            and hostname
+            and not parsed.fragment,
+            "Database URI must be a postgresql:// or postgres:// URL with a host",
+        )
+        return uri
+
+    def database(self, *, namespace_exists, check_only=False):
+        uri = self.database_uri()
+        if uri is None:
+            return
+        print(
+            f"{colorize('Database:', '1')} external PostgreSQL via Secret {DB_SECRET}"
+        )
+        if not namespace_exists:
+            return
+        existing = self.get("secret", DB_SECRET)
+        if existing is None:
+            if check_only:
+                print(f"  Secret {DB_SECRET} will be created during the install.")
+            return
+        data = existing.get("data", {})
+        require(
+            data.get("uri"),
+            f"Existing Secret {DB_SECRET} is missing the uri key",
+        )
+        require(
+            base64.b64decode(data["uri"]) == uri,
+            f"Database URI differs from Secret {DB_SECRET}; rotate the Secret "
+            "explicitly before rerunning",
+        )
+
+    def database_secret(self):
+        uri = self.database_uri()
+        if uri is None or self.get("secret", DB_SECRET) is not None:
+            return
+        self.create(
+            {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "type": "Opaque",
+                "metadata": {
+                    "name": DB_SECRET,
+                    "namespace": self.ns,
+                    "labels": {OWNER: OWNER_VALUE},
+                },
+                "data": {"uri": base64.b64encode(uri).decode()},
+            }
+        )
 
     def credentials(self, check_only=False, *, namespace_exists=True):
         require(
@@ -1166,6 +1299,8 @@ class Installer:
                     json.dumps({"data": self.identity_state()}),
                 ]
             )
+        self.database_secret()
+        self.database(namespace_exists=True)
         self.credentials()
         for index, release in enumerate(("openshell", "openshell-dashboard")):
             print(

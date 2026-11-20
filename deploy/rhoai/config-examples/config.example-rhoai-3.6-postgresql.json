@@ -4,6 +4,10 @@
     "chart": "oci://ghcr.io/nvidia/openshell/helm-chart",
     "version": "0.1.3",
     "values_files": [],
+    "database": {
+      "mode": "postgresql",
+      "uri_file": "gateway-db-uri.txt"
+    },
     "images": {
       "gateway": {
         "registry": "registry.redhat.io",
