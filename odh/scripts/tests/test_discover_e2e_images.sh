@@ -66,6 +66,7 @@ setup() {
 	# Unset image env vars.
 	unset GATEWAY_IMAGE SANDBOX_IMAGE SUPERVISOR_IMAGE IMAGE_TAG GATEWAY_IMAGE_DIGEST
 	unset OPENSHELL_E2E_REPORT_MERGER OPENSHELL_E2E_REPLACE_EXISTING OPENSHELL_E2E_DEPLOY_STATE_DIR
+	unset KATA_CONTAINERS_RUNTIME_CLASS FAKE_PHASE_STATUS
 	export PYTHON_BIN="${TEST_PYTHON}"
 	export KUBECONFIG="${WORK_DIR}/kubeconfig"
 	: > "${KUBECONFIG}"
@@ -123,6 +124,18 @@ if [[ "$1" == "get" && "$2" == "clusterserviceversions.operators.coreos.com" ]];
 	exit 1
 fi
 if [[ "$1" == whoami ]]; then echo test-user; exit 0; fi
+if [[ "$1" == get && "$2" == runtimeclass ]]; then
+	cat "${WORK}/runtimeclass-label"
+	exit 0
+fi
+if [[ "$1" == label && "$2" == runtimeclass ]]; then
+	case "$4" in
+		openshell.ai/sandbox-attachable-) : > "${WORK}/runtimeclass-label" ;;
+		openshell.ai/sandbox-attachable=*) printf '%s' "$4" > "${WORK}/runtimeclass-label" ;;
+		*) exit 89 ;;
+	esac
+	exit 0
+fi
 if [[ "$1" == get && "$2" == namespaces ]]; then exit 0; fi
 # Stop the real deployment script before its first cluster mutation.
 if [[ "$1" == get && "$2" == namespace ]]; then exit 71; fi
@@ -133,6 +146,9 @@ FAKEOC
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'deploy|%s|%s|%s|%s\n' "$*" "${GATEWAY_IMAGE:-}" "${SANDBOX_IMAGE:-}" "${SUPERVISOR_IMAGE:-}" >> "${FAKE_OC_WORK_DIR}/calls"
+if [[ -n "${KATA_CONTAINERS_RUNTIME_CLASS:-}" ]]; then
+	[[ "$(cat "${FAKE_OC_WORK_DIR}/runtimeclass-label")" == openshell.ai/sandbox-attachable=true ]]
+fi
 if [[ "$1" == deploy ]]; then : > "${OPENSHELL_E2E_DEPLOY_STATE_DIR}/namespace"; fi
 FAKEDEPLOY
 	cat > "${WORK_DIR}/bin/phase" <<'FAKEPHASE'
@@ -140,6 +156,7 @@ FAKEDEPLOY
 set -euo pipefail
 printf 'phase|%s\n' "$*" >> "${FAKE_OC_WORK_DIR}/calls"
 printf '<testsuite name="fake"><testcase classname="fake" name="%s"/></testsuite>\n' "$2" > "$3"
+exit "${FAKE_PHASE_STATUS:-0}"
 FAKEPHASE
 	cat > "${WORK_DIR}/bin/python-e2e" <<'FAKEPYTHON'
 #!/usr/bin/env bash
@@ -602,9 +619,24 @@ test_images_exported_across_phases() {
 }
 run_test "Images are resolved once and exported to both phases" test_images_exported_across_phases
 
+test_kata_runtimeclass_label() {
+	local original="$1" patches="$2" test_status="$3"
+	setup; setup_rhoai_csv
+	export KATA_CONTAINERS_RUNTIME_CLASS=kata FAKE_PHASE_STATUS="${test_status}"
+	printf '%s' "${original}" > "${WORK_DIR}/runtimeclass-label"
+	run_script "${test_status}" "${ENTRYPOINT}" tier2
+	[[ "$(cat "${WORK_DIR}/runtimeclass-label")" == "${original}" ]]
+	assert_count "${patches}" '^oc|label runtimeclass kata '
+	assert_count 2 '^deploy|teardown '
+	assert_count 2 '^phase|'
+}
+run_test "Kata approval is removed after a test failure" test_kata_runtimeclass_label '' 2 17
+run_test "An explicitly empty Kata approval value is restored" test_kata_runtimeclass_label 'openshell.ai/sandbox-attachable=' 2 0
+run_test "Existing Kata approval works without patching the RuntimeClass" test_kata_runtimeclass_label 'openshell.ai/sandbox-attachable=true' 0 0
+
 test_no_deploy_skips_discovery() {
 	setup
-	export OPENSHELL_E2E_DEPLOY_GATEWAY=0
+	export OPENSHELL_E2E_DEPLOY_GATEWAY=0 KATA_CONTAINERS_RUNTIME_CLASS=kata
 	run_script 0 "${ENTRYPOINT}" smoke
 	assert_count 0 '^oc|'
 	assert_count 0 '^deploy|'

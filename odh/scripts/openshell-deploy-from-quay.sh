@@ -31,6 +31,7 @@
 #   WORKLOAD_IMAGE   optional default sandbox workload image reference (bare repository uses WORKLOAD_IMAGE_TAG)
 #   WORKLOAD_IMAGE_TAG optional workload image tag (default: latest)
 #   WORKLOAD_IMAGE_DIGEST optional workload image digest override
+#   KATA_CONTAINERS_RUNTIME_CLASS optional approved RuntimeClass for sandbox pods
 #   NAMESPACE        target k8s namespace (default: openshell)
 #   RELEASE          Helm release name (default: openshell)
 #   ROUTE_HOST       gateway Route hostname (default: openshell.<apps domain>)
@@ -135,9 +136,22 @@ fi
 echo ">> Verifying oc session"
 oc whoami >/dev/null
 
+runtime_class_args=()
 if [[ "${ACTION}" == deploy ]]; then
 	if ! oc api-resources --api-group=route.openshift.io 2>/dev/null | grep -q routes; then
 		fail "route.openshift.io not found; this does not look like an OpenShift cluster"
+	fi
+	if [[ -n "${KATA_CONTAINERS_RUNTIME_CLASS:-}" ]]; then
+		runtime_class="${KATA_CONTAINERS_RUNTIME_CLASS}"
+		[[ "${runtime_class}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$ ]] ||
+			fail "KATA_CONTAINERS_RUNTIME_CLASS must be a valid RuntimeClass name"
+		approval="$(oc get runtimeclass "${runtime_class}" \
+			-o 'go-template={{index .metadata.labels "openshell.ai/sandbox-attachable"}}')" ||
+			fail "cannot read RuntimeClass ${runtime_class}"
+		[[ "${approval}" == true ]] ||
+			fail "RuntimeClass ${runtime_class} must have openshell.ai/sandbox-attachable=true"
+		echo ">> Using RuntimeClass '${runtime_class}' for sandbox pods"
+		runtime_class_args=(--set-string "server.defaultRuntimeClassName=${runtime_class}")
 	fi
 fi
 
@@ -414,6 +428,7 @@ helm upgrade --install "${RELEASE}" "${CHART}" \
 	--namespace "${NAMESPACE}" --create-namespace \
 	"${helm_value_args[@]}" \
 	"${image_helm_args[@]}" \
+	${runtime_class_args[0]+"${runtime_class_args[@]}"} \
 	--set "openshiftRoute.host=${ROUTE_HOST}" \
 	--set "pkiInitJob.serverDnsNames[0]=${ROUTE_HOST}"
 

@@ -19,7 +19,7 @@ HELM_LOG="${WORKDIR}/helm.log"
 # which validation path a negative fixture exercises.
 unset GATEWAY_IMAGE GATEWAY_IMAGE_DIGEST SUPERVISOR_IMAGE SUPERVISOR_IMAGE_DIGEST
 unset SANDBOX_IMAGE SANDBOX_IMAGE_DIGEST WORKLOAD_IMAGE WORKLOAD_IMAGE_TAG WORKLOAD_IMAGE_DIGEST
-unset IMAGE_TAG QUAY_NAMESPACE
+unset IMAGE_TAG QUAY_NAMESPACE KATA_CONTAINERS_RUNTIME_CLASS ODH_TEST_RUNTIME_CLASS_APPROVAL
 
 cleanup() {
 	rm -rf "${WORKDIR}"
@@ -39,6 +39,11 @@ if [[ "${joined}" == *" whoami "* ]]; then
 	exit 0
 fi
 if [[ "${joined}" == *" api-resources "* ]]; then echo routes; exit 0; fi
+if [[ "${joined}" == *" get runtimeclass "* ]]; then
+	[[ "${3:-}" == kata ]] || exit 1
+	printf '%s\n' "${ODH_TEST_RUNTIME_CLASS_APPROVAL:-true}"
+	exit 0
+fi
 if [[ "${joined}" == *" get ingresses.config/cluster "* ]]; then echo apps.example.test; exit 0; fi
 if [[ "${joined}" == *" get namespace "* ]]; then exit 0; fi
 if [[ "${joined}" == *" get secret openshell-client-tls "* ]]; then printf 'Y2VydA==\n'; exit 0; fi
@@ -154,6 +159,10 @@ if grep -Fq -- 'sandbox.image.registry=' "${HELM_LOG}"; then
 	echo "FAIL: Helm received sandbox.image.registry, a value the chart ignores (repository must be registry-qualified)" >&2
 	exit 1
 fi
+if grep -Fq -- 'server.defaultRuntimeClassName=' "${HELM_LOG}"; then
+	echo "FAIL: Helm received a RuntimeClass without an explicit opt-in" >&2
+	exit 1
+fi
 for expected in \
 	"odh-openshell-gateway@${digest}" \
 	"odh-openshell-supervisor@${supervisor_digest}" \
@@ -166,6 +175,21 @@ for expected in \
 done
 
 : > "${HELM_LOG}"
+echo ">> approved Kata RuntimeClass is passed to Helm"
+KATA_CONTAINERS_RUNTIME_CLASS=kata run_deploy > "${WORKDIR}/kata.log"
+grep -Fq -- '--set-string server.defaultRuntimeClassName=kata' "${HELM_LOG}"
+
+: > "${HELM_LOG}"
+echo ">> unapproved Kata RuntimeClass stops deployment before Helm"
+if KATA_CONTAINERS_RUNTIME_CLASS=kata ODH_TEST_RUNTIME_CLASS_APPROVAL=false \
+	run_deploy > "${WORKDIR}/unapproved-kata.log" 2>&1; then
+	echo "FAIL: deployment accepted an unapproved RuntimeClass" >&2
+	exit 1
+fi
+grep -Fq -- 'RuntimeClass kata must have openshell.ai/sandbox-attachable=true' \
+	"${WORKDIR}/unapproved-kata.log"
+[[ ! -s "${HELM_LOG}" ]]
+
 echo ">> inline digests embedded in the image references"
 GATEWAY_IMAGE="quay.io/opendatahub/odh-openshell-gateway@${digest}" \
 	SUPERVISOR_IMAGE="quay.io/opendatahub/odh-openshell-supervisor@${supervisor_digest}" \
