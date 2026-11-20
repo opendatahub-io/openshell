@@ -331,21 +331,23 @@ mapper.
 ### Create the realm, roles, and clients from the command line
 
 [`keycloak-dev-guide-create-openshell-clients.sh`](keycloak-dev-guide-create-openshell-clients.sh)
-creates the realm when missing, the `openshell-admin` and `openshell-user`
-realm roles, and the API, dashboard, and CLI clients through the admin REST
-API. It writes the dashboard secret to
-`${CONFIG_DIR}/dashboard-client-secret.txt`, so you can skip the console steps
-for the realm, roles, and clients. Create the users in the console; they need
-passwords and verified email addresses. The script is idempotent: rerunning
-keeps existing objects and reconciles the dashboard client redirect settings
-with `DASH_URL`. The script prints the target and asks for confirmation before
-changing anything; pass `--yes` to skip the prompt. It requires `oc`, `curl`,
-and `python3`, and reads the environment variables set at the top of this guide.
-It verifies the Keycloak Route against a bundle built from the system roots and
-`${CONFIG_DIR}/ingress-ca.crt`, and exits if that file is missing.
+is a development helper and is not supported for production realms.
 
-Export the ingress CA, then run the script from the repository root after the
-Keycloak instance is ready:
+The script:
+
+- takes its configuration from the environment variables defined at the top of
+  this guide
+- creates the realm, the `openshell-admin` and `openshell-user` roles, and the
+  API, dashboard, and CLI clients
+- writes the dashboard secret to `${CONFIG_DIR}/dashboard-client-secret.txt`
+- asks for a master realm administrator's username and password and does not
+  store them
+
+Rerunning it is safe. The script creates roles only, so add the
+`openshell-admin` and `openshell-user` users in the console, with verified email
+addresses, and assign each role as described in [Create users](#create-users).
+
+Export the ingress CA, then run the script from the repository root:
 
 ```shell
 mkdir -p "$CONFIG_DIR"
