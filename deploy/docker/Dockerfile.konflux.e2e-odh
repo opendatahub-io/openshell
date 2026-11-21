@@ -18,7 +18,7 @@
 # `deploy/konflux/e2e-odh/sync-generic-fetcher.py --update all` to refresh the
 # amd64 and arm64 checksums.
 # renovate: datasource=docker depName=quay.io/openshift-release-dev/ocp-release extractVersion=^(?<version>4\.\d+\.\d+)-x86_64$
-ARG OC_VERSION=4.22.22
+ARG OC_VERSION=4.22.23
 # renovate: datasource=github-releases depName=helm/helm extractVersion=^v(?<version>.+)$
 ARG HELM_VERSION=4.3.1
 # renovate: datasource=github-releases depName=nextest-rs/nextest extractVersion=^cargo-nextest-(?<version>.+)$
