@@ -257,6 +257,9 @@ replace only `${NS}`: the printed client IDs already include their prefixes.
 
 ### Create users
 
+Create two users in the `openshell` realm, for example `administrator` and
+`regular-user`:
+
 - **Users** → **Create user** → set the username and email; enable
   **Email verified** and save.
 - **Credentials** → set a password.

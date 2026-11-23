@@ -35,6 +35,7 @@ here.
 - [Register the gateway and log in](#register-the-gateway-and-log-in)
 - [Create and use a sandbox](#create-and-use-a-sandbox)
 - [Using the OpenShell Dashboard UI](#using-the-openshell-dashboard-ui)
+- [Verify workspace authorization](#verify-workspace-authorization)
 - [Rerun and upgrade](#rerun-and-upgrade)
 - [Remove an installation](#remove-an-installation)
 - [Troubleshoot common failures](#troubleshoot-common-failures)
@@ -335,7 +336,7 @@ workstation that runs it: a user service on Linux and a Homebrew service on
 macOS. This is a limitation of the upstream installer. The local gateway is
 separate from the cluster gateway deployed above and is not used by this
 guide's remote-cluster workflow. If it conflicts with an existing local
-installation, remove it with `openshell gateway destroy`.
+installation, remove its registration with `openshell gateway remove openshell`.
 
 The gateway Route is TLS passthrough serving a private CA, and OIDC discovery
 uses the ingress CA. Trust both paths before adding the gateway.
@@ -500,6 +501,42 @@ Use the dashboard to:
 
 For more information about the dashboard, see
 [ai-openshell/console](https://github.com/ai-openshell/console).
+
+## Verify workspace authorization
+
+Use the read-only verifier after provisioning two distinct identities and two
+existing workspaces. The administrator must access both workspaces; the
+ordinary user must belong only to the allowed workspace. Save fresh access
+tokens in files with mode `0600` outside the checkout, using your identity
+provider's supported login flow:
+
+```shell
+uv run --script --python 3.12 deploy/rhoai/verify.py \
+  --namespace research-team \
+  --dashboard-url https://dashboard-research-team.apps.example.com \
+  --admin-role openshell-admin \
+  --admin-token-file /secure/admin-token.txt \
+  --user-token-file /secure/user-token.txt \
+  --allowed-workspace team-a --denied-workspace team-b
+```
+
+`--context` defaults to the current kubeconfig context; pass it to check
+another context. The verifier checks unauthenticated rejection, gateway
+identity and roles, administrator access to both workspaces, and ordinary-user
+access to one workspace and denial in the other. It opens a temporary
+loopback-only port-forward to the dashboard BFF, so it requires
+`pods/portforward` permission. It performs GET requests only and does not
+change users, memberships, or workloads.
+
+Optional `--other-gateway-token-file` checks rejection of a token for another
+gateway. Confirm that token works on its intended gateway first: an expired or
+otherwise invalid token cannot prove audience isolation. Optional
+`--session-cookie-file` checks the public session endpoint with the Cookie
+header value from an already logged-in browser. `--ca-file` adds a private
+Route CA to system trust. The verifier closes its port-forward on success or
+failure and never follows redirects with credentials or prints tokens.
+Confirm denied cross-workspace access before sharing the deployment; readiness
+and Route admission alone do not prove workspace isolation.
 
 ## Rerun and upgrade
 
