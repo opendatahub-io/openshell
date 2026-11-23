@@ -201,7 +201,7 @@ then creates no ConfigMap and both workloads use the system trust roots.
   amd64/arm64 clusters are not supported because the Red Hat Build of Agent
   Sandbox Operator is not available on arm64. The RHOAI 3.6 images and the ODH
   gateway, supervisor, and sandbox images are already multi-arch, but the ODH
-  dashboard image is amd64-only and pairs with dashboard chart `0.1.2`.
+  dashboard image is amd64-only and pairs with dashboard chart `0.1.5`.
 - Use the `vX.Y.Z-rhaiv.N` tagged images for ODH, not the moving `odh-stable`
   tag.
 

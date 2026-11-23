@@ -27,8 +27,8 @@
     }
   },
   "dashboard": {
-    "chart": "oci://ghcr.io/gkrumbach07/openshell-dashboard/helm-chart/openshell-dashboard",
-    "version": "0.1.2",
+    "chart": "oci://quay.io/ai-openshell/charts/console",
+    "version": "0.1.5",
     "values_files": [],
     "images": {
       "dashboard": {

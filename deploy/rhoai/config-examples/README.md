@@ -51,10 +51,10 @@ so keep the same files. Omitting them installs the chart defaults.
 | File | Images | Gateway chart | Dashboard chart | OIDC | Use when |
 |---|---|---|---|---|---|
 | `config.example.json` | ODH repositories, digest placeholders | placeholder | placeholder | generic | custom registries or versions |
-| `config.example-odh.json` | ODH `v0.1.7-rhaiv.0` | `0.1.7` | `0.1.2` | generic | latest OpenShell with your own IdP |
-| `config.example-odh-keycloak.json` | ODH `v0.1.7-rhaiv.0` | `0.1.7` | `0.1.2` | Keycloak | latest OpenShell with Keycloak |
-| `config.example-rhoai-3.6.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.2` | generic | match the RHOAI 3.6 operator CSV |
-| `config.example-rhoai-3.6-keycloak.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.2` | Keycloak | default README walkthrough |
+| `config.example-odh.json` | ODH `v0.1.7-rhaiv.0` | `0.1.7` | `0.1.5` | generic | latest OpenShell with your own IdP |
+| `config.example-odh-keycloak.json` | ODH `v0.1.7-rhaiv.0` | `0.1.7` | `0.1.5` | Keycloak | latest OpenShell with Keycloak |
+| `config.example-rhoai-3.6.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.5` | generic | match the RHOAI 3.6 operator CSV |
+| `config.example-rhoai-3.6-keycloak.json` | RHOAI 3.6 digests | `0.1.3` | `0.1.5` | Keycloak | default README walkthrough |
 
 All examples omit the hosts and rely on the defaults described below.
 
@@ -126,9 +126,10 @@ can change when Red Hat republishes it.
 
 ## Dashboard pairing
 
-Dashboard chart `0.1.2` is the first chart that passes `USER_ROLE` to the
-dashboard. ODH dashboard builds are amd64-only and tagged with their commit;
-do not use the moving `odh-stable` tag. The ODH examples pin
+The examples use the `oci://quay.io/ai-openshell/charts/console` chart at
+`0.1.5`, which passes `USER_ROLE` to the dashboard. ODH dashboard builds are
+amd64-only and tagged with their commit; do not use the moving `odh-stable`
+tag. The ODH examples pin
 `sha256:cfb3b592c5909c7c1a5d5622f98a20bf8c503554d53b3441abb189140254450b`.
 
 ## Tags and digests
