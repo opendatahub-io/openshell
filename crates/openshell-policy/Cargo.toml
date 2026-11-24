@@ -13,12 +13,24 @@ repository.workspace = true
 [dependencies]
 hickory-proto = { workspace = true }
 openshell-core = { path = "../openshell-core", default-features = false }
+openshell-policy-cedar-adapter = { path = "../openshell-policy-cedar-adapter", optional = true }
 openshell-policy-schema = { path = "../openshell-policy-schema" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 miette = { workspace = true }
 prost-types = { workspace = true }
 prost = { workspace = true }
+
+[features]
+default = []
+# Configuration fixtures shared with integration tests.
+test-support = []
+# Validates and interprets Cedar-authored policies (`cedar_policy.source`).
+# Without it, any policy with Cedar source fails validation as unsupported.
+# Enabled by gateway and supervisor experimental builds; workspace selection
+# can unify this feature.
+# Shipped clients carry Cedar documents without linking the engine.
+experimental = ["dep:openshell-policy-cedar-adapter"]
 
 [lints]
 workspace = true

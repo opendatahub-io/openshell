@@ -1143,6 +1143,7 @@ fn handled_fields_inventory() {
             m.insert("redactor".to_owned(), middleware_config());
             m
         },
+        ..Default::default()
     };
 
     // Validate so the test itself doesn't carry a bad policy.

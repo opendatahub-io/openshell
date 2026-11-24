@@ -253,6 +253,7 @@ impl GatewayCredentials {
 pub struct GatewayEndpoint {
     url: Arc<str>,
     credentials: GatewayCredentials,
+    supported_capabilities: Vec<String>,
 }
 
 impl GatewayEndpoint {
@@ -260,7 +261,16 @@ impl GatewayEndpoint {
         Self {
             url: url.into(),
             credentials,
+            supported_capabilities: Vec::new(),
         }
+    }
+
+    /// Advertises the policy capabilities this caller can enforce when
+    /// receiving sandbox configuration. Missing capabilities are unsupported.
+    #[must_use]
+    pub fn with_supported_capabilities(mut self, supported: Vec<String>) -> Self {
+        self.supported_capabilities = supported;
+        self
     }
 
     #[must_use]
@@ -277,6 +287,7 @@ impl GatewayEndpoint {
     #[must_use]
     pub fn with_url(&self, url: impl Into<Arc<str>>) -> Self {
         Self::new(url, self.credentials.clone())
+            .with_supported_capabilities(self.supported_capabilities.clone())
     }
 }
 
@@ -1225,7 +1236,12 @@ pub async fn fetch_policy(
 
     debug!("Connected, fetching sandbox policy");
 
-    fetch_policy_with_client(&mut client, sandbox_name).await
+    fetch_policy_with_client(
+        &mut client,
+        sandbox_name,
+        gateway.supported_capabilities.clone(),
+    )
+    .await
 }
 
 /// Fetch the authoritative policy and revision metadata in one response.
@@ -1246,16 +1262,26 @@ pub async fn fetch_settings_snapshot(
     let status = ClientSpanStatus::current();
     debug!(endpoint = %gateway.url(), sandbox_name = %sandbox_name, "Connecting to fetch OpenShell settings snapshot");
     let mut client = connect(gateway).await?;
-    status.finish(fetch_settings_snapshot_with_client(&mut client, sandbox_name, None).await)
+    status.finish(
+        fetch_settings_snapshot_with_client(
+            &mut client,
+            sandbox_name,
+            None,
+            gateway.supported_capabilities.clone(),
+        )
+        .await,
+    )
 }
 
 async fn fetch_settings_snapshot_with_client(
     client: &mut OpenShellClient<AuthedChannel>,
     sandbox_name: &str,
     workspace: Option<&str>,
+    supported_capabilities: Vec<String>,
 ) -> Result<SettingsPollResult> {
     let response = client
         .get_sandbox_config(GetSandboxConfigRequest {
+            supported_capabilities,
             workspace_scope: workspace.map(crate::proto::workspace_selector),
             name: sandbox_name.to_string(),
         })
@@ -1273,8 +1299,11 @@ fn learned_workspace_selector(workspace: Option<&str>) -> Option<crate::proto::W
 async fn fetch_policy_with_client(
     client: &mut OpenShellClient<AuthedChannel>,
     sandbox_name: &str,
+    supported_capabilities: Vec<String>,
 ) -> Result<Option<ProtoSandboxPolicy>> {
-    let snapshot = fetch_settings_snapshot_with_client(client, sandbox_name, None).await?;
+    let snapshot =
+        fetch_settings_snapshot_with_client(client, sandbox_name, None, supported_capabilities)
+            .await?;
 
     // version 0 with no policy means the sandbox was created without one.
     if snapshot.version == 0 && snapshot.policy.is_none() {
@@ -1329,12 +1358,15 @@ pub async fn discover_and_sync_policy(
     sync_policy_with_client(&mut client, sandbox, discovered_policy, workspace).await?;
 
     // Re-fetch from the gateway to get the canonical version/hash.
-    fetch_settings_snapshot_with_client(&mut client, sandbox, Some(workspace))
-        .await?
-        .policy
-        .ok_or_else(|| {
-            miette::miette!("Server still returned no policy after sync — this is a bug")
-        })
+    fetch_settings_snapshot_with_client(
+        &mut client,
+        sandbox,
+        Some(workspace),
+        gateway.supported_capabilities.clone(),
+    )
+    .await?
+    .policy
+    .ok_or_else(|| miette::miette!("Server still returned no policy after sync — this is a bug"))
 }
 
 /// Sync an enriched policy back to the gateway.
@@ -1367,7 +1399,15 @@ pub async fn sync_policy_and_fetch_snapshot(
     let status = ClientSpanStatus::current();
     let mut client = connect(gateway).await?;
     sync_policy_with_client(&mut client, sandbox, policy, workspace).await?;
-    status.finish(fetch_settings_snapshot_with_client(&mut client, sandbox, Some(workspace)).await)
+    status.finish(
+        fetch_settings_snapshot_with_client(
+            &mut client,
+            sandbox,
+            Some(workspace),
+            gateway.supported_capabilities.clone(),
+        )
+        .await,
+    )
 }
 
 /// Report an exact runtime configuration generation. Pending registration uses
@@ -2004,6 +2044,8 @@ mod token_grant_exchange_tests {
 #[derive(Clone)]
 pub struct CachedOpenShellClient {
     client: OpenShellClient<AuthedChannel>,
+    /// See [`GatewayEndpoint::with_supported_capabilities`].
+    supported_capabilities: Vec<String>,
     /// Sandbox instance gateway credentials rotated alongside extension
     /// credentials.
     credentials: GatewayCredentials,
@@ -2356,6 +2398,7 @@ impl CachedOpenShellClient {
         let client = connect(gateway).await?;
         Ok(Self {
             client,
+            supported_capabilities: gateway.supported_capabilities.clone(),
             credentials: gateway.credentials.clone(),
             workspace: Arc::new(tokio::sync::OnceCell::new()),
             extension_credentials,
@@ -2377,6 +2420,7 @@ impl CachedOpenShellClient {
             .client
             .clone()
             .get_sandbox_config(GetSandboxConfigRequest {
+                supported_capabilities: self.supported_capabilities.clone(),
                 workspace_scope,
                 name: sandbox_name.to_string(),
             })

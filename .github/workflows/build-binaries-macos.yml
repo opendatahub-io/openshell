@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: ""
+      experimental:
+        description: Enable the gateway and supervisor experimental feature flag
+        required: false
+        type: boolean
+        default: false
     secrets:
       CACHIX_AUTH_TOKEN:
         required: true
@@ -61,3 +66,4 @@ jobs:
           triple: ${{ matrix.triple }}
           cargo-version: ${{ inputs.cargo-version }}
           supervisor-image-tag: ${{ inputs.supervisor-image-tag }}
+          extra-cargo-flags: ${{ (matrix.package == 'openshell-gateway' || matrix.package == 'openshell-supervisor') && inputs.experimental && '--features experimental' || '' }}

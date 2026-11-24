@@ -66,19 +66,22 @@ fails. A killed test process skips cleanup, so names are unique to the run.
 - `cx.sandbox(suffix)` to build a sandbox with a run-unique name
   (`test-<run-id>-<suffix>`), then
   `create()` it or `create_ready()` to also wait for Ready. Set its image
-  with `image(..)`, its policy with `policy(..)` and its providers with
-  `providers(..)`. A long-running sandbox is
-  `.command(["sleep", "infinity"])`; add `.image(testkit::python_image())`
-  when a test runs Python clients in it. The returned
+  with `image(..)`, its policy with `policy(..)`, its providers with
+  `providers(..)`, and the template's driver-keyed `driver_config(json)`. A
+  long-running sandbox is `.command(["sleep", "infinity"])`.
+  `cx.python_sandbox(suffix, policy)` builds one from
+  `testkit::python_image()` with `policy`, for tests that run Python clients
+  in it. The returned
   `Sandbox` can wait for ready or finished, stop, start, exec or
   `poll_exec` until the output matches, read its config and draft policy, set
   a setting, read `sandbox get` JSON with `get_json()`, read its policy
   revisions and active policy with `policy_revisions()` and
-  `active_policy()`, and delete. Its `expect_listed`, `expect_absent` and
-  `wait_absent` check list and get. `run_python(script, args)` runs a script
-  with `python3 -c` and fails unless it exits 0. Exec output has `success()`,
-  `failure()`, `expect_stdout()`, and `last_json()` for the last JSON object
-  or array line of stdout, such as a client script's result.
+  `active_policy()`, read its supervisor logs with `logs()` or wait for a
+  line with `logs_until(..)`, and delete. Its `expect_listed`, `expect_absent`
+  and `wait_absent` check list and get. `run_python(script, args)` runs a
+  script with `python3 -c` and fails unless it exits 0. Exec output has
+  `success()`, `failure()`, `expect_stdout()`, and `last_json()` for the last
+  JSON object or array line of stdout, such as a client script's result.
 - `cx.cli_sandbox(suffix)` for a sandbox only `openshell sandbox create`
   can make, such as one with `policy_yaml(...)` or `--no-keep`. `create()`
   detaches and returns the `Sandbox`, `create_ready()` also waits for Ready,
@@ -91,7 +94,8 @@ fails. A killed test process skips cleanup, so names are unique to the run.
   create, so a create that fails after the gateway accepted it is still cleaned
   up. `cx.adopt(name)` returns a `Sandbox` handle for one the CLI created.
 - `cx.expect_compute_driver(name)` to fail unless the gateway runs only that
-  compute driver. Driver suites call it first.
+  compute driver. Driver suites call it first. `cx.compute_driver()` returns
+  the driver's name, for setup that depends on it, such as a driver config.
 - `testkit::base_image()` for the image to create sandboxes from or build on:
   `OPENSHELL_TEST_BASE_IMAGE`, or OpenShell's default sandbox image.
 - `testkit::python_image()` for sandboxes that run `python3`, curl, git, or
@@ -122,7 +126,11 @@ fails. A killed test process skips cleanup, so names are unique to the run.
   configures (`.rest(Access::Full)`, `.credential_binding(provider)`, ...).
   Pass the result to `cx.sandbox(..).policy(policy)`, or `policy::to_yaml`
   for the CLI. `policy::binaries_yaml(binaries)` writes a `binaries:` list
-  into policy YAML a test writes by hand.
+  into policy YAML a test writes by hand. `policy::base_with(yaml)` adds YAML
+  sections, such as L7 rules, to the base policy. `policy::from_yaml` reads a
+  policy file, and `policy::set(&sandbox, &policy)` replaces a running
+  sandbox's policy and waits until it is loaded. `policy::try_set` returns
+  the CLI output instead, for a policy the gateway should reject.
   `testkit::PYTHON_BINARIES` names `python3` in `python_image()` images.
 - `cx.import_profile(profile)` to import a provider profile and return its
   `id`, and `cx.create_provider(name, type, credentials)` to create a
@@ -131,8 +139,9 @@ fails. A killed test process skips cleanup, so names are unique to the run.
 - `testkit::YamlFile` for YAML a CLI command reads from a file.
 - `cx.client()` for SDK calls testkit does not wrap.
 - In `tests/support`: `host-server` starts servers on the machine that runs
-  the tests, which sandboxes reach as `host_server_support::TEST_HOST`, and
-  `sandbox-clients` runs clients in a sandbox: `connect`, `http` and
+  the tests, which sandboxes reach as `host_server_support::TEST_HOST`
+  (`host_server_support::allow_host(&mut policy, name, port)` lets
+  `PYTHON_BINARIES` reach one), and `sandbox-clients` runs clients in a sandbox: `connect`, `http` and
   `http_raw` return typed results, and `scripts` holds client scripts for
   `run_python`.
 - `?` and `.context(..)` on I/O, JSON, YAML, SDK and gRPC results, which
@@ -230,6 +239,7 @@ program for the conformance suite; see
 | `list [FILTER]...` | Prints each test's name and description. Ignored tests are included and marked. |
 | `ready [--timeout SECS]` | Waits for the gateway, like `testkit-ready` (default 60 seconds). Exits 2 if it is not ready in time. |
 | `run [FILTER]...` | Runs the tests one at a time, each in its own process. Unix only. |
+| `nextest-metadata DIR` | Writes a stub manifest and JSON metadata describing the prebuilt executable. |
 
 A filter selects tests whose name contains it. `run` also takes:
 
@@ -259,6 +269,19 @@ test target with `harness = false` therefore also runs under `cargo test`
 and nextest. In that mode tests run in one process, one at a time unless
 `--test-threads` says otherwise.
 
+To run a prebuilt program with nextest (no Cargo or checkout required), write
+metadata to a fresh directory on the machine where the program will run:
+
+```shell
+openshell-conformance nextest-metadata metadata
+cargo-nextest nextest run --cargo-metadata metadata/cargo-metadata.json \
+  --binaries-metadata metadata/binaries-metadata.json --test-threads 4
+```
+
+The metadata refers to the binary's absolute path. Regenerate it if the
+binary moves. Tests run from the metadata directory, so give paths such as
+`OPENSHELL_BIN` as absolute paths.
+
 A test's name is its module path without the crate name, then its function
 name, as in nextest. Its family, which groups tests in the JUnit report, is
 the first directory under the last `suites` directory in the crate's path:
@@ -267,24 +290,36 @@ the first directory under the last `suites` directory in the crate's path:
 
 ### Unsupported tests
 
-An environment that cannot pass a test yet lists it in
-`OPENSHELL_TEST_UNSUPPORTED`, instead of putting `#[ignore]` on the test, which
-turns it off everywhere. The value is `<test>=<issue>` entries separated by
-commas and/or whitespace, so an issue URL can't contain either:
+When a conformance, features or drivers test can't pass in one CI environment,
+keep it in the row and skip it there instead of using `#[ignore]` everywhere:
+
+1. File an issue for the bug.
+2. Add the test, issue URL and affected environments to the shared
+   [`unsupported.yaml`](../suites/unsupported.yaml). Each environment is an
+   [E2E matrix row](../../.github/workflows/e2e-suites.yml)
+   (`<environment>/<installer>`, such as `ubuntu-k3s/k3s-ha`) or a host lane
+   (`docker`, `podman`, `kubernetes` or `vm`).
+3. Delete the entry in the PR that fixes the bug.
+
+CI validates the entries and passes those for each row as
+`OPENSHELL_TEST_UNSUPPORTED`. To do the same locally, use `<test>=<issue>`
+entries separated by commas or whitespace:
 
 ```shell
-OPENSHELL_TEST_UNSUPPORTED="conformance::cli::stop_start=https://github.com/NVIDIA/OpenShell/issues/1234"
+export OPENSHELL_TEST_UNSUPPORTED="cdi::read_only_file=https://github.com/ai-openshell/openshell/issues/1234"
 ```
 
-`<test>` is the crate name (`_` for `-`), then the name libtest shows. The
-program reads the variable under every interface, so `openshell-conformance
-run`, `cargo test` and nextest agree: the test is ignored, so each shows SKIP,
-and `list` marks it `[unsupported: <issue>]`. `run` prints the entries to stderr
-and lists them in its summary and JUnit report; under `cargo test` and nextest
-the program stays quiet, so whatever starts them should print the entries.
+`<test>` is the crate name (`conformance` for conformance, the `[[test]]` target
+name for features and drivers, with `_` for `-`), then `::` and the name listed
+by nextest. Features and drivers integration targets need a unique `[[test]]`
+name, `harness = false`, and a `main` that returns `testkit::main()`.
+
+`cargo test` and nextest treat unsupported tests as ignored. Testkit's `list`
+marks them `[unsupported: <issue>]`, and its `run` prints the entries and
+includes them in its summary and JUnit report.
 
 A program applies only the entries for crates it links, so one value can serve
-several programs, and a misspelled crate name is ignored. A bad entry for a
+several programs. Branch Checks rejects unknown crates. A bad entry for a
 crate it links exits 2 before anything is listed or run (nextest exits 104,
 because its listing fails). Forcing an unsupported test to run
 (`--include-ignored`, `--ignored`, nextest's `--run-ignored`) fails it with

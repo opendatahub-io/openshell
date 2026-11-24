@@ -8,7 +8,7 @@ keywords: "Generative AI, Cybersecurity, AI Agents, Sandboxing, Gateway, Configu
 position: 5
 ---
 
-The OpenShell gateway reads its configuration from a TOML file when `--config` or `OPENSHELL_GATEWAY_CONFIG` is set. When neither is set, the gateway reads `$XDG_CONFIG_HOME/openshell/gateway.toml` if that file exists. If no config file exists, the gateway starts from built-in defaults. Gateway process flags and gateway `OPENSHELL_*` environment variables override the file. Compute driver settings live in the driver TOML tables. See [RFC 0003](https://github.com/NVIDIA/OpenShell/blob/main/rfc/0003-gateway-configuration/README.md) for the full schema.
+The OpenShell gateway reads its configuration from a TOML file when `--config` or `OPENSHELL_GATEWAY_CONFIG` is set. When neither is set, the gateway reads `$XDG_CONFIG_HOME/openshell/gateway.toml` if that file exists. If no config file exists, the gateway starts from built-in defaults. Gateway process flags and gateway `OPENSHELL_*` environment variables override the file. Compute driver settings live in the driver TOML tables. See [RFC 0003](https://github.com/ai-openshell/openshell/blob/main/rfc/0003-gateway-configuration/README.md) for the full schema.
 
 ## Source Precedence
 
@@ -489,7 +489,7 @@ namespace              = "openshell"
 grpc_endpoint          = "https://openshell-gateway.openshell.svc:8080"
 default_image          = "nvcr.io/nvidia/base/ubuntu:24.04"
 # Defaults to the gateway version; override to pin a specific build.
-# supervisor_image     = "ghcr.io/nvidia/openshell/supervisor:<version>"
+# supervisor_image     = "quay.io/ai-openshell/supervisor:<version>"
 client_tls_secret_name = "openshell-client-tls"
 service_account_name   = "openshell-sandbox"
 host_gateway_ip        = "10.0.0.1"
@@ -867,6 +867,25 @@ On Postgres, the gateway holds its mutation advisory locks on a separate lock po
 On Postgres, each replica opens both pools, so plan for `(database_max_connections + database_lock_max_connections) × replicaCount` connections, 14 per replica with the defaults, and keep that total below the server's own `max_connections` (and below any connection-pooler limit in front of it). Rollouts run extra pods; refer to [Size PostgreSQL Connections](/kubernetes/high-availability#size-postgresql-connections). Raising either ceiling past what the server admits moves the failure from a slow acquire to a refused connection.
 
 On SQLite, writers are serialized regardless of pool size, so a larger ceiling buys read concurrency only. A gateway that needs more write throughput wants an external Postgres database (`server.externalDbSecret`), not a larger SQLite pool.
+
+## Shared Supervisor Pool
+
+`[openshell.gateway.supervisor_pool]` tunes the shared supervisor pool used with the Kubernetes driver's `supervisor_topology = "gateway"`. The Helm chart renders this table from `supervisor.*` values and rejects a hand-written one.
+
+```toml
+[openshell.gateway.supervisor_pool]
+recovery_timeout_secs = 60
+max_instances_per_member = 128
+max_members_per_gateway = 32
+```
+
+| Key | Default | Range | Helm value |
+|---|---|---|---|
+| `recovery_timeout_secs` | `60` | `30` to `300` | `supervisor.recoveryTimeoutSeconds` |
+| `max_instances_per_member` | `128` | `1` to `1024` | `supervisor.pool.maxInstancesPerMember` |
+| `max_members_per_gateway` | `32` | `1` or more | `supervisor.pool.maxMembersPerGateway` |
+
+The gateway never places more than `max_instances_per_member` sandboxes on one supervisor and refuses a create when every supervisor is full. The pool runs at most live gateway replicas × `max_members_per_gateway` × `max_instances_per_member` sandboxes, never more than 131,072. Start each supervisor with the same cap through `--pool-max-instances` or `OPENSHELL_SUPERVISOR_POOL_MAX_INSTANCES`; the chart sets it. Values outside the ranges fail at startup.
 
 ## OCSF JSONL Output
 
@@ -1520,6 +1539,22 @@ Each example is a complete TOML file for one compute driver. The examples repeat
 
 Kubernetes configurations set `namespace`, `service_account_name`, and `enable_user_namespaces` in `[openshell.drivers.kubernetes]`. Docker configurations use `sandbox_label`; the legacy `sandbox_namespace` key is rejected.
 
+### IPv6 Egress and NAT64
+
+The Kubernetes, Docker, Podman, and MicroVM driver tables accept two keys that the driver passes to each supervisor on its command line:
+
+- `policy_dns_ipv6_egress` sets how mediated policy DNS answers AAAA queries: `auto` (default), `enabled`, or `disabled`. `auto` answers AAAA only when the supervisor network namespace has an IPv6 default route and no IPv4 default route. `disabled` answers AAAA with an empty response so dual-stack clients fall back to IPv4.
+- `nat64_prefixes` lists the NAT64 prefixes of the sandbox network as RFC 6052 CIDRs (`/32`, `/40`, `/48`, `/56`, `/64`, or `/96`). The supervisor applies the IPv4 SSRF rules to the IPv4 address embedded in any destination inside these prefixes. It always recognizes the well-known prefix `64:ff9b::/96` and also discovers the network prefix through `ipv4only.arpa` (RFC 7050), so set this key when the network uses a prefix that discovery cannot find.
+
+With `supervisor_topology = "gateway"`, the Helm chart passes the Kubernetes keys to the shared supervisors.
+
+The gateway rejects an unknown mode or a malformed prefix at startup.
+
+```toml
+policy_dns_ipv6_egress = "auto"
+nat64_prefixes         = ["2001:db8:64::/96"]
+```
+
 ### Kubernetes
 
 The gateway runs as a Pod and creates paired workload and supervisor Pods in another namespace. The gateway CA is projected from a Kubernetes Secret into supervisor Pods; user client certificate and key entries in that Secret are not exposed to either Pod.
@@ -1567,10 +1602,10 @@ image_pull_secrets             = ["regcred"]
 # runtime_bootstrap_grace_seconds = 900
 # sandbox_attach_request_timeout_seconds = 900
 # Defaults to the gateway version; override to pin a specific build.
-# sandbox_runtime_image        = "ghcr.io/nvidia/openshell/sandbox:<version>"
+# sandbox_runtime_image        = "quay.io/ai-openshell/sandbox:<version>"
 sandbox_runtime_image_pull_policy = "if_not_present"
 # Defaults to the gateway version; override to pin a specific build.
-# supervisor_image             = "ghcr.io/nvidia/openshell/supervisor:<version>"
+# supervisor_image             = "quay.io/ai-openshell/supervisor:<version>"
 supervisor_image_pull_policy   = "if_not_present"
 
 # Optional corporate forward proxy for policy-approved TLS egress. The sandbox
@@ -1611,6 +1646,9 @@ supervisor_image_pull_policy   = "if_not_present"
 # and its TLS stack, so a full merged trust bundle wastes the sandbox
 # boundary's control-frame budget on duplicated roots.
 # proxy_ca_bundle              = "/etc/openshell-tls/proxy-ca/ca.crt"
+# Policy DNS AAAA handling and NAT64 prefixes; see IPv6 Egress and NAT64.
+# policy_dns_ipv6_egress       = "auto"
+# nat64_prefixes               = ["2001:db8:64::/96"]
 # Required in raw gateway TOML because `namespace` identifies sandbox
 # placement, not the gateway Service. Helm renders this from the release's
 # gateway Service name and namespace.
@@ -1768,7 +1806,7 @@ sandbox and 64 per gateway, including when token caching is disabled.
 
 The MXC driver runs native Windows workloads through `wxc-exec`. Use this
 configuration with a build from the
-[`windows` branch](https://github.com/NVIDIA/OpenShell/tree/windows). Keep
+[`windows` branch](https://github.com/ai-openshell/openshell/tree/windows). Keep
 `openshell-supervisor.exe` and `openshell-windows-sandbox.exe` beside the gateway.
 
 ```toml
@@ -1793,7 +1831,7 @@ etw_audit = true
 or membership in Windows Performance Log Users. See
 [OCSF JSON Export](/observability/ocsf-json-export) for durable audit output.
 
-Follow the [Windows configuration guide](https://github.com/NVIDIA/OpenShell/blob/windows/docs/how-it-works/gateways/configuration.mdx#mxc)
+Follow the [Windows configuration guide](https://github.com/ai-openshell/openshell/blob/windows/docs/how-it-works/gateways/configuration.mdx#mxc)
 for host prerequisites, TLS setup, sandbox creation, and runtime limitations.
 
 ### Docker
@@ -1829,9 +1867,9 @@ supervisor_network_mode = "host"
 # Optional override. Omit for automatic host or bridge callback selection.
 # grpc_endpoint = "https://gateway.example.com:17670"
 # Workload-side runtime. Defaults to the gateway version.
-# sandbox_runtime_image = "ghcr.io/nvidia/openshell/sandbox:<version>"
+# sandbox_runtime_image = "quay.io/ai-openshell/sandbox:<version>"
 # Supervisor runtime. Defaults to the gateway version.
-# supervisor_image = "ghcr.io/nvidia/openshell/supervisor:<version>"
+# supervisor_image = "quay.io/ai-openshell/supervisor:<version>"
 # Unsafe operator override. Host bind mounts, including Docker local-driver
 # bind-backed volumes, expose gateway-host paths inside sandboxes and can
 # negate OpenShell isolation and filesystem controls.
@@ -1855,6 +1893,9 @@ proxy_connect_by_hostname = false
 # Operator-owned gateway-host PEM bundle trusted for an HTTPS proxy and for
 # destination certificates re-signed by a TLS-intercepting proxy.
 proxy_ca_bundle = "/etc/openshell/tls/proxy-ca.pem"
+# Policy DNS AAAA handling and NAT64 prefixes; see IPv6 Egress and NAT64.
+# policy_dns_ipv6_egress = "auto"
+# nat64_prefixes = ["2001:db8:64::/96"]
 # Project a host Unix Workload API socket into the supervisor for provider
 # token exchange. The socket parent must be a dedicated absolute directory.
 provider_spiffe_workload_api_socket = "/run/spire/agent.sock"
@@ -1950,9 +1991,9 @@ gateway_port            = 17670
 ssh_socket_path         = "/run/openshell/ssh.sock"
 stop_timeout_secs       = 45
 # Statically linked workload-side runtime. Defaults to the gateway version.
-# sandbox_runtime_image = "ghcr.io/nvidia/openshell/sandbox:<version>"
+# sandbox_runtime_image = "quay.io/ai-openshell/sandbox:<version>"
 # Dynamically linked supervisor runtime. Defaults to the gateway version.
-# supervisor_image      = "ghcr.io/nvidia/openshell/supervisor:<version>"
+# supervisor_image      = "quay.io/ai-openshell/supervisor:<version>"
 # Unsafe operator override. Host bind mounts, including Podman local-driver
 # bind-backed volumes, expose gateway-host paths inside sandboxes and can
 # negate OpenShell isolation and filesystem controls.
@@ -2050,6 +2091,9 @@ health_check_interval_secs = 10
 # proxy_connect_by_hostname = true
 # Corporate CA trusted for an https:// proxy and TLS-intercepting proxies.
 # proxy_ca_bundle           = "/etc/openshell/tls/proxy-ca.pem"
+# Policy DNS AAAA handling and NAT64 prefixes; see IPv6 Egress and NAT64.
+# policy_dns_ipv6_egress    = "auto"
+# nat64_prefixes            = ["2001:db8:64::/96"]
 # Project a host Workload API Unix socket into the supervisor, or use an
 # explicit container-reachable TCP endpoint, for provider token exchange.
 # provider_spiffe_workload_api_socket = "/run/spire/agent.sock"
@@ -2143,6 +2187,10 @@ overlay_disk_mib = 4096
 # Gateway-host PEM bundle trusted for an https:// proxy and for server
 # certificates re-signed by a TLS-intercepting proxy. Requires https_proxy.
 # proxy_ca_bundle           = "/etc/openshell/tls/proxy-ca.pem"
+# Policy DNS AAAA handling and NAT64 prefixes for the host-side supervisors;
+# see IPv6 Egress and NAT64.
+# policy_dns_ipv6_egress    = "auto"
+# nat64_prefixes            = ["2001:db8:64::/96"]
 # VM guests cannot mount a host Workload API Unix socket. Configure only a
 # separately operated guest-reachable TCP listener and explicitly acknowledge
 # the exposure; host-only sockets are never exposed automatically.

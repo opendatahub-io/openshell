@@ -68,6 +68,14 @@ pub fn matches(pattern: &str, path: &str) -> bool {
     EndpointPathPattern::new(pattern).matches(path)
 }
 
+/// Rank an endpoint path pattern as the L7 relay ranks the patterns matching
+/// one request: the pattern with the most characters other than `*` is the
+/// most specific. The empty pattern ranks lowest.
+#[must_use]
+pub fn path_specificity(pattern: &str) -> usize {
+    pattern.chars().filter(|c| *c != '*').count()
+}
+
 /// Select the most specific matching endpoint, retaining the last match on ties.
 ///
 /// Specificity counts non-asterisk characters in the endpoint's path selector.
@@ -81,7 +89,7 @@ pub fn select_most_specific<'a, T: 'a>(
     endpoints
         .into_iter()
         .filter(|endpoint| matches(selector(endpoint), path))
-        .max_by_key(|endpoint| selector(endpoint).chars().filter(|c| *c != '*').count())
+        .max_by_key(|endpoint| path_specificity(selector(endpoint)))
 }
 
 #[cfg(test)]

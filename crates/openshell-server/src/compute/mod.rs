@@ -4996,7 +4996,8 @@ impl ComputeRuntime {
             if let Err(error) = self.recover_pending_sandbox_updates().await {
                 warn!(%error, "Sandbox update recovery sweep failed");
             }
-            if let Err(err) = self.reconcile_store_with_backend(ORPHAN_GRACE_PERIOD).await {
+            if let Err(err) = Box::pin(self.reconcile_store_with_backend(ORPHAN_GRACE_PERIOD)).await
+            {
                 warn!(error = %err, "Store reconciliation sweep failed");
             }
             tokio::select! {
@@ -5008,7 +5009,7 @@ impl ComputeRuntime {
 
     async fn restart_loop(self: Arc<Self>, mut cancel: watch::Receiver<bool>) {
         loop {
-            if let Err(err) = self.restart_due_sandboxes().await {
+            if let Err(err) = Box::pin(self.restart_due_sandboxes()).await {
                 warn!(error = %err, "Sandbox restart sweep failed");
             }
             tokio::select! {
@@ -5543,6 +5544,7 @@ impl ComputeRuntime {
                 continue;
             }
 
+            // Boxed so this sweep's future stays small for its callers.
             Box::pin(self.prune_missing_sandbox(record, sweep_started_at_ms, grace_ms))
                 .await
                 .inspect_err(|_| crate::otel_tracing::mark_error(&tracing::Span::current()))?;
@@ -5640,7 +5642,8 @@ impl ComputeRuntime {
         let stopped_bootstrap =
             existing_phase == SandboxPhase::Stopped && driver_snapshot_confirms_starting(&incoming);
         if existing_phase != SandboxPhase::Starting && !ready_container_exit && !stopped_bootstrap {
-            return self.apply_sandbox_update_locked(incoming, existing).await;
+            // Boxed so this update's future stays small for its callers.
+            return Box::pin(self.apply_sandbox_update_locked(incoming, existing)).await;
         }
 
         // Any snapshot can already be queued when StartSandbox moves the
@@ -5694,7 +5697,7 @@ impl ComputeRuntime {
             Ok(Some(_) | None) | Err(_) => {}
         }
 
-        self.apply_sandbox_update_locked(incoming, existing).await
+        Box::pin(self.apply_sandbox_update_locked(incoming, existing)).await
     }
 
     async fn apply_sandbox_update_locked(
@@ -8908,6 +8911,45 @@ mod tests {
     }
 
     #[test]
+    fn cedar_readiness_waits_for_supervisor_configuration_admission() {
+        use openshell_core::proto::{
+            ConfigurationAdmissionState as Admission, SandboxConfigurationAdmission,
+        };
+        for connected in [false, true] {
+            let mut sandbox = Sandbox::default();
+            sandbox.set_phase(SandboxPhase::Provisioning as i32);
+            sandbox.spec.get_or_insert_with(Default::default).policy = Some(PublicSandboxPolicy {
+                cedar_policy: Some(openshell_core::proto::CedarPolicy {
+                    source: "permit(principal, action, resource);".to_string(),
+                }),
+                ..Default::default()
+            });
+            sandbox.status.as_mut().unwrap().configuration_admission =
+                Some(SandboxConfigurationAdmission {
+                    instance_id: "supervisor".to_string(),
+                    state: Admission::Pending.into(),
+                    ..Default::default()
+                });
+            let incoming = ready_driver_sandbox("sandbox", "sandbox");
+            apply_driver_snapshot(&mut sandbox, &incoming, connected, false);
+            assert_eq!(sandbox.phase(), SandboxPhase::Provisioning as i32);
+
+            if connected {
+                sandbox
+                    .status
+                    .as_mut()
+                    .unwrap()
+                    .configuration_admission
+                    .as_mut()
+                    .unwrap()
+                    .state = Admission::Accepted.into();
+                apply_driver_snapshot(&mut sandbox, &incoming, true, false);
+                assert_eq!(sandbox.phase(), SandboxPhase::Ready as i32);
+            }
+        }
+    }
+
+    #[test]
     fn configuration_admission_preserves_starting_for_early_exit_reports() {
         use openshell_core::proto::{
             ConfigurationAdmissionState as Admission, SandboxConfigurationAdmission,
@@ -10480,8 +10522,7 @@ mod tests {
                 .unwrap();
             assert_eq!(retained.phase(), SandboxPhase::Deleting as i32);
             assert_eq!(credentials.stored_credential_count(), Some(1));
-            runtime
-                .reconcile_store_with_backend(Duration::ZERO)
+            Box::pin(runtime.reconcile_store_with_backend(Duration::ZERO))
                 .await
                 .unwrap();
             assert!(
@@ -10579,8 +10620,7 @@ mod tests {
         assert_eq!(retained.phase(), SandboxPhase::Deleting as i32);
         assert_eq!(credentials.stored_credential_count(), Some(1));
         driver.set_get_outcome(ControlledGetOutcome::Missing);
-        runtime
-            .reconcile_store_with_backend(Duration::ZERO)
+        Box::pin(runtime.reconcile_store_with_backend(Duration::ZERO))
             .await
             .unwrap();
         assert!(
@@ -11719,7 +11759,7 @@ mod tests {
         });
         runtime.store.put_message(&sandbox).await.unwrap();
 
-        runtime.restart_due_sandboxes().await.unwrap();
+        Box::pin(runtime.restart_due_sandboxes()).await.unwrap();
 
         assert_eq!(driver.stop_calls(), 1);
         assert_eq!(driver.start_calls(), 1);
@@ -16060,8 +16100,7 @@ mod tests {
         let sandbox = sandbox_record("sb-1", "sandbox-a", SandboxPhase::Provisioning);
         runtime.store.put_message(&sandbox).await.unwrap();
 
-        runtime
-            .reconcile_store_with_backend(Duration::ZERO)
+        Box::pin(runtime.reconcile_store_with_backend(Duration::ZERO))
             .await
             .unwrap();
 
@@ -17512,8 +17551,7 @@ mod tests {
         runtime.sandbox_index.update_from_sandbox(&sandbox);
         register_test_supervisor_session(&runtime, "sb-1");
 
-        runtime
-            .reconcile_store_with_backend(Duration::ZERO)
+        Box::pin(runtime.reconcile_store_with_backend(Duration::ZERO))
             .await
             .unwrap();
 
@@ -17645,8 +17683,7 @@ mod tests {
         runtime.sandbox_index.update_from_sandbox(&sandbox);
 
         let traced = test_exporter::install_traced();
-        runtime
-            .reconcile_store_with_backend(Duration::ZERO)
+        Box::pin(runtime.reconcile_store_with_backend(Duration::ZERO))
             .await
             .unwrap();
 
@@ -17724,8 +17761,7 @@ mod tests {
         }))
         .await;
 
-        runtime
-            .reconcile_store_with_backend(Duration::ZERO)
+        Box::pin(runtime.reconcile_store_with_backend(Duration::ZERO))
             .await
             .unwrap();
 
@@ -17773,8 +17809,7 @@ mod tests {
         runtime.sandbox_index.update_from_sandbox(&sandbox);
         register_test_supervisor_session(&runtime, "sb-1");
 
-        runtime
-            .reconcile_store_with_backend(Duration::ZERO)
+        Box::pin(runtime.reconcile_store_with_backend(Duration::ZERO))
             .await
             .unwrap();
 
@@ -17837,8 +17872,7 @@ mod tests {
 
         let mut watch_rx = runtime.sandbox_watch_bus.subscribe(sandbox.object_id());
 
-        runtime
-            .reconcile_store_with_backend(Duration::ZERO)
+        Box::pin(runtime.reconcile_store_with_backend(Duration::ZERO))
             .await
             .unwrap();
 

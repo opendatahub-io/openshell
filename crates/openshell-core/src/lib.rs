@@ -48,6 +48,7 @@ pub mod network_trust;
 pub mod oauth;
 pub mod paths;
 pub mod policy;
+pub mod policy_l7;
 pub use openshell_policy_schema::yaml;
 pub mod policy_identity;
 pub mod progress;
@@ -67,6 +68,7 @@ pub mod settings;
 pub mod shell;
 pub mod telemetry;
 pub mod time;
+pub mod token_endpoint;
 pub mod token_grant_failure;
 pub mod transport_errors;
 pub mod upload;
@@ -76,7 +78,8 @@ pub use config::{
     GatewayInterceptorBindingOverride, GatewayInterceptorBindingPolicy, GatewayInterceptorConfig,
     GatewayInterceptorFailurePolicy, GatewayInterceptorPhaseConfig, GatewayJwtConfig,
     GatewayProviderProfileSourceConfig, ImagePullPolicy, MetricsTlsConfig, MtlsAuthConfig,
-    OidcConfig, PolicyValidationFailureMode, TlsConfig, UpstreamProxyConfig,
+    OidcConfig, PolicyDnsIpv6Egress, PolicyValidationFailureMode, SupervisorIpv6EgressConfig,
+    TlsConfig, UpstreamProxyConfig,
 };
 pub use dynamic_string_allowlist::DynamicStringAllowlist;
 pub use error::{ComputeDriverError, Error, Result};

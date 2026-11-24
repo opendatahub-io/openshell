@@ -28,11 +28,12 @@ async fn probe(
 ) {
     let (open, completion) = staged_curl_open(destination, engine.current_generation());
     let (denial_tx, mut denial_rx) = mpsc::unbounded_channel();
-    let dns = store.map(|store| policy_dns_test_service(store, engine));
+    let network_engine = PolicyEngine::from(Arc::clone(engine));
+    let dns = store.map(|store| policy_dns_test_service(store, &network_engine));
     let accepted = preauthorize_transparent_open(
         open,
         dns.as_ref(),
-        engine,
+        &network_engine,
         &BinaryIdentityCache::new(),
         None,
         None,

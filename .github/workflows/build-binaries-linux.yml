@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: ""
+      experimental:
+        description: Enable the gateway and supervisor experimental feature flag
+        required: false
+        type: boolean
+        default: false
     secrets:
       CACHIX_AUTH_TOKEN:
         required: true
@@ -37,9 +42,9 @@ jobs:
       matrix:
         include:
           - triple: x86_64-unknown-linux-musl
-            runner: linux-amd64-cpu8
+            runner: ubuntu-24.04
           - triple: aarch64-unknown-linux-musl
-            runner: linux-arm64-cpu8
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps: &build_steps
@@ -69,9 +74,9 @@ jobs:
       matrix:
         include:
           - triple: x86_64-unknown-linux-musl
-            runner: linux-amd64-cpu8
+            runner: ubuntu-24.04
           - triple: aarch64-unknown-linux-musl
-            runner: linux-arm64-cpu8
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps: *build_steps
@@ -81,13 +86,14 @@ jobs:
     env:
       PACKAGE: openshell-gateway
       BINARY: openshell-gateway
+      EXTRA_CARGO_FLAGS: ${{ inputs.experimental && '--features experimental' || '' }}
     strategy:
       matrix:
         include:
           - triple: x86_64-unknown-linux-gnu
-            runner: linux-amd64-cpu8
+            runner: ubuntu-24.04
           - triple: aarch64-unknown-linux-gnu
-            runner: linux-arm64-cpu8
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps: *build_steps
@@ -97,25 +103,27 @@ jobs:
     env:
       PACKAGE: ${{ matrix.package }}
       BINARY: ${{ matrix.binary }}
+      # Only supervisor entries define the experimental feature flag.
+      EXTRA_CARGO_FLAGS: ${{ matrix.package == 'openshell-supervisor' && inputs.experimental && '--features experimental' || '' }}
     strategy:
       matrix:
         include:
           - package: openshell-sandbox
             binary: openshell-sandbox
             triple: x86_64-unknown-linux-musl
-            runner: linux-amd64-cpu8
+            runner: ubuntu-24.04
           - package: openshell-sandbox
             binary: openshell-sandbox
             triple: aarch64-unknown-linux-musl
-            runner: linux-arm64-cpu8
+            runner: ubuntu-24.04-arm
           - package: openshell-supervisor
             binary: openshell-supervisor
             triple: x86_64-unknown-linux-gnu
-            runner: linux-amd64-cpu8
+            runner: ubuntu-24.04
           - package: openshell-supervisor
             binary: openshell-supervisor
             triple: aarch64-unknown-linux-gnu
-            runner: linux-arm64-cpu8
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps: *build_steps
@@ -130,9 +138,9 @@ jobs:
       matrix:
         include:
           - triple: x86_64-unknown-linux-musl
-            runner: linux-amd64-cpu8
+            runner: ubuntu-24.04
           - triple: aarch64-unknown-linux-musl
-            runner: linux-arm64-cpu8
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps: *build_steps

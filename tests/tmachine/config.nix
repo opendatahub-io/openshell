@@ -30,7 +30,7 @@ let
     openshell_cli_binary = "../../artifacts/binaries/${muslTarget}/openshell";
     openshell_e2e_python_image = e2ePythonImage;
     openshell_gateway_image = "../../artifacts/images/openshell-gateway-tmachine.tar";
-    openshell_helm_chart = "../../artifacts/helm/helm-chart-0.0.0.tgz";
+    openshell_helm_chart = "../../artifacts/helm/openshell-0.0.0.tgz";
     openshell_sandbox_image = "../../artifacts/images/openshell-sandbox-tmachine.tar";
     openshell_supervisor_image = "../../artifacts/images/openshell-supervisor-tmachine.tar";
   };
@@ -224,6 +224,23 @@ let
           openshell_external_driver_name = "external";
           openshell_supervisor_image = "../../artifacts/images/openshell-supervisor-tmachine.tar";
           openshell_sandbox_image = "../../artifacts/images/openshell-sandbox-tmachine.tar";
+        };
+      }
+      {
+        # Installs the latest published release, as the baseline of an upgrade
+        # test, and stages the candidate under /var/lib/openshell-qualification
+        # for the `upgrade` disruption to install.
+        name = "deb-upgrade-source";
+        use_galaxy = false;
+        playbooks = [ "ansible/playbooks/openshell-deb-upgrade-source.yaml" ];
+        inputs = {
+          openshell_deb = "../../artifacts/upgrade/deb/source/openshell.deb";
+          openshell_supervisor_image = "../../artifacts/upgrade/source-images/openshell-supervisor-tmachine.tar";
+          openshell_sandbox_image = "../../artifacts/upgrade/source-images/openshell-sandbox-tmachine.tar";
+          openshell_e2e_python_image = e2ePythonImage;
+          openshell_candidate_deb = "../../artifacts/packages/openshell.deb";
+          openshell_candidate_supervisor_image = "../../artifacts/images/openshell-supervisor-tmachine.tar";
+          openshell_candidate_sandbox_image = "../../artifacts/images/openshell-sandbox-tmachine.tar";
         };
       }
       {

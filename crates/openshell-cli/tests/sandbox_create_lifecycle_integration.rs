@@ -61,8 +61,13 @@ struct SandboxState {
     /// Make `ListProviderProfiles` fail while every other RPC keeps working,
     /// so a catalog lookup failure can be told apart from an empty catalog.
     fail_list_provider_profiles: Arc<AtomicBool>,
+    reject_cedar_policy: Arc<AtomicBool>,
+    health_requests: Arc<AtomicUsize>,
     deleted_names: Arc<Mutex<Vec<Vec<String>>>>,
     create_requests: Arc<Mutex<Vec<CreateSandboxRequest>>>,
+    policy_update_requests: Arc<AtomicUsize>,
+    /// The policy `GetSandboxConfig` returns.
+    sandbox_config_policy: Arc<Mutex<Option<openshell_core::proto::SandboxPolicy>>>,
     expose_service_requests: Arc<Mutex<Vec<openshell_core::proto::ExposeServiceRequest>>>,
     fail_delete_sandbox_message: Arc<Mutex<Option<String>>>,
     stop_response: Arc<Mutex<Option<Sandbox>>>,
@@ -112,12 +117,19 @@ impl OpenShell for TestOpenShell {
         &self,
         _request: tonic::Request<HealthRequest>,
     ) -> Result<Response<HealthResponse>, Status> {
+        self.state.health_requests.fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(HealthResponse {
             status: ServiceStatus::Healthy.into(),
             version: "test".to_string(),
         }))
     }
 
+    async fn get_gateway_info(
+        &self,
+        _request: tonic::Request<openshell_core::proto::GetGatewayInfoRequest>,
+    ) -> Result<Response<openshell_core::proto::GetGatewayInfoResponse>, Status> {
+        Err(Status::permission_denied("platform administrator required"))
+    }
     async fn create_sandbox(
         &self,
         request: tonic::Request<CreateSandboxRequest>,
@@ -134,7 +146,17 @@ impl OpenShell for TestOpenShell {
                 )
             })
             .collect();
+        let cedar = request
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.policy.as_ref())
+            .is_some_and(openshell_core::proto::SandboxPolicy::is_cedar);
         self.state.create_requests.lock().await.push(request);
+        if cedar && self.state.reject_cedar_policy.load(Ordering::SeqCst) {
+            return Err(Status::failed_precondition(
+                "this gateway was built without Cedar policy support",
+            ));
+        }
         let sandbox_name = if name.is_empty() {
             "test-sandbox".to_string()
         } else {
@@ -366,7 +388,10 @@ impl OpenShell for TestOpenShell {
         &self,
         _request: tonic::Request<GetSandboxConfigRequest>,
     ) -> Result<Response<GetSandboxConfigResponse>, Status> {
-        Ok(Response::new(GetSandboxConfigResponse::default()))
+        Ok(Response::new(GetSandboxConfigResponse {
+            policy: self.state.sandbox_config_policy.lock().await.clone(),
+            ..Default::default()
+        }))
     }
 
     async fn get_gateway_config(
@@ -793,6 +818,26 @@ impl OpenShell for TestOpenShell {
         )))
     }
 
+    async fn update_config(
+        &self,
+        request: tonic::Request<openshell_core::proto::UpdateConfigRequest>,
+    ) -> Result<Response<openshell_core::proto::UpdateConfigResponse>, Status> {
+        self.state
+            .policy_update_requests
+            .fetch_add(1, Ordering::SeqCst);
+        if self.state.reject_cedar_policy.load(Ordering::SeqCst)
+            && request
+                .into_inner()
+                .policy
+                .as_ref()
+                .is_some_and(openshell_core::proto::SandboxPolicy::is_cedar)
+        {
+            return Err(Status::failed_precondition(
+                "this gateway was built without Cedar policy support",
+            ));
+        }
+        Err(Status::unimplemented("not implemented in test"))
+    }
     /// Echo relay: validates the init frame like the gateway does, then sends
     /// every `Data` frame straight back.
     async fn forward_tcp(
@@ -2768,7 +2813,7 @@ async fn sandbox_create_keeps_sandbox_with_forwarding() {
             install_fake_forwarding_ssh(&fake_ssh_dir);
             let (endpoint, tls) = (server.endpoint.as_str(), &tls);
             let (forward_port, result) = Box::pin(with_free_forward_port(|spec| async move {
-                run::sandbox_create(
+                Box::pin(run::sandbox_create(
                     endpoint,
                     "openshell",
                     run::SandboxCreateConfig {
@@ -2780,7 +2825,7 @@ async fn sandbox_create_keeps_sandbox_with_forwarding() {
                     },
                     "default",
                     tls,
-                )
+                ))
                 .await
             }))
             .await;
@@ -3558,8 +3603,14 @@ async fn sandbox_template_create_warns_for_credential_env_vars() {
         "template create should warn for credential-looking --env values: {stderr}"
     );
     assert!(
-        stderr.contains("To hide it from the agent, use a provider instead"),
-        "warning should point users toward providers: {stderr}"
+        stderr.contains(
+            "openshell provider create --name my-openai --type openai --credential OPENAI_API_KEY"
+        ),
+        "warning should recommend existing-credential provider setup: {stderr}"
+    );
+    assert!(
+        !stderr.contains("plain-secret"),
+        "warning must not expose the credential value"
     );
 
     let requests = template_create_requests(&server).await;
@@ -3836,6 +3887,194 @@ async fn service_forward_falls_back_to_session_tokens_once_for_a_legacy_gateway(
             .all(|init| matches!(init.target, Some(tcp_forward_init::Target::Tcp(_))))
     );
     forward.abort();
+}
+
+#[tokio::test]
+async fn cedar_policy_surfaces_gateway_rejection_without_health_preflight() {
+    let server = run_server().await;
+    server
+        .openshell
+        .state
+        .reject_cedar_policy
+        .store(true, Ordering::SeqCst);
+    let dir = helpers::tempdir().unwrap();
+    let path = dir.path().join("policy.cedar");
+    fs::write(&path, r#"permit(principal, action == Sandbox::Action::"NetworkConnect", resource == Sandbox::NetworkEndpoint::"api.github.com:443");"#).unwrap();
+    let path = path.to_str().unwrap();
+    let tls = test_tls(&server);
+    let error = run::sandbox_create(
+        &server.endpoint,
+        "openshell",
+        run::SandboxCreateConfig {
+            name: Some("cedar-unsupported"),
+            policy: Some(path),
+            ..test_config()
+        },
+        "default",
+        &tls,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("this gateway was built without Cedar policy support"),
+        "{error}"
+    );
+    let requests = create_requests(&server).await;
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .spec
+            .as_ref()
+            .unwrap()
+            .policy
+            .as_ref()
+            .unwrap()
+            .is_cedar()
+    );
+    for global in [false, true] {
+        let result = if global {
+            run::sandbox_policy_set_global(&server.endpoint, path, true, false, 1, "default", &tls)
+                .await
+        } else {
+            run::sandbox_policy_set(
+                &server.endpoint,
+                "cedar-unsupported",
+                path,
+                false,
+                1,
+                "default",
+                &tls,
+            )
+            .await
+        };
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("this gateway was built without Cedar policy support"),
+            "{error}"
+        );
+    }
+    assert_eq!(
+        server
+            .openshell
+            .state
+            .policy_update_requests
+            .load(Ordering::SeqCst),
+        2
+    );
+    assert_eq!(
+        server
+            .openshell
+            .state
+            .health_requests
+            .load(Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn policy_update_rejects_a_cedar_sandbox_before_merging() {
+    let server = run_server().await;
+    *server.openshell.state.sandbox_config_policy.lock().await =
+        Some(openshell_core::proto::SandboxPolicy {
+            version: 1,
+            cedar_policy: Some(openshell_core::proto::CedarPolicy { source: r#"permit(principal, action == Sandbox::Action::"NetworkConnect", resource == Sandbox::NetworkEndpoint::"api.github.com:443");"#.to_string() }),
+            ..Default::default()
+        });
+    let tls = test_tls(&server);
+    for dry_run in [true, false] {
+        let error = run::sandbox_policy_update(
+            &server.endpoint,
+            "cedar-sandbox",
+            &["api.example.com:443".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            false,
+            None,
+            dry_run,
+            false,
+            1,
+            "default",
+            &tls,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("openshell policy set"),
+            "dry_run={dry_run}: {error}"
+        );
+    }
+    assert_eq!(
+        server
+            .openshell
+            .state
+            .policy_update_requests
+            .load(Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn cedar_discovery_sync_surfaces_gateway_rejection_without_preflight() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let gateway = TestOpenShell::default();
+    gateway
+        .state
+        .reject_cedar_policy
+        .store(true, Ordering::SeqCst);
+    let service = gateway.clone();
+    let server = tokio::spawn(async move {
+        Server::builder()
+            .add_service(OpenShellServer::new(service))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    Environment::from_pairs(&[("OPENSHELL_SANDBOX_TOKEN", "compatibility-test-token")])
+        .run_async(async {
+            let policy = openshell_core::proto::SandboxPolicy {
+                cedar_policy: Some(openshell_core::proto::CedarPolicy {
+                    source: "permit(principal, action, resource);".to_string(),
+                }),
+                ..Default::default()
+            };
+            let gateway_endpoint = openshell_core::grpc_client::GatewayEndpoint::new(
+                endpoint.clone(),
+                openshell_core::grpc_client::GatewayCredentials::from_gateway_token(
+                    "compatibility-test-token",
+                )
+                .expect("test credentials"),
+            );
+            let error = openshell_core::grpc_client::sync_policy(
+                &gateway_endpoint,
+                "cedar-legacy",
+                &policy,
+                "default",
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.chain().any(|cause| cause
+                    .to_string()
+                    .contains("this gateway was built without Cedar policy support")),
+                "{error}"
+            );
+            assert_eq!(
+                gateway.state.policy_update_requests.load(Ordering::SeqCst),
+                1
+            );
+            assert_eq!(gateway.state.health_requests.load(Ordering::SeqCst), 0);
+        })
+        .await;
+    server.abort();
 }
 
 #[tokio::test]

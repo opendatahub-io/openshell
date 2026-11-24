@@ -76,6 +76,7 @@ fn hello() -> SupervisorHello {
         supports_config_push: false,
         redirected: false,
         supports_session_redirect: true,
+        supported_capabilities: Vec::new(),
     }
 }
 

@@ -70,9 +70,9 @@ openshell profile describe github
 ### Provider Examples
 
 For other services, download a YAML file from the repository's
-[`providers/`](https://github.com/NVIDIA/OpenShell/tree/main/providers) directory.
+[`providers/`](https://github.com/ai-openshell/openshell/tree/main/providers) directory.
 For a released version of OpenShell, use the
-[matching release tag](https://github.com/NVIDIA/OpenShell/tags) instead of `main`.
+[matching release tag](https://github.com/ai-openshell/openshell/tags) instead of `main`.
 Review the credentials and endpoints, adjust `binaries` for your sandbox image,
 and run the same lint and import commands with the downloaded filename.
 
@@ -382,8 +382,8 @@ with `printf '%s'`. Each provider uses the new value at its next refresh;
 
 Set the allowed endpoints at creation. A secret without one cannot be used for
 refresh. The gateway does not follow token endpoint redirects when a workspace
-secret is in use. Workspace secrets work with the OAuth2 and Google service
-account strategies, not `aws_sts_assume_role`.
+secret is in use. Workspace secrets work with the OAuth2, Google service account, and GitHub App
+installation strategies, not `aws_sts_assume_role`.
 
 Before deleting a referenced secret, use `openshell provider refresh inline-secrets`
 to remove the reference without replacing the provider's current grant. Use

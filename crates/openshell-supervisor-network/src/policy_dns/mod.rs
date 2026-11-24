@@ -17,22 +17,27 @@
     reason = "the policy DNS boundary retains metrics and helpers for later runtime integrations"
 )]
 
+mod egress;
 mod name;
 mod resolver;
 mod runtime;
 mod store;
 mod wire;
 
+pub(crate) use egress::{DefaultRoutes, Ipv6EgressDecision, Nat64Setup};
 pub(crate) use name::NormalizedName;
+pub(crate) use resolver::ResolveError as TrustedResolveError;
 pub(crate) use resolver::{AddressFamily, SocketTrustedResolver, TrustedAnswer, TrustedResolver};
-pub(crate) use runtime::{PolicyDnsRuntime, PolicyDnsRuntimeConfig};
+pub(crate) use runtime::{
+    PolicyDnsRuntime, PolicyDnsRuntimeConfig, trusted_resolver_from_resolv_conf,
+};
 pub(crate) use store::{
     MappingLookup, MappingLookupError, PolicyEndpointId, PublishError, PublishRequest,
     ResolvedEndpointRecord, ResolvedEndpointStore, ResolvedPortContract, StoreConfig,
     SyntheticPools,
 };
 
-use crate::opa::OpaEngine;
+use crate::policy_engine::PolicyEngine;
 use crate::proxy::destination::{
     DestinationDenialKind, build_validation_plan, filter_resolved_addresses,
 };
@@ -89,7 +94,7 @@ pub(crate) enum PolicyDnsError {
 /// No socket is bound by this type. A later runtime adapter owns listener and
 /// namespace lifecycle and calls the bounded wire helpers in this module.
 pub(crate) struct PolicyDnsService<R = SocketTrustedResolver> {
-    policy: Arc<OpaEngine>,
+    policy: PolicyEngine,
     resolver: R,
     store: Arc<ResolvedEndpointStore>,
     trusted_host_gateway: Option<IpAddr>,
@@ -110,13 +115,13 @@ pub(crate) enum ConnectLookupError {
 
 impl<R: TrustedResolver> PolicyDnsService<R> {
     pub(crate) fn new(
-        policy: Arc<OpaEngine>,
+        policy: impl Into<PolicyEngine>,
         resolver: R,
         store: Arc<ResolvedEndpointStore>,
         trusted_host_gateway: Option<IpAddr>,
     ) -> Self {
         Self {
-            policy,
+            policy: policy.into(),
             resolver,
             store,
             trusted_host_gateway,
@@ -433,30 +438,33 @@ struct EligibleEndpoint {
 }
 
 fn eligible_endpoints(
-    endpoints: &[crate::opa::MatchedEndpoint],
+    endpoints: &[crate::policy_types::MatchedEndpoint],
     name: &NormalizedName,
     trusted_host_gateway: Option<IpAddr>,
 ) -> Result<Vec<EligibleEndpoint>, PolicyDnsError> {
     let mut eligible = Vec::new();
     for endpoint in endpoints {
-        let Some(pattern) = value_string(&endpoint.endpoint, "host") else {
+        if endpoint.endpoint.host.is_empty() {
             continue;
-        };
-        let pattern = pattern.trim_end_matches('.').to_ascii_lowercase();
+        }
+        let pattern = endpoint
+            .endpoint
+            .host
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
         let selector = HostSelector::new(std::slice::from_ref(&pattern), &[])
             .map_err(PolicyDnsError::Policy)?;
         if !selector.matches(name.as_str()) {
             continue;
         }
-        let ports = value_ports(&endpoint.endpoint);
+        let ports = record_ports(&endpoint.endpoint);
         if ports.is_empty() {
             continue;
         }
-        let raw_allowed_ips = value_string_array(&endpoint.endpoint, "allowed_ips");
+        let raw_allowed_ips = endpoint.endpoint.allowed_ips.clone();
         let exact_declared_host = !pattern.contains('*')
             && pattern == name.as_str()
-            && value_field(&endpoint.endpoint, "advisor_proposed")
-                != Some(&regorus::Value::Bool(true));
+            && !endpoint.endpoint.advisor_proposed;
         let destination_plan = match build_validation_plan(
             name.as_str(),
             name.as_str(),
@@ -464,6 +472,7 @@ fn eligible_endpoints(
             None,
             &raw_allowed_ips,
             exact_declared_host,
+            None,
         ) {
             Ok(plan) => plan,
             Err(error) if error.kind == DestinationDenialKind::InternalAddress => continue,
@@ -476,7 +485,10 @@ fn eligible_endpoints(
             },
             ports,
             destination_plan,
-            contract_fingerprint: endpoint.endpoint.to_string(),
+            // The synthetic identity tracks the DNS contract (host, ports,
+            // protocol, allowed IPs), not request rules or the policy hash.
+            // Reloads still invalidate old mappings through policy_generation.
+            contract_fingerprint: format!("{:?}", endpoint.endpoint),
         });
     }
     Ok(eligible)
@@ -513,47 +525,14 @@ fn eligible_endpoint_context(endpoints: &[EligibleEndpoint]) -> Vec<PolicyEndpoi
     endpoint_ids
 }
 
-fn value_field<'a>(value: &'a regorus::Value, key: &str) -> Option<&'a regorus::Value> {
-    let regorus::Value::Object(fields) = value else {
-        return None;
-    };
-    fields.get(&regorus::Value::String(key.into()))
-}
-
-fn value_string(value: &regorus::Value, key: &str) -> Option<String> {
-    match value_field(value, key) {
-        Some(regorus::Value::String(value)) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn value_string_array(value: &regorus::Value, key: &str) -> Vec<String> {
-    match value_field(value, key) {
-        Some(regorus::Value::Array(values)) => values
-            .iter()
-            .filter_map(|value| match value {
-                regorus::Value::String(value) => Some(value.to_string()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn value_ports(value: &regorus::Value) -> Vec<u16> {
-    let mut ports = match value_field(value, "ports") {
-        Some(regorus::Value::Array(values)) => values
-            .iter()
-            .filter_map(|value| match value {
-                regorus::Value::Number(number) => number
-                    .as_i64()
-                    .and_then(|port| u16::try_from(port).ok())
-                    .filter(|port| *port != 0),
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
-        _ => Vec::new(),
-    };
+/// Returns a record's usable ports, sorted and deduplicated, without port 0.
+fn record_ports(record: &crate::policy_types::DnsRecord) -> Vec<u16> {
+    let mut ports: Vec<u16> = record
+        .ports
+        .iter()
+        .copied()
+        .filter(|port| *port != 0)
+        .collect();
     ports.sort_unstable();
     ports.dedup();
     ports
@@ -746,6 +725,7 @@ fn build_mapping_publication_event(record: &ResolvedEndpointRecord) -> openshell
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::opa::OpaEngine;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
@@ -782,11 +762,11 @@ mod tests {
         service_with_gateway(policy_yaml, addresses, None)
     }
 
-    fn service_with_gateway(
+    fn service_with_opa(
         policy_yaml: &str,
         addresses: Vec<IpAddr>,
         trusted_host_gateway: Option<IpAddr>,
-    ) -> PolicyDnsService<FakeResolver> {
+    ) -> (Arc<OpaEngine>, PolicyDnsService<FakeResolver>) {
         let policy = Arc::new(
             OpaEngine::from_strings(include_str!("../../data/sandbox-policy.rego"), policy_yaml)
                 .unwrap(),
@@ -796,8 +776,8 @@ mod tests {
             "fd00:1::1".parse::<Ipv6Addr>().unwrap()..="fd00:1::8".parse::<Ipv6Addr>().unwrap(),
         )
         .unwrap();
-        PolicyDnsService::new(
-            policy,
+        let service = PolicyDnsService::new(
+            policy.clone(),
             FakeResolver {
                 calls: AtomicUsize::new(0),
                 answer: TrustedAnswer {
@@ -809,7 +789,16 @@ mod tests {
                 StoreConfig::new(pools, 16).unwrap(),
             )),
             trusted_host_gateway,
-        )
+        );
+        (policy, service)
+    }
+
+    fn service_with_gateway(
+        policy_yaml: &str,
+        addresses: Vec<IpAddr>,
+        trusted_host_gateway: Option<IpAddr>,
+    ) -> PolicyDnsService<FakeResolver> {
+        service_with_opa(policy_yaml, addresses, trusted_host_gateway).1
     }
 
     #[tokio::test]
@@ -1001,7 +990,8 @@ process: { run_as_user: sandbox, run_as_group: sandbox }
     #[tokio::test]
     async fn connect_lookup_rejects_ineligible_refresh_without_dns() {
         for case in ["wrong port", "expired observation", "stale generation"] {
-            let service = service(BASE_POLICY, vec!["8.8.8.8".parse().unwrap()]);
+            let (opa, service) =
+                service_with_opa(BASE_POLICY, vec!["8.8.8.8".parse().unwrap()], None);
             let answer = expired_answer(&service).await;
             let (address, port, expected) = match case {
                 "wrong port" => (answer.address, 3306, MappingLookupError::PortMismatch),
@@ -1017,13 +1007,11 @@ process: { run_as_user: sandbox, run_as_group: sandbox }
                     (observed.address, 5432, MappingLookupError::Expired)
                 }
                 _ => {
-                    service
-                        .policy
-                        .reload(
-                            include_str!("../../data/sandbox-policy.rego"),
-                            "network_policies: {}\n",
-                        )
-                        .unwrap();
+                    opa.reload(
+                        include_str!("../../data/sandbox-policy.rego"),
+                        "network_policies: {}\n",
+                    )
+                    .unwrap();
                     (answer.address, 5432, MappingLookupError::StalePolicy)
                 }
             };
@@ -1078,7 +1066,7 @@ process: { run_as_user: sandbox, run_as_group: sandbox }
 
     #[tokio::test]
     async fn policy_revocation_during_expired_mapping_refresh_fails_closed() {
-        let base = service(BASE_POLICY, vec!["8.8.8.8".parse().unwrap()]);
+        let (opa, base) = service_with_opa(BASE_POLICY, vec!["8.8.8.8".parse().unwrap()], None);
         let answer = expired_answer(&base).await;
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
@@ -1095,13 +1083,11 @@ process: { run_as_user: sandbox, run_as_group: sandbox }
         let connect =
             tokio::spawn(async move { refreshing.lookup_for_connect(answer.address, 5432).await });
         started.notified().await;
-        service
-            .policy
-            .reload(
-                include_str!("../../data/sandbox-policy.rego"),
-                "network_policies: {}\n",
-            )
-            .unwrap();
+        opa.reload(
+            include_str!("../../data/sandbox-policy.rego"),
+            "network_policies: {}\n",
+        )
+        .unwrap();
         release.notify_one();
         assert!(connect.await.unwrap().is_err());
         assert!(
@@ -1110,6 +1096,105 @@ process: { run_as_user: sandbox, run_as_group: sandbox }
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn allocation_identity_rotates_for_dns_contract_and_endpoint_identity_changes() {
+        use crate::policy_types::{DnsRecord, EndpointProtocol, MatchedEndpoint};
+
+        let endpoint = MatchedEndpoint {
+            policy_name: "database".into(),
+            endpoint_index: 0,
+            endpoint: DnsRecord {
+                host: "*.example".into(),
+                ports: vec![5432],
+                protocol: EndpointProtocol::Tcp,
+                allowed_ips: vec!["10.0.0.0/8".into()],
+                advisor_proposed: false,
+            },
+        };
+        let identity = |endpoint| {
+            allocation_identity(
+                &eligible_endpoints(
+                    &[endpoint],
+                    &NormalizedName::parse("db.example").unwrap(),
+                    None,
+                )
+                .unwrap(),
+            )
+        };
+        let original = identity(endpoint.clone());
+        for field in [
+            "policy_name",
+            "endpoint_index",
+            "host",
+            "ports",
+            "protocol",
+            "allowed_ips",
+        ] {
+            let mut changed = endpoint.clone();
+            match field {
+                "policy_name" => changed.policy_name = "renamed".into(),
+                "endpoint_index" => changed.endpoint_index = 1,
+                "host" => changed.endpoint.host = "db.example".into(),
+                "ports" => changed.endpoint.ports.push(5433),
+                "protocol" => changed.endpoint.protocol = EndpointProtocol::None,
+                "allowed_ips" => changed.endpoint.allowed_ips = vec!["10.1.0.0/16".into()],
+                _ => unreachable!(),
+            }
+            assert_ne!(
+                identity(changed),
+                original,
+                "{field} must rotate the identity"
+            );
+        }
+    }
+
+    #[test]
+    fn allocation_identity_survives_request_rules_settings_and_policy_hash_changes() {
+        let yaml = r#"
+version: 1
+network_policies:
+  api:
+    endpoints:
+      - host: api.example
+        port: 443
+        protocol: rest
+        rules:
+          - allow: { method: GET, path: "/v1/**" }
+    binaries: [{ path: /usr/bin/curl }]
+"#;
+        let identity = |yaml: &str| {
+            let policy = openshell_policy::parse_sandbox_policy(yaml).unwrap();
+            let hash = openshell_core::policy_identity::deterministic_policy_hash(&policy);
+            let snapshot = OpaEngine::from_proto(&policy)
+                .unwrap()
+                .policy_dns_eligibility_snapshot()
+                .unwrap();
+            assert_eq!(snapshot.endpoints.len(), 1);
+            let eligible = eligible_endpoints(
+                &snapshot.endpoints,
+                &NormalizedName::parse("api.example").unwrap(),
+                None,
+            )
+            .unwrap();
+            (allocation_identity(&eligible), hash)
+        };
+        let (original, original_hash) = identity(yaml);
+        for changed in [
+            yaml.replace("GET", "POST"),
+            yaml.replace("/v1/**", "/v2/**"),
+            yaml.replace(
+                "protocol: rest",
+                "protocol: rest\n        enforcement: audit",
+            ),
+            yaml.replace("protocol: rest", "protocol: rest\n        tls: skip"),
+            yaml.replace("/usr/bin/curl", "/usr/bin/wget"),
+        ] {
+            let (changed_identity, changed_hash) = identity(&changed);
+            assert_ne!(changed_hash, original_hash);
+            assert_eq!(changed_identity, original);
+        }
     }
 
     #[tokio::test]
@@ -1561,13 +1646,18 @@ process: { run_as_user: sandbox, run_as_group: sandbox }
 
     #[test]
     fn malformed_allowed_ips_remains_a_policy_error() {
-        let endpoints = [crate::opa::MatchedEndpoint {
+        use crate::policy_types::{DnsRecord, EndpointProtocol, MatchedEndpoint};
+
+        let endpoints = [MatchedEndpoint {
             policy_name: "database".to_string(),
             endpoint_index: 0,
-            endpoint: regorus::Value::from_json_str(
-                r#"{"host":"db.example","ports":[5432],"allowed_ips":["not-an-ip"]}"#,
-            )
-            .unwrap(),
+            endpoint: DnsRecord {
+                host: "db.example".to_string(),
+                ports: vec![5432],
+                protocol: EndpointProtocol::None,
+                allowed_ips: vec!["not-an-ip".to_string()],
+                advisor_proposed: false,
+            },
         }];
         assert!(matches!(
             eligible_endpoints(

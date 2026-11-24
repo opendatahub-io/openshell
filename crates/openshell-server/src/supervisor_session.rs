@@ -2230,6 +2230,8 @@ struct ConfigPushSetup {
     /// The admission the sandbox record holds, so a reconnect that reports
     /// the same admission writes nothing.
     persisted_admission: Option<openshell_core::proto::SandboxConfigurationAdmission>,
+    /// Versioned policy capabilities reported in the supervisor hello.
+    supported_capabilities: Vec<String>,
 }
 
 /// Everything needed to accept a supervisor session once its bootstrap is
@@ -2510,6 +2512,7 @@ async fn accept_supervisor_session(setup: SessionSetup) -> Result<(), Status> {
                 provider_environment: bootstrap_provider_environment,
                 captured_seq: setup.captured_seq,
                 rebuild,
+                supported_capabilities: setup.supported_capabilities,
             },
         );
     }
@@ -2644,9 +2647,13 @@ pub async fn handle_connect_supervisor(
             .status
             .as_ref()
             .and_then(|status| status.configuration_admission.clone()),
+        supported_capabilities: hello.supported_capabilities.clone(),
     });
     let bootstrap = if pushes_config {
-        Some(config_session::build_session_bootstrap(state, &sandbox).await?)
+        Some(
+            config_session::build_session_bootstrap(state, &sandbox, hello.supported_capabilities)
+                .await?,
+        )
     } else {
         None
     };

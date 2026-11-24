@@ -121,7 +121,8 @@ run_e2e() {
   fi
 
   # Pin `--target-dir` so the profile `junit.path` resolves regardless of `CARGO_TARGET_DIR`.
-  cargo nextest run --profile e2e-kubernetes \
+  # NEXTEST_TEST_THREADS sets conformance concurrency, not this suite's.
+  env -u NEXTEST_TEST_THREADS cargo nextest run --profile e2e-kubernetes \
     --config-file "${ROOT}/.config/nextest.toml" \
     --target-dir "${ROOT}/e2e/rust/target" \
     --manifest-path "${ROOT}/e2e/rust/Cargo.toml" \

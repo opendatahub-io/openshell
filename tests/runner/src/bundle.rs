@@ -76,7 +76,7 @@ struct Manifest {
 pub enum Kind {
     /// A nextest archive, run with `cargo-nextest`.
     Nextest,
-    /// A prebuilt testkit program (`list`, `ready` and `run`), run directly.
+    /// A prebuilt testkit program, run by nextest without a Cargo build.
     Program,
 }
 
@@ -93,7 +93,7 @@ impl Bundle {
     }
 }
 
-/// A bundle holding only `program`, a testkit program already built for the
+/// A bundle holding `program`, a testkit program already built for the
 /// guest target. `program` must be a static binary, as the guest's libc is
 /// not known.
 pub fn program(program: &Path) -> Result<Bundle> {
@@ -105,8 +105,13 @@ pub fn program(program: &Path) -> Result<Bundle> {
     let dir = tempfile::tempdir().context("create bundle directory")?;
     std::fs::copy(program, dir.path().join(PROGRAM_BINARY))
         .with_context(|| format!("copy {}", program.display()))?;
+    std::fs::write(dir.path().join(CONFIG), PROGRAM_CONFIG)?;
     Ok(Bundle(dir, Kind::Program))
 }
+
+/// The nextest configuration written into a program bundle, shared with the
+/// host-lane wrapper (`e2e/support/conformance.sh`).
+const PROGRAM_CONFIG: &str = include_str!("program-nextest.toml");
 
 /// The Rust target for guests. tmachine only boots guests of the host's
 /// architecture, and static musl binaries don't depend on the guest's libc.
@@ -362,18 +367,25 @@ mod tests {
     }
 
     #[test]
-    fn program_bundle_holds_only_the_program() {
+    fn program_bundle_holds_the_program_and_nextest_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("openshell-conformance");
         std::fs::write(&path, b"binary").unwrap();
         let bundle = program(&path).unwrap();
         assert_eq!(bundle.kind(), Kind::Program);
-        let names: Vec<_> = std::fs::read_dir(bundle.path())
+        let mut names: Vec<_> = std::fs::read_dir(bundle.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(names, [PROGRAM_BINARY]);
+        names.sort();
+        assert_eq!(names, [CONFIG, PROGRAM_BINARY]);
         assert!(program(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn program_config_defines_the_runner_profile() {
+        assert!(PROGRAM_CONFIG.contains(&format!("[profile.{PROFILE}]\n")));
+        assert!(PROGRAM_CONFIG.contains(&format!("[profile.{PROFILE}.junit]\n")));
     }
 
     fn write_bundle(dir: &Path, family: &str, packages: &[&str]) {

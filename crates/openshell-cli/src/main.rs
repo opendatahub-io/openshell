@@ -812,6 +812,7 @@ enum CliProviderRefreshStrategy {
     Oauth2ClientCredentials,
     GoogleServiceAccountJwt,
     AwsStsAssumeRole,
+    GithubAppInstallation,
 }
 
 impl CliProviderRefreshStrategy {
@@ -821,6 +822,7 @@ impl CliProviderRefreshStrategy {
             Self::Oauth2ClientCredentials => "oauth2_client_credentials",
             Self::GoogleServiceAccountJwt => "google_service_account_jwt",
             Self::AwsStsAssumeRole => "aws_sts_assume_role",
+            Self::GithubAppInstallation => "github_app_installation",
         }
     }
 }
@@ -1570,7 +1572,8 @@ enum SandboxCommands {
         #[arg(long = "provider")]
         providers: Vec<String>,
 
-        /// Path to a custom sandbox policy YAML file.
+        /// Path to a custom sandbox policy file: YAML, or Cedar with a `.cedar` extension
+        /// (Cedar requires a development build of the gateway).
         /// Overrides the built-in default and the `OPENSHELL_SANDBOX_POLICY` env var.
         #[arg(long, value_hint = ValueHint::FilePath)]
         policy: Option<String>,
@@ -1689,7 +1692,7 @@ enum SandboxCommands {
         #[arg(add = ArgValueCompleter::new(completers::complete_sandbox_names))]
         name: Option<String>,
 
-        /// Print only the active policy YAML (same policy as the default view; stdout only).
+        /// Print only the active policy, as YAML or Cedar source (stdout only).
         #[arg(long, conflicts_with = "output")]
         policy_only: bool,
 
@@ -2213,7 +2216,8 @@ enum PolicyCommands {
         #[arg(add = ArgValueCompleter::new(completers::complete_sandbox_names))]
         name: Option<String>,
 
-        /// Path to the policy YAML file.
+        /// Path to the policy file: YAML, or Cedar with a `.cedar` extension.
+        /// Global policies must be YAML.
         #[arg(long, value_hint = ValueHint::FilePath)]
         policy: String,
 
@@ -6227,6 +6231,39 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("--credential"));
         assert!(msg.contains("--from-gcloud-adc"));
+    }
+
+    #[test]
+    fn github_app_refresh_command_parses() {
+        let config = Cli::try_parse_from([
+            "openshell",
+            "provider",
+            "refresh",
+            "configure",
+            "repo-reader",
+            "--credential-key",
+            "GITHUB_TOKEN",
+            "--strategy",
+            "github-app-installation",
+            "--material",
+            "repository_ids=[42]",
+            "--material",
+            "permissions={\"contents\":\"read\"}",
+            "--secret-material-env",
+            "private_key=GITHUB_APP_PRIVATE_KEY",
+        ])
+        .expect("GitHub App refresh configuration should parse");
+        assert!(matches!(
+            config.command,
+            Some(Commands::Provider {
+                command: Some(ProviderCommands::Refresh(
+                    ProviderRefreshCommands::Configure {
+                        strategy: CliProviderRefreshStrategy::GithubAppInstallation,
+                        ..
+                    }
+                ))
+            })
+        ));
     }
 
     #[test]

@@ -150,7 +150,7 @@ async fn request_trace_capture_accepts_rpc_grandchildren() {
 struct Fixture {
     config: L7EndpointConfig,
     tunnel_engine: TunnelPolicyEngine,
-    middleware_engine: OpaEngine,
+    middleware_engine: Arc<OpaEngine>,
     ctx: L7EvalContext,
 }
 
@@ -176,7 +176,8 @@ struct Exchange {
 }
 
 fn fixture(data: &str, host: &str, policy_name: &str) -> Fixture {
-    let middleware_engine = OpaEngine::from_strings(POLICY, data).expect("valid test policy");
+    let middleware_engine =
+        Arc::new(OpaEngine::from_strings(POLICY, data).expect("valid test policy"));
     let input = NetworkInput {
         host: host.into(),
         port: 8000,
@@ -282,7 +283,7 @@ async fn run_exchange(
                     &mut relay_upstream,
                     vec![config],
                     tunnel_engine,
-                    &middleware_engine,
+                    &crate::policy_engine::PolicyEngine::from(Arc::clone(&middleware_engine)),
                     &ctx,
                 )
                 .await;
@@ -760,6 +761,7 @@ async fn inspected_keep_alive_requests_have_distinct_receipts_without_tracing() 
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     let (mut app, mut relay_client) = tokio::io::duplex(8192);
     let (mut relay_upstream, mut upstream) = tokio::io::duplex(8192);
+    let policy_engine = crate::policy_engine::PolicyEngine::from(Arc::clone(&middleware_engine));
     let exchange = async {
         tokio::join!(
             crate::proxy::relay_inspected_http_stream_for_test(
@@ -767,7 +769,7 @@ async fn inspected_keep_alive_requests_have_distinct_receipts_without_tracing() 
                 &mut relay_upstream,
                 vec![config],
                 tunnel_engine,
-                &middleware_engine,
+                &policy_engine,
                 &ctx,
             ),
             async {
@@ -846,12 +848,14 @@ async fn keep_alive_parse_rejection_does_not_reuse_the_completed_request_scope()
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let (mut app, mut relay_client) = tokio::io::duplex(8192);
             let (mut relay_upstream, mut upstream) = tokio::io::duplex(8192);
+            let policy_engine =
+                crate::policy_engine::PolicyEngine::from(Arc::clone(&middleware_engine));
             let mut relay = Box::pin(crate::proxy::relay_inspected_http_stream_for_test(
                 &mut relay_client,
                 &mut relay_upstream,
                 vec![config],
                 tunnel_engine,
-                &middleware_engine,
+                &policy_engine,
                 &ctx,
             ));
             app.write_all(b"GET /item HTTP/1.1\r\nHost: rest.example.test:8000\r\n\r\n")
@@ -925,12 +929,13 @@ async fn reload_inspected_relay(at: ReloadAt) -> Option<String> {
     } = rest_fixture("GET", false);
     let (mut app, mut relay_client) = tokio::io::duplex(8192);
     let (mut relay_upstream, mut upstream) = tokio::io::duplex(8192);
+    let policy_engine = crate::policy_engine::PolicyEngine::from(Arc::clone(&middleware_engine));
     let mut relay = Box::pin(crate::proxy::relay_inspected_http_stream_for_test(
         &mut relay_client,
         &mut relay_upstream,
         vec![config],
         tunnel_engine,
-        &middleware_engine,
+        &policy_engine,
         &ctx,
     ));
     let mut receipt = None;
@@ -1073,12 +1078,14 @@ async fn oversized_response_header_keeps_request_attribution_after_dispatch_retu
         } = rest_fixture("GET", false);
         let (mut app, mut relay_client) = tokio::io::duplex(32 * 1024);
         let (mut relay_upstream, mut upstream) = tokio::io::duplex(32 * 1024);
+        let policy_engine =
+            crate::policy_engine::PolicyEngine::from(Arc::clone(&middleware_engine));
         let mut relay = Box::pin(crate::proxy::relay_inspected_http_stream_for_test(
             &mut relay_client,
             &mut relay_upstream,
             vec![config],
             tunnel_engine,
-            &middleware_engine,
+            &policy_engine,
             &ctx,
         ));
         app.write_all(b"GET /item HTTP/1.1\r\nHost: rest.example.test:8000\r\n\r\n")

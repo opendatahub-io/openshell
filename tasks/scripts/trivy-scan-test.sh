@@ -222,6 +222,15 @@ jq -se '
 jq -se 'length == 3' "${TMP_DIR}/scan-reports/"config-packaged-*.json >/dev/null
 test -z "$(find "${TMP_DIR}/scan-reports" -name '*.sarif' -print -quit)"
 
+expect_status 0 "scan a chart published under its current name" \
+  env TRIVY_REPORT_DIR="${TMP_DIR}/renamed-chart" "${SCANNER}" config \
+  --chart-ref oci://registry-a.example/charts/openshell:1.2.0
+jq -se 'length == 1' "${TMP_DIR}/renamed-chart/"config-packaged-*.json >/dev/null
+
+expect_status 2 "reject a chart with no local source" \
+  env TRIVY_REPORT_DIR="${TMP_DIR}/unknown-chart" "${SCANNER}" config \
+  --chart-ref oci://registry-a.example/charts/not-a-chart:1.0.0
+
 expect_status 0 "retain image registry, path and platform identity" \
   env TRIVY_REPORT_DIR="${TMP_DIR}/images" "${SCANNER}" images \
   registry-a.example/ns/image:dev registry-b.example/ns/image:dev \

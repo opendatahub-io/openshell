@@ -25,7 +25,7 @@ Summary:        Safe, sandboxed runtimes for autonomous AI agents
 # Apache-2.0 SPDX headers or fall under the repository LICENSE. The unit file is
 # generated from this spec. Re-check when Cargo.lock changes.
 License:        Apache-2.0 AND BSD-3-Clause AND CC0-1.0 AND CDLA-Permissive-2.0 AND ISC AND MIT AND Unicode-3.0 AND Zlib
-URL:            https://github.com/NVIDIA/OpenShell
+URL:            https://github.com/ai-openshell/openshell
 Source0: openshell-%{openshell_version}.tar.gz
 Source1: openshell-%{openshell_version}-vendor.tar.xz
 
@@ -98,6 +98,13 @@ management, agent execution, and provider access via gRPC.
 # Extract vendored Cargo dependencies and configure offline build
 tar xf %{SOURCE1}
 %cargo_prep -v vendor
+# %%cargo_prep only redirects crates-io to the vendor directory. Git
+# dependencies need their own [source."git+..."] replacement tables, which
+# deploy/rpm/create-vendor-archive.sh captures from `cargo vendor` when
+# building Source1. Absent when the lockfile has no git dependencies.
+if [ -f vendor/.cargo-git-sources.toml ]; then
+  cat vendor/.cargo-git-sources.toml >> .cargo/config.toml
+fi
 
 # Patch workspace version from placeholder to actual build identity.
 sed -i 's/^version = "0.0.0"/version = "%{openshell_cargo_version}"/' Cargo.toml
@@ -143,7 +150,7 @@ install -d %{buildroot}%{_userunitdir}
 cat > %{buildroot}%{_userunitdir}/%{name}-gateway.service << 'EOF'
 [Unit]
 Description=OpenShell Gateway (user)
-Documentation=https://github.com/NVIDIA/OpenShell
+Documentation=https://github.com/ai-openshell/openshell
 After=podman.socket
 Wants=podman.socket
 

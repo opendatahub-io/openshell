@@ -8,6 +8,7 @@
 //! provides the guest cross-compilation toolchain, QEMU, Ansible, and the
 //! tmachine configuration.
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -17,6 +18,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::execute::{Run, Status};
 
 mod bundle;
+mod disruption;
 mod execute;
 mod test_env;
 
@@ -83,10 +85,18 @@ struct RunArgs {
     /// the guest's architecture (a `*-unknown-linux-musl` build).
     #[arg(long, value_name = "PATH", conflicts_with = "packages")]
     program: Option<PathBuf>,
+    /// Maximum number of tests nextest runs at once [default: 1].
+    #[arg(long, value_name = "N")]
+    test_threads: Option<NonZeroUsize>,
     /// The gateway name the installer registers with the CLI. The packaged
     /// installers register `openshell`.
     #[arg(long, default_value = "openshell")]
     gateway: String,
+    /// For a continuity family: run each scenario's `seed` test, apply this
+    /// disruption to the environment, and then run each `verify` test, e.g.
+    /// `gateway-restart`.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["filter", "program"])]
+    disruption: Option<String>,
     /// Keep the VM running after the tests until Enter is pressed.
     #[arg(long)]
     keep: bool,
@@ -141,6 +151,11 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
     let results = std::path::absolute(&args.results)
         .with_context(|| format!("resolve {}", args.results.display()))?;
 
+    let disruption = args
+        .disruption
+        .as_deref()
+        .map(disruption::find)
+        .transpose()?;
     let mut filters = args.filter.clone();
     let bundle = if let Some(program) = &args.program {
         eprintln!("==> using the prebuilt {}", program.display());
@@ -170,8 +185,10 @@ async fn run(args: RunArgs) -> Result<ExitCode> {
             gateway: &args.gateway,
             bundle: &bundle,
             filters: &filters,
+            test_threads: args.test_threads,
             results: &results,
             keep: args.keep,
+            disruption,
         },
     )
     .await;
@@ -244,6 +261,29 @@ fn repo_root() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_threads_accepts_a_positive_count_for_programs_and_bundles() {
+        let args = [
+            "runner",
+            "run",
+            "--environment",
+            "ubuntu-k3s",
+            "--installer",
+            "k3s",
+            "--family",
+            "conformance",
+            "--test-threads",
+        ];
+        assert!(Cli::try_parse_from(args.into_iter().chain(["0", "--program", "p"])).is_err());
+        for source in ["--program", "--bundle"] {
+            let cli = Cli::try_parse_from(args.into_iter().chain(["4", source, "p"])).unwrap();
+            let Command::Run(run) = cli.command else {
+                panic!("not run")
+            };
+            assert_eq!(run.test_threads.map(NonZeroUsize::get), Some(4));
+        }
+    }
 
     #[test]
     fn family_is_a_path_under_tests_suites() {

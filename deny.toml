@@ -19,6 +19,11 @@ ignore = [
     # oauth2, oci-client, russh-sftp, and russh-util.
     # https://github.com/chronotope/chrono/issues/1768
     { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; remove after first-party time APIs and all covered dependency graphs migrate to maintained alternatives and pass validation" },
+    # The root and its aligned test workspaces retain url 2.5.8. Version 2.5.9
+    # encodes a literal caret in a credential endpoint path as %5E, changing
+    # both the persisted allowlist entry and the HTTP request target.
+    # https://github.com/servo/rust-url/commit/25137be1fc1d35cc8ea7d43fc0a02166b023a483
+    { id = "RUSTSEC-2026-0592", reason = "Remove when a patched url can preserve exact credential request targets and persisted endpoint grants across mixed gateway versions" },
 ]
 
 # -- Licenses ------------------------------------------------------------------
@@ -68,6 +73,11 @@ external-default-features = "allow"
 name = "ring"
 wrappers = ["rustls", "rustls-webpki"]
 reason = "Use the selected crypto backend instead. These wrappers are allowed for z3-sys's prebuilt archive downloader."
+
+[[bans.deny]]
+name = "stacker"
+deny-multiple-versions = true
+reason = "Cedar's stack checks read the thread-local of the stacker that openshell-policy-cedar grows the stack with; a second version would not share it."
 
 [[bans.deny]]
 name = "aws-lc-rs"
@@ -189,6 +199,7 @@ wrappers = [
 name = "sha3"
 reason = "Use openshell-crypto; exceptions are classified in CRYPTO.md."
 wrappers = [
+    "lalrpop",
     "ml-kem",
     "russh",
 ]
@@ -408,4 +419,5 @@ reason = "SSH ciphers are dependency-owned."
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# OpenShell's Cedar (ai-openshell), pinned by commit in Cargo.toml.
+allow-git = ["https://github.com/ai-openshell/cedar.git"]

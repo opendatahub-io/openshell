@@ -27,10 +27,6 @@ on:
         description: Release version without the v prefix
         required: true
         type: string
-      npm-version:
-        description: TypeScript package version
-        required: true
-        type: string
     secrets:
       BUF_TOKEN:
         required: false
@@ -51,7 +47,7 @@ defaults:
 jobs:
   assemble:
     name: Assemble Release Assets
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -188,17 +184,23 @@ jobs:
           if-no-files-found: error
 
   tag-ghcr-release:
-    name: Publish GHCR Images
+    name: Publish Quay Images
     needs: assemble
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # Only jobs in this environment can trade their OIDC token for the Quay robot.
+    environment: release
+    # GitHub-hosted runners also ship podman, which the engine helper
+    # prefers; verify-image-sbom.sh needs Docker's buildx imagetools.
+    env:
+      CONTAINER_ENGINE: docker
     permissions:
       actions: read
       contents: read
-      packages: write
+      id-token: write
+      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ !inputs.is-prerelease }}
         with:
           persist-credentials: false
           ref: ${{ inputs.source-sha }}
@@ -214,8 +216,15 @@ jobs:
           path: artifacts/
           merge-multiple: true
 
-      - name: Log in to GHCR
+      - name: Log in to the CI registry
+        if: ${{ inputs.is-prerelease }}
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Log in to Quay
+        uses: ai-openshell/workflows/quay-login@96e33d5551ba4e706203648eb90710c48466e543 # main
+        with:
+          robot: ai-openshell+openshell_release
+          clients: docker
 
       - name: Publish stable image archives
         if: ${{ !inputs.is-prerelease }}
@@ -224,7 +233,7 @@ jobs:
         run: |
           set -euo pipefail
           for component in gateway sandbox supervisor; do
-            image="ghcr.io/nvidia/openshell/${component}:${VERSION}"
+            image="quay.io/ai-openshell/${component}:${VERSION}"
             # Never replace a published stable image; a rerun keeps the original.
             # Only a missing manifest means unpublished; any other lookup error
             # fails rather than risk overwriting.
@@ -268,21 +277,28 @@ jobs:
           VERSION: ${{ inputs.semver }}
         run: |
           set -euo pipefail
-          REGISTRY="ghcr.io/nvidia/openshell"
+          REGISTRY="quay.io/ai-openshell"
+          # Prereleases promote the SHA-tagged build from the CI registry;
+          # stable images were already published to Quay above.
+          SOURCE_REGISTRY="${REGISTRY}"
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            SOURCE_REGISTRY="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/openshell"
+          fi
           for component in gateway sandbox supervisor; do
             if [[ "${IS_PRERELEASE}" == "true" ]]; then
-              echo "Tagging ${REGISTRY}/${component}:${SOURCE_TAG} as ${VERSION}..."
+              echo "Promoting ${SOURCE_REGISTRY}/${component}:${SOURCE_TAG} as ${REGISTRY}/${component}:${VERSION}..."
               docker buildx imagetools create \
                 --prefer-index=false \
                 -t "${REGISTRY}/${component}:${VERSION}" \
-                "${REGISTRY}/${component}:${SOURCE_TAG}"
+                "${SOURCE_REGISTRY}/${component}:${SOURCE_TAG}"
+              tasks/scripts/verify-image-sbom.sh "${REGISTRY}/${component}:${VERSION}" --require-cargo
             fi
             if [[ "${MAKE_LATEST}" == "true" ]]; then
-              echo "Tagging ${REGISTRY}/${component}:${SOURCE_TAG} as latest..."
+              echo "Tagging ${SOURCE_REGISTRY}/${component}:${SOURCE_TAG} as latest..."
               docker buildx imagetools create \
                 --prefer-index=false \
                 -t "${REGISTRY}/${component}:latest" \
-                "${REGISTRY}/${component}:${SOURCE_TAG}"
+                "${SOURCE_REGISTRY}/${component}:${SOURCE_TAG}"
             fi
           done
 
@@ -291,8 +307,11 @@ jobs:
     needs: tag-ghcr-release
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Only jobs in this environment can trade their OIDC token for the Quay robot.
+    environment: release
     permissions:
-      packages: write
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -317,7 +336,7 @@ jobs:
   release:
     name: Publish Release Assets
     needs: [assemble, release-helm]
-    runs-on: linux-amd64-cpu8
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -502,7 +521,9 @@ jobs:
   publish-snap:
     name: Publish Snap
     needs: release
-    if: ${{ !inputs.is-prerelease && inputs.make-latest }}
+    # TODO: Move stable snap publishing to the upcoming packages repository under
+    # ai-openshell. Keep disabled here until that migration.
+    if: ${{ !inputs.is-prerelease && inputs.make-latest && false }}
     permissions:
       actions: read
       contents: read
@@ -517,7 +538,9 @@ jobs:
   publish-prerelease-snap:
     name: Publish Prerelease Snap
     needs: release
-    if: inputs.is-prerelease
+    # TODO: Move prerelease snap publishing to the upcoming packages repository
+    # under ai-openshell. Keep disabled here until that migration.
+    if: ${{ inputs.is-prerelease && false }}
     permissions:
       actions: read
       contents: read
@@ -528,20 +551,6 @@ jobs:
       github-environment: latest/beta
     secrets:
       SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
-
-  publish-sdk-typescript:
-    name: Publish TypeScript SDK
-    needs: release
-    if: ${{ !inputs.is-prerelease }}
-    permissions:
-      contents: read
-      packages: write
-    uses: ./.github/workflows/sdk-typescript-publish.yml
-    with:
-      release-tag: ${{ inputs.release-tag }}
-      source-ref: ${{ inputs.source-sha }}
-      npm-version: ${{ inputs.npm-version }}
-      make-latest: ${{ inputs.make-latest }}
 
   # GitHub treats skipped jobs as passing, so a publisher that never ran would
   # leave the run green. Fail when any publisher expected for this release kind
@@ -555,7 +564,6 @@ jobs:
       - release
       - publish-snap
       - publish-prerelease-snap
-      - publish-sdk-typescript
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -563,19 +571,9 @@ jobs:
       - name: Require every expected publisher to succeed
         env:
           NEEDS: ${{ toJSON(needs) }}
-          IS_PRERELEASE: ${{ inputs.is-prerelease }}
-          MAKE_LATEST: ${{ inputs.make-latest }}
         run: |
           set -euo pipefail
           expected=(assemble tag-ghcr-release release-helm release)
-          if [[ "${IS_PRERELEASE}" == "true" ]]; then
-            expected+=(publish-prerelease-snap)
-          else
-            expected+=(publish-sdk-typescript)
-            if [[ "${MAKE_LATEST}" == "true" ]]; then
-              expected+=(publish-snap)
-            fi
-          fi
           failed=0
           for job in "${expected[@]}"; do
             result=$(jq -r --arg job "${job}" '.[$job].result' <<<"${NEEDS}")

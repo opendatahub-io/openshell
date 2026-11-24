@@ -124,3 +124,28 @@ filtering preserves raw HTTP bytes
 and borrows unchanged header blocks. It removes only protected receipt fields
 and their `Connection` or `Trailer` nominations, including folded continuations,
 without adding general response-header validation.
+
+## Policy engines
+
+Networking consumes `PolicyEngine` and `TunnelPolicyEngine` from
+`openshell-policy-runtime-interface`. Supervisor composition selects the
+backend once at startup. `opa::OpaEngine` implements the YAML backend here;
+`openshell-policy-cedar-runtime` implements Cedar in a separate crate.
+
+The proxy, relay, and policy DNS use shared decisions and generation guards.
+An admitted connection carries an opaque destination authorizer that checks
+resolved addresses against the same policy snapshot. Networking applies its
+always-blocked address checks before the authorizer and blocks control-plane
+ports for IP literals independently of the backend. Explicit trusted gateway
+aliases retain their pinned validation. Reloads stage and commit
+through the backend contract, preserving atomic policy, middleware, and
+credential publication without inspecting concrete engine variants.
+
+`policy_types`, `policy_data`, `binary_resolution`, and `network_middleware`
+reexport shared runtime helpers. `policy_validation` reexports the policy
+composition layer's bounded validation diagnostics. The `experimental` feature
+forwards shared policy validation features without importing a Cedar runtime
+into production networking code.
+
+Cross-backend conformance scenarios live in `tests/policy-conformance`.
+Its engine-neutral networking probes are exposed only by `test-support`.

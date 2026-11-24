@@ -1117,7 +1117,11 @@ impl OpenShell for OpenShellService {
                 ],
             )
         };
-        mutation_audit::audited(targets, mutation_replay::run(&self.state, request)).await
+        Box::pin(mutation_audit::audited(
+            targets,
+            mutation_replay::run(&self.state, request),
+        ))
+        .await
     }
 
     async fn reject_draft_chunk(
@@ -1485,6 +1489,8 @@ pub mod test_support {
         Legacy,
         /// Applies and acknowledges streamed configuration.
         Apply,
+        /// Applies streamed configuration but cannot enforce Cedar policies.
+        ApplyWithoutCedar,
     }
 
     /// Serve `state` on loopback and open a supervisor stream whose hello
@@ -1548,11 +1554,18 @@ pub mod test_support {
                     supports_service_advertisements: false,
                     sandbox_id: sandbox_id.into(),
                     instance_id: "instance".into(),
-                    supports_config_push: features == StreamFeatures::Apply,
+                    supports_config_push: matches!(
+                        features,
+                        StreamFeatures::Apply | StreamFeatures::ApplyWithoutCedar
+                    ),
                     connection_epoch,
                     supports_provider_readiness: false,
                     redirected: false,
                     supports_session_redirect: false,
+                    supported_capabilities: openshell_core::extension_protocol::capabilities_if(
+                        openshell_core::extension_protocol::POLICY_CEDAR_V1,
+                        features == StreamFeatures::Apply,
+                    ),
                 })),
             })
             .await
@@ -1729,6 +1742,21 @@ pub mod test_support {
             Arc::new(SupervisorSessionRegistry::new()),
             None,
         )))
+    }
+
+    /// A Cedar policy that permits one network endpoint and loads without
+    /// warnings.
+    #[cfg(not(feature = "experimental"))]
+    pub fn cedar_policy() -> openshell_core::proto::SandboxPolicy {
+        openshell_core::proto::SandboxPolicy {
+            version: 1,
+            cedar_policy: Some(openshell_core::proto::CedarPolicy {
+                source: r#"permit (principal, action == Sandbox::Action::"NetworkConnect",
+                resource == Sandbox::NetworkEndpoint::"pypi.org:443");"#
+                    .to_string(),
+            }),
+            ..Default::default()
+        }
     }
 }
 

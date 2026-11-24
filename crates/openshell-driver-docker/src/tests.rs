@@ -364,6 +364,7 @@ pub fn runtime_config() -> DockerDriverRuntimeConfig {
         workspace_storage: workspace::Storage::WritableLayer,
         upstream_proxy: UpstreamProxyConfig::default(),
         proxy_ca_bundle: None,
+        ipv6_egress: SupervisorIpv6EgressConfig::default(),
         provider_spiffe_workload_api_socket: None,
         app_armor_profile: Some(AppArmorProfile::Unconfined),
         network_trust: None,
@@ -1497,6 +1498,37 @@ fn repository_e2e_docker_configuration_uses_the_supported_schema() {
 
     assert_eq!(config.image_pull_policy, ImagePullPolicy::IfNotPresent);
     assert_eq!(config.sandbox_label, "openshell-e2e");
+}
+
+#[test]
+fn docker_config_passes_ipv6_egress_settings_to_the_supervisor() {
+    let config: DockerComputeConfig = toml::from_str(
+        r#"
+https_proxy = "http://proxy.example:3128"
+policy_dns_ipv6_egress = "enabled"
+nat64_prefixes = ["2001:db8:64::/96"]
+"#,
+    )
+    .expect("Docker driver config parses");
+    assert_eq!(
+        config.upstream_proxy.https_proxy.as_deref(),
+        Some("http://proxy.example:3128")
+    );
+    assert_eq!(
+        config.ipv6_egress.supervisor_args(),
+        [
+            "--policy-dns-ipv6-egress",
+            "enabled",
+            "--nat64-prefix",
+            "2001:db8:64::/96"
+        ]
+    );
+    let bind: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+    config.validate_configuration(bind).unwrap();
+
+    let invalid: DockerComputeConfig =
+        toml::from_str(r#"nat64_prefixes = ["2001:db8::/80"]"#).unwrap();
+    assert!(invalid.validate_configuration(bind).is_err());
 }
 
 #[test]
@@ -4264,10 +4296,10 @@ fn docker_guest_tls_paths_allows_plain_http_without_tls_flags() {
 }
 
 #[test]
-fn default_docker_supervisor_image_uses_nvidia_ghcr_repo() {
+fn default_docker_supervisor_image_uses_quay_repo() {
     let image = openshell_core::config::default_supervisor_image();
     assert!(
-        image.starts_with("ghcr.io/nvidia/openshell/supervisor:"),
+        image.starts_with("quay.io/ai-openshell/supervisor:"),
         "unexpected default image reference: {image}",
     );
 }
@@ -4300,19 +4332,19 @@ fn docker_supervisor_image_tag_sanitizes_build_metadata_for_docker() {
 #[test]
 fn docker_supervisor_image_refreshes_mutable_tags_only() {
     assert!(supervisor_image_should_refresh(
-        "ghcr.io/nvidia/openshell/supervisor:dev"
+        "quay.io/ai-openshell/supervisor:dev"
     ));
     assert!(supervisor_image_should_refresh(
-        "ghcr.io/nvidia/openshell/supervisor:latest"
+        "quay.io/ai-openshell/supervisor:latest"
     ));
     assert!(supervisor_image_should_refresh(
-        "ghcr.io/nvidia/openshell/supervisor"
+        "quay.io/ai-openshell/supervisor"
     ));
     assert!(!supervisor_image_should_refresh(
-        "ghcr.io/nvidia/openshell/supervisor:0.0.47-dev.13-g57b71c68f"
+        "quay.io/ai-openshell/supervisor:0.0.47-dev.13-g57b71c68f"
     ));
     assert!(!supervisor_image_should_refresh(
-        "ghcr.io/nvidia/openshell/supervisor@sha256:abc123"
+        "quay.io/ai-openshell/supervisor@sha256:abc123"
     ));
 }
 
