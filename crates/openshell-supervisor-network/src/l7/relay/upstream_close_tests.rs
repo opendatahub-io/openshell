@@ -104,8 +104,16 @@ where
         let guard = engine
             .generation_guard(engine.current_generation())
             .unwrap();
-        relay_passthrough_with_credentials(&mut client, &mut upstream, &ctx, &guard, Some(&engine))
-            .await
+        let policy_engine = PolicyEngine::from(Arc::new(engine));
+        let passthrough = policy_engine.passthrough_middleware().unwrap();
+        relay_passthrough_with_credentials(
+            &mut client,
+            &mut upstream,
+            &ctx,
+            &guard,
+            Some(&passthrough),
+        )
+        .await
     } else {
         let input = NetworkInput {
             host: ctx.host.clone(),
@@ -249,12 +257,14 @@ async fn client_body_eof_is_not_an_upstream_failure() {
         let (mut relay_upstream, _upstream) = tokio::io::duplex(8192);
         app.write_all(&REQUEST[..REQUEST.len() - 2]).await.unwrap();
         app.shutdown().await.unwrap();
+        let policy_engine = PolicyEngine::from(Arc::new(engine));
+        let passthrough = policy_engine.passthrough_middleware().unwrap();
         relay_passthrough_with_credentials(
             &mut client,
             &mut relay_upstream,
             &context(),
             &guard,
-            Some(&engine),
+            Some(&passthrough),
         )
         .await
         .expect_err("client did not provide its declared body");

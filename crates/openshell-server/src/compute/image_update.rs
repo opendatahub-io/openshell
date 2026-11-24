@@ -2083,7 +2083,7 @@ BEGIN SELECT RAISE(ABORT, 'injected sandbox deletion failure'); END",
 
         // Process snapshots in watch-loop order. The event for the sandbox
         // being validated must not hold up the following unrelated event.
-        tokio::time::timeout(Duration::from_secs(2), async {
+        Box::pin(tokio::time::timeout(Duration::from_secs(2), async {
             for sandbox in [&original, &unrelated] {
                 runtime
                     .apply_watch_event(WatchSandboxesEvent {
@@ -2100,7 +2100,7 @@ BEGIN SELECT RAISE(ABORT, 'injected sandbox deletion failure'); END",
                     .await
                     .unwrap();
             }
-        })
+        }))
         .await
         .expect("watch events must progress while preflight is paused");
         for sandbox in [&original, &unrelated] {

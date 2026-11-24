@@ -486,6 +486,37 @@ async fn report_endpoint_status_does_not_wait_for_unrelated_sandbox_guard() {
     drop(unrelated_guard);
 }
 
+#[cfg(feature = "experimental")]
+#[test]
+fn cedar_endpoint_statuses_accept_configured_wildcard_observation() {
+    let policy = ProtoSandboxPolicy {
+        cedar_policy: Some(openshell_core::proto::CedarPolicy {
+            source: r#"
+@protocol("mcp") @path("/mcp/**")
+permit (principal, action == Sandbox::Action::"HttpRequest", resource)
+when { resource.host like("*.example.com", ".") && resource.port == 443 };
+"#
+            .to_string(),
+        }),
+        ..Default::default()
+    };
+    let expected = expected_endpoint_statuses(&policy);
+    assert_eq!(expected.len(), 1);
+    let descriptor = initial_endpoint_status(&NetworkEndpoint {
+        host: "*.example.com".to_string(),
+        port: 443,
+        path: "/mcp/**".to_string(),
+        ..Default::default()
+    });
+    assert_eq!(expected[&descriptor.endpoint_id].status, descriptor);
+    let observations = vec![EndpointObservation {
+        endpoint_id: descriptor.endpoint_id,
+        result: EndpointResult::HttpResponseReceived.into(),
+        failure: None,
+    }];
+    assert!(validate_endpoint_snapshot(&observations, &[], &expected, &[]).is_ok());
+}
+
 #[test]
 fn expected_endpoint_statuses_canonicalize_identity_and_distinguish_paths() {
     let policy = ProtoSandboxPolicy {
@@ -568,6 +599,7 @@ async fn report_endpoint_status_rejects_stale_configuration_epoch() {
             Request::new(GetSandboxConfigRequest {
                 name: sandbox_id.to_string(),
                 workspace_scope: None,
+                ..Default::default()
             }),
             sandbox_id,
         ),
@@ -1948,6 +1980,7 @@ async fn replacement_reset_timeout_invalidates_superseded_evidence() {
             redirected: false,
             supports_session_redirect: false,
             supports_config_push: false,
+            supported_capabilities: Vec::new(),
         })),
     };
     let error = gateway_client(Arc::clone(&state))
@@ -2023,6 +2056,7 @@ async fn replacement_reset_retry_does_not_hold_gateway_shutdown() {
             redirected: false,
             supports_session_redirect: false,
             supports_config_push: false,
+            supported_capabilities: Vec::new(),
         })),
     };
     let error = gateway_client(Arc::clone(&state))
@@ -2090,6 +2124,7 @@ async fn report_endpoint_status_is_session_bound_and_retry_idempotent() {
             Request::new(GetSandboxConfigRequest {
                 name: sandbox_id.to_string(),
                 workspace_scope: None,
+                ..Default::default()
             }),
             sandbox_id,
         ),

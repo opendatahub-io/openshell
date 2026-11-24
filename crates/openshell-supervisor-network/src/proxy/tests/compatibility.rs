@@ -14,10 +14,12 @@ fn allowed_decision(intent: EgressIntent) -> EgressDecision {
             matched_policy: Some("proxy_compatibility".to_string()),
         },
         policy_generation: 0,
+        engine: "opa",
         identity: ProcessIdentityEvidence::Available,
         endpoint: EndpointDecision::default(),
         binary: Some(PathBuf::from("/usr/bin/curl")),
         binary_pid: Some(42),
+        process: None,
         ancestors: vec![PathBuf::from("/usr/bin/sh")],
         cmdline_paths: vec![],
     }
@@ -99,9 +101,7 @@ async fn destination_denials_preserve_adapter_specific_wire_contracts() {
             "target.example",
             8443,
             "/usr/bin/curl",
-            "42",
-            "/usr/bin/sh",
-            "curl",
+            &Process::from_bypass("/usr/bin/curl", "42", "/usr/bin/sh").with_cmd_line("curl"),
             &allowed_decision(EgressIntent::connect("target.example".to_string(), 8443)),
             &None,
             &None,
@@ -146,9 +146,7 @@ async fn destination_denials_preserve_adapter_specific_wire_contracts() {
             8080,
             "/v1/items",
             "/usr/bin/curl",
-            "42",
-            "/usr/bin/sh",
-            "curl",
+            &Process::from_bypass("/usr/bin/curl", "42", "/usr/bin/sh").with_cmd_line("curl"),
             "proxy_compatibility",
             &allowed_decision(EgressIntent::forward_http(
                 "target.example".to_string(),
@@ -190,10 +188,7 @@ fn representative_adapter_denials_preserve_ocsf_fields() {
         peer,
         "target.example",
         8443,
-        "/usr/bin/curl",
-        "42",
-        "/usr/bin/sh",
-        "curl --proxy",
+        &Process::from_bypass("/usr/bin/curl", "42", "/usr/bin/sh").with_cmd_line("curl --proxy"),
     ))
     .unwrap();
     assert_eq!(connect["class_name"], "Network Activity");
@@ -221,10 +216,7 @@ fn representative_adapter_denials_preserve_ocsf_fields() {
         "target.example",
         8080,
         "/v1/items",
-        "/usr/bin/curl",
-        "42",
-        "/usr/bin/sh",
-        "curl --proxy",
+        &Process::from_bypass("/usr/bin/curl", "42", "/usr/bin/sh").with_cmd_line("curl --proxy"),
         "proxy_compatibility",
     ))
     .unwrap();
@@ -253,12 +245,10 @@ fn representative_adapter_allows_preserve_ocsf_fields() {
         peer,
         "target.example",
         8443,
-        "/usr/bin/curl",
-        "42",
-        "/usr/bin/sh",
-        "curl --proxy",
+        &Process::from_bypass("/usr/bin/curl", "42", "/usr/bin/sh").with_cmd_line("curl --proxy"),
         "proxy_compatibility",
         true,
+        "opa",
     ))
     .unwrap();
     assert_eq!(connect["class_name"], "Network Activity");
@@ -280,11 +270,9 @@ fn representative_adapter_allows_preserve_ocsf_fields() {
         "target.example",
         8080,
         "/v1/items",
-        "/usr/bin/curl",
-        "42",
-        "/usr/bin/sh",
-        "curl --proxy",
+        &Process::from_bypass("/usr/bin/curl", "42", "/usr/bin/sh").with_cmd_line("curl --proxy"),
         "proxy_compatibility",
+        "opa",
     ))
     .unwrap();
     assert_eq!(forward["class_name"], "HTTP Activity");
@@ -352,7 +340,7 @@ network_policies:
     // combined authorization query must deny rather than preserve the old
     // multi-query behavior that could fall back to an L4-only allow.
     let decision = evaluate_endpoint_only_opa(
-        &engine,
+        &PolicyEngine::from(Arc::new(engine)),
         EgressIntent::connect("sub\0.example.com".to_string(), 443),
     );
 
@@ -381,7 +369,7 @@ network_policies:
 "#,
     )
     .unwrap();
-    let input = |binary_path: PathBuf| crate::opa::NetworkInput {
+    let input = |binary_path: PathBuf| crate::policy_types::NetworkInput {
         host: "target.example".to_string(),
         port: 443,
         binary_path,
@@ -417,7 +405,7 @@ fn identity_required_mode_is_explicitly_unsupported_off_linux() {
             "127.0.0.1:41000".parse().unwrap(),
             "127.0.0.1:3000".parse().unwrap(),
         ),
-        &engine,
+        &PolicyEngine::from(Arc::new(engine)),
         &BinaryIdentityCache::new(),
         &AtomicU32::new(1),
         EgressIntent::connect("target.example".to_string(), 443),

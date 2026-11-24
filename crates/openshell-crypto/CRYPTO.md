@@ -128,6 +128,10 @@ constrain direct parents, not an entire ancestry exclusively to Z3. Dependency
 upgrades that introduce a new parent must receive review instead of automatically
 adding that parent to the allowlist.
 
+The `lalrpop` wrapper on `sha3` covers `cedar-policy-core`'s build-time parser
+generator, which hashes grammar inputs during compilation and does not ship in
+runtime binaries. No runtime migration is required.
+
 This is an enumerated dependency guardrail, not a source scanner or a FIPS
 attestation. It does not automatically recognize a new cryptographic crate,
 detect hand-written cryptography, inspect calls through re-exports, or prevent

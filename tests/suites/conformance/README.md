@@ -20,7 +20,12 @@ target (`harness = false`), so `openshell-conformance run`,
 | `policy-advisor` | `policy.local` accepts a proposed rule; a denied address or hostname yields one draft rule |
 | `file-transfer` | `sandbox upload` and `download`: round trips, file modes and symlinks outside the workspace, `.gitignore` filtering, workspace-escape and option-looking names, a large upload |
 | `create-upload` | `sandbox create --upload`: directory basename and nested files, multiple uploads, a single file |
-| `credential-gating` | Provider credentials: admission of credentialed endpoints, REST body placeholders and rewriting, WebSocket binary frames, live policy binding |
+| `credential-gating` | Provider credentials: admission of credentialed endpoints, REST header and body placeholders and rewriting, WebSocket text and binary frames, live policy binding, static credentials bound to their profile endpoints |
+| `network` | Direct connections that bypass the proxy are denied; reserved destinations fail with `EACCES`; localhost works without proxy settings; closed listeners release their ports |
+| `network-l7` | REST, GraphQL, JSON-RPC, and MCP rules allow and deny requests; REST upgrades are refused |
+| `network-egress` | Transparent egress: policy reloads close open connections, ambiguous updates are rejected, `tls: skip` relays raw bytes, middleware redacts or blocks traffic, pipelined requests are authorized one at a time |
+| `policy-update` | `policy set` and `policy update`: revisions and versions, repeated updates, scoped endpoint changes, the revision for a sparse initial policy |
+| `port-forward` | `forward start` reaches a server on the sandbox's loopback; `forward stop` closes the port |
 | `image` | A sandbox runs the default image or the one it is created from |
 | `labels` | Labels are stored and select sandboxes in `sandbox list` |
 | `templates` | A sandbox created from a template uses its workload; duplicate, deleted and missing templates return the right errors |
@@ -31,12 +36,13 @@ target (`harness = false`), so `openshell-conformance run`,
 
 `smoke` is the smallest end-to-end check that the runner can run a real test in a
 tmachine environment on CI. The other suites are ports of the old
-`conformance/cli` scenarios and of Evan Lezar's suites in NVIDIA/OpenShell#4629
+`conformance/cli` scenarios and of Evan Lezar's suites in ai-openshell/openshell#4629
 (credited in each file). `file-transfer` runs `git` on the machine that runs the
 tests, so a test environment needs it installed
 (`tests/tmachine/ansible/playbooks/test-tools.yaml` does that for the tmachine
-environments). `credential-gating`, ported from NVIDIA/OpenShell#5264, starts
-servers (`tests/support/host-server`) on the machine that runs the tests and
+environments). `credential-gating`, `network`, `network-l7`, and
+`network-egress` start servers (`tests/support/host-server`) on the machine
+that runs the tests and
 reaches them from sandboxes created from `testkit::python_image()` through
 `host.openshell.internal`. `ssh` runs `ssh` and `ssh-keygen` there and needs a named
 gateway, which `sandbox ssh-config` writes into its `ProxyCommand`.
@@ -62,35 +68,23 @@ tests/suites/conformance/target/debug/openshell-conformance run --junit conforma
 The program runs only this suite: passing it means a gateway meets the
 conformance contract below. The machine that runs it must be reachable from
 sandboxes as `host.openshell.internal`, which rules out a gateway on a remote
-Kubernetes cluster ([#5409](https://github.com/NVIDIA/OpenShell/issues/5409)).
+Kubernetes cluster ([#5409](https://github.com/ai-openshell/openshell/issues/5409)).
 Feature and driver suites are not part of it. The
 [testkit README](../../testkit/README.md#test-programs) describes the commands
 and exit codes. `tasks/scripts/check-conformance-program.sh` checks that it
 lists the same tests as nextest.
 
-### Marking a test unsupported in CI
-
-When a test can't pass in one environment yet, for example because of a driver
-bug, keep the test and mark it unsupported there:
-
-1. File an issue for the bug.
-2. Add an entry to [`unsupported.yaml`](unsupported.yaml): the test, the issue,
-   and the environments it fails in, each a tmachine row
-   (`<environment>/<installer>`, such as `ubuntu-k3s/k3s-ha`) or a host lane
-   (`docker`, `podman`, `kubernetes` or `vm`).
-3. Delete the entry in the PR that fixes the bug.
-
-CI turns the entries for an environment into `OPENSHELL_TEST_UNSUPPORTED`; the
-[testkit README](../../testkit/README.md#unsupported-tests) describes what the
-program does with it. Branch Checks runs the program with each environment's
-entries, so an unknown test, a bad issue URL or an unknown environment name
-fails there.
+See [Unsupported tests](../../testkit/README.md#unsupported-tests) to skip a
+test in specific CI environments.
 
 ## Adding a test
 
 Add a `#[testkit::test]` function to a suite, or for a new area, a new file in
 `src/` and a `mod` line for it in `src/lib.rs`. `openshell-conformance`
 includes every test in the crate.
+
+Tests must be safe to run concurrently on a shared gateway; see
+[What a conformance test may assert](../../../TESTING.md#what-a-conformance-test-may-assert).
 
 ## What a test may assert
 

@@ -96,6 +96,14 @@ spec:
             - {{ printf "%s:%v" $listenHost (get $shared "runtime_port") | quote }}
             - --session-root
             - /run/openshell/sessions
+            {{- with get $kubernetes "policy_dns_ipv6_egress" }}
+            - --policy-dns-ipv6-egress
+            - {{ . | quote }}
+            {{- end }}
+            {{- range get $kubernetes "nat64_prefixes" | default list }}
+            - --nat64-prefix
+            - {{ . | quote }}
+            {{- end }}
           env:
             {{- if get $app "enabled" }}
             - name: OPENSHELL_APP_LISTENER_ENABLED
@@ -132,6 +140,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            # The same per-member cap the gateway places by.
+            - name: OPENSHELL_SUPERVISOR_POOL_MAX_INSTANCES
+              value: {{ include "openshell.supervisorMaxInstancesPerMember" . | quote }}
           ports:
             {{- if get $app "enabled" }}
             - name: app
@@ -149,12 +160,10 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+          {{- with .Values.supervisor.resources }}
           resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              memory: 1Gi
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           # Process health only: the health listener accepts and closes probe
           # connections. Each instance's readiness is reported to the gateway
           # over the supervisor's own connection to it.

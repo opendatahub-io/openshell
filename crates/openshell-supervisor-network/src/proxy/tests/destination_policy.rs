@@ -23,11 +23,13 @@ fn authorize_destination(
             },
         },
     });
-    let engine = native_identity_engine(
-        include_str!("../../../data/sandbox-policy.rego"),
-        &policy.to_string(),
-    )
-    .expect("load destination policy");
+    let engine = PolicyEngine::from(Arc::new(
+        native_identity_engine(
+            include_str!("../../../data/sandbox-policy.rego"),
+            &policy.to_string(),
+        )
+        .expect("load destination policy"),
+    ));
     let (open, _completion) = staged_curl_open(
         "10.23.45.67:443".parse().unwrap(),
         engine.current_generation(),
@@ -87,7 +89,7 @@ fn planner_requires_grant_for_private_ipv6_literals() {
         ("::ffff:10.23.45.67", "::ffff:10.23.45.67"),
     ] {
         let ip = ip.parse().unwrap();
-        let result = build_validation_plan(host, host, None, None, &[], false)
+        let result = build_validation_plan(host, host, None, None, &[], false, None)
             .and_then(|plan| filter_resolved_addresses(&plan, host, 443, &[ip]));
         assert!(
             result.is_err(),

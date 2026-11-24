@@ -69,9 +69,10 @@ use super::provider::{
     get_provider_record, is_valid_env_key, validate_provider_environment_keys_unique_with_catalog,
 };
 use super::validation::{
-    level_matches, source_matches, validate_and_canonicalize_policy, validate_dns1123_label,
-    validate_exec_request_fields, validate_no_reserved_provider_policy_keys,
-    validate_policy_safety, validate_sandbox_governance_spec, validate_sandbox_spec,
+    level_matches, require_gateway_cedar_support, source_matches, validate_and_canonicalize_policy,
+    validate_dns1123_label, validate_exec_request_fields,
+    validate_no_reserved_provider_policy_keys, validate_policy_safety,
+    validate_sandbox_governance_spec, validate_sandbox_spec,
 };
 use super::{MAX_PROVIDERS, MAX_ROUTABLE_NAME_LEN};
 use crate::persistence::current_time_ms;
@@ -1932,6 +1933,9 @@ async fn handle_start_sandbox_inner(
         MinWorkspaceRole::User,
     )
     .await?;
+    if let Some(policy) = resolved.spec.as_ref().and_then(|spec| spec.policy.as_ref()) {
+        require_gateway_cedar_support(policy)?;
+    }
     let workspace = resolved.object_workspace().to_string();
     let name = resolved.object_name().to_string();
     let mut sandbox = state
@@ -2032,6 +2036,9 @@ async fn handle_resume_sandbox_inner(
         MinWorkspaceRole::User,
     )
     .await?;
+    if let Some(policy) = resolved.spec.as_ref().and_then(|spec| spec.policy.as_ref()) {
+        require_gateway_cedar_support(policy)?;
+    }
     let workspace = resolved.object_workspace().to_string();
     let name = resolved.object_name().to_string();
     let mut sandbox = state
@@ -4382,6 +4389,134 @@ mod tests {
     use openshell_core::proto::{
         GpuResourceRequirements, SandboxServiceExposure, ServiceAuthorizationMode, ServiceEndpoint,
     };
+
+    #[cfg(not(feature = "experimental"))]
+    /// A test state whose compute driver records provisioning calls.
+    async fn test_server_state_with_fake_driver() -> (
+        Arc<ServerState>,
+        Arc<crate::test_support::FakeComputeDriver>,
+    ) {
+        let mut state = test_server_state().await;
+        let driver = Arc::new(
+            crate::test_support::FakeComputeDriver::new().with_capabilities(
+                openshell_core::proto::compute::v1::GetCapabilitiesResponse {
+                    driver_name: "test".to_string(),
+                    default_image: "test/image:latest".to_string(),
+                    resource_admission_policy:
+                        openshell_core::resource_admission::DriverAdmissionConfig::default()
+                            .acknowledgement(),
+                    extension: Some(openshell_core::extension_protocol::extension_metadata(
+                        openshell_core::extension_protocol::ExtensionFamily::Compute,
+                        "test/fake",
+                        "test",
+                        [],
+                    )),
+                    ..Default::default()
+                },
+            ),
+        );
+        let compute = crate::compute::ComputeRuntime::from_driver(
+            "test".to_string(),
+            driver.clone(),
+            None,
+            state.store.clone(),
+            crate::sandbox_index::SandboxIndex::new(),
+            crate::sandbox_watch::SandboxWatchBus::new(),
+            crate::tracing_bus::TracingLogBus::new(),
+            Arc::new(crate::supervisor_session::SupervisorSessionRegistry::new()),
+        )
+        .await
+        .unwrap();
+        Arc::get_mut(&mut state).unwrap().compute = compute;
+        driver.clear_calls();
+        (state, driver)
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    fn create_request_with_policy(
+        name: &str,
+        policy: openshell_core::proto::SandboxPolicy,
+    ) -> Request<CreateSandboxRequest> {
+        authed_request(CreateSandboxRequest {
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+            name: name.to_string(),
+            spec: Some(SandboxSpec {
+                policy: Some(policy),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+    }
+
+    /// Stores a stopped sandbox whose spec holds a Cedar policy, as a
+    /// Cedar-enabled gateway with a supervisor-enforced driver created it.
+    #[cfg(not(feature = "experimental"))]
+    async fn put_stopped_cedar_sandbox(state: &ServerState, name: &str) {
+        let mut sandbox = test_sandbox(name, Vec::new());
+        sandbox.spec.as_mut().unwrap().policy = Some(crate::grpc::test_support::cedar_policy());
+        sandbox.set_phase(SandboxPhase::Stopped as i32);
+        state.store.put_message(&sandbox).await.unwrap();
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    fn start_request(name: &str) -> Request<StartSandboxRequest> {
+        authed_request(StartSandboxRequest {
+            name: name.to_string(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+            ..Default::default()
+        })
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    #[tokio::test]
+    async fn create_rejects_cedar_without_cedar_support() {
+        let (state, driver) = test_server_state_with_fake_driver().await;
+        let error = handle_create_sandbox(
+            &state,
+            create_request_with_policy("cedar", crate::grpc::test_support::cedar_policy()),
+        )
+        .await
+        .expect_err("Cedar is unsupported");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{error:?}");
+        assert!(error.message().contains("without Cedar"), "{error:?}");
+        assert!(driver.calls().is_empty(), "{:?}", driver.calls());
+    }
+
+    #[cfg(not(feature = "experimental"))]
+    #[tokio::test]
+    async fn start_rejects_a_stored_cedar_sandbox_without_cedar_support() {
+        let (state, driver) = test_server_state_with_fake_driver().await;
+        put_stopped_cedar_sandbox(&state, "stored-cedar").await;
+
+        let error = handle_start_sandbox(&state, start_request("stored-cedar"))
+            .await
+            .expect_err("Cedar is unsupported");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{error:?}");
+        assert!(error.message().contains("without Cedar"), "{error:?}");
+        assert!(driver.calls().is_empty(), "{:?}", driver.calls());
+    }
+
+    /// Resuming starts the workload again, so it applies the start checks.
+    #[cfg(not(feature = "experimental"))]
+    #[tokio::test]
+    async fn resume_rejects_a_stored_cedar_sandbox_without_cedar_support() {
+        let (state, driver) = test_server_state_with_fake_driver().await;
+        put_stopped_cedar_sandbox(&state, "stored-cedar").await;
+
+        let error = handle_resume_sandbox(
+            &state,
+            authed_request(ResumeSandboxRequest {
+                name: "stored-cedar".to_string(),
+                workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("Cedar is unsupported");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{error:?}");
+        assert!(error.message().contains("without Cedar"), "{error:?}");
+        assert!(driver.calls().is_empty(), "{:?}", driver.calls());
+    }
 
     #[tokio::test]
     async fn missing_launch_signer_precedes_driver_validation_and_preserves_staged_archive() {

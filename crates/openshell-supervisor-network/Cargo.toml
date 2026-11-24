@@ -11,6 +11,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+openshell-policy-runtime-interface = { path = "../openshell-policy-runtime-interface" }
 openshell-sandbox-backend = { path = "../openshell-sandbox-backend" }
 sha2 = { workspace = true }
 openshell-binary-identity = { path = "../openshell-binary-identity" }
@@ -64,10 +65,16 @@ uuid = { workspace = true }
 webpki-roots = { workspace = true, optional = true }
 
 [features]
+# Engine-neutral fixtures for the policy conformance suite.
+test-support = []
 default = ["bundled-ca-roots"]
 bundled-ca-roots = ["dep:webpki-roots"]
+# Forwards shared policy validation features; supervisor composition selects
+# the runtime backend.
+experimental = ["openshell-policy/experimental"]
 
 [dev-dependencies]
+openshell-policy-cedar-runtime = { path = "../openshell-policy-cedar-runtime" }
 openshell-sandbox-backend = { path = "../openshell-sandbox-backend", features = ["test-support"] }
 
 openshell-driver-vm = { path = "../openshell-driver-vm", default-features = false, features = ["allocation-tracking"] }

@@ -136,6 +136,8 @@ pub struct SessionRuntimeContext {
     /// Peer endpoint of the gateway replica serving this supervisor's shared
     /// host. When set, sessions dial it instead of the configured address.
     pub gateway_home: Option<watch::Receiver<Option<String>>>,
+    /// Versioned policy capabilities advertised by the supervisor.
+    pub supported_capabilities: Vec<String>,
 }
 
 /// Parse a gRPC endpoint URI into an OCSF `Endpoint` (host + port). Falls back
@@ -432,6 +434,7 @@ pub fn spawn_with_readiness(
         config_apply_tx: runtime.config_apply_tx,
         config_push_updates: runtime.config_push_updates,
         gateway_home: runtime.gateway_home,
+        supported_capabilities: runtime.supported_capabilities,
         ready_tx,
     };
     (tokio::spawn(run_session_loop(config)), ready_rx)
@@ -453,6 +456,7 @@ struct SessionConfig {
     /// reconnect to a gateway that does not push resumes polling.
     config_push_updates: watch::Sender<bool>,
     gateway_home: Option<watch::Receiver<Option<String>>>,
+    supported_capabilities: Vec<String>,
     ready_tx: watch::Sender<bool>,
 }
 
@@ -683,6 +687,26 @@ enum SessionOutcome {
     HomeMoved { peer_endpoint: String },
 }
 
+/// The hello opening a session: identity and the capabilities this
+/// supervisor reports to the gateway.
+fn supervisor_hello(
+    config: &SessionConfig,
+    redirected: bool,
+    connection_epoch: u64,
+) -> SupervisorHello {
+    SupervisorHello {
+        sandbox_id: config.sandbox_id.clone(),
+        instance_id: config.instance_id.clone(),
+        connection_epoch,
+        supports_provider_readiness: true,
+        redirected,
+        supports_session_redirect: true,
+        supports_config_push: true,
+        supports_service_advertisements: config.app_installations.is_some(),
+        supported_capabilities: config.supported_capabilities.clone(),
+    }
+}
+
 async fn run_single_session(
     config: &SessionConfig,
     target: &grpc_client::GatewayEndpoint,
@@ -705,16 +729,11 @@ async fn run_single_session(
 
     // Send hello as the first message.
     tx.send(SupervisorMessage {
-        payload: Some(supervisor_message::Payload::Hello(SupervisorHello {
-            sandbox_id: config.sandbox_id.clone(),
-            instance_id: config.instance_id.clone(),
-            connection_epoch,
-            supports_provider_readiness: true,
+        payload: Some(supervisor_message::Payload::Hello(supervisor_hello(
+            config,
             redirected,
-            supports_session_redirect: true,
-            supports_config_push: true,
-            supports_service_advertisements: config.app_installations.is_some(),
-        })),
+            connection_epoch,
+        ))),
     })
     .await
     .map_err(|_| "failed to queue hello")?;
@@ -1524,6 +1543,42 @@ mod ocsf_event_tests {
             .err()
             .expect("missing SSH adapter must fail explicitly");
         assert!(error.to_string().contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn hello_reports_the_policy_capabilities_it_was_given() {
+        for supported_capabilities in [
+            Vec::new(),
+            vec![openshell_core::extension_protocol::POLICY_CEDAR_V1.to_string()],
+        ] {
+            let config = SessionConfig {
+                app_installations: None,
+                gateway: grpc_client::GatewayEndpoint::new(
+                    "http://127.0.0.1:1",
+                    grpc_client::GatewayCredentials::from_gateway_token("test-token")
+                        .expect("test credentials"),
+                ),
+                sandbox_id: "sbx-1".into(),
+                ssh_socket_path: std::path::PathBuf::new(),
+                port_forward: rpc_test::loopback(Arc::new(UnusedLoopbackConnector)),
+                expected_ssh_peer_pid: None,
+                terminating: Arc::new(AtomicBool::new(false)),
+                instance_id: "instance-1".into(),
+                session_id_updates: None,
+                config_apply_tx: mpsc::channel(1).0,
+                config_push_updates: watch::channel(false).0,
+                gateway_home: None,
+                supported_capabilities: supported_capabilities.clone(),
+                ready_tx: watch::channel(false).0,
+            };
+            let hello = supervisor_hello(&config, false, 3);
+            assert_eq!(hello.supported_capabilities, supported_capabilities);
+            assert!(hello.supports_config_push);
+            assert_eq!(
+                (hello.sandbox_id.as_str(), hello.connection_epoch),
+                ("sbx-1", 3)
+            );
+        }
     }
 
     #[test]

@@ -898,6 +898,7 @@ async fn fetch_sandbox_detail(app: &mut App) {
             workspace_scope: Some(openshell_core::proto::workspace_selector(
                 app.selected_sandbox_workspace(),
             )),
+            ..Default::default()
         };
 
         match tokio::time::timeout(
@@ -2955,6 +2956,7 @@ async fn refresh_sandbox_policy(app: &mut App) {
     let policy_req = openshell_core::proto::GetSandboxConfigRequest {
         name: sandbox_name,
         workspace_scope: Some(openshell_core::proto::workspace_selector(workspace.clone())),
+        ..Default::default()
     };
 
     match tokio::time::timeout(

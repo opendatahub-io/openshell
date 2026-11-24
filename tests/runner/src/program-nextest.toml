@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The nextest profile for running a prebuilt testkit program, such as
+# openshell-conformance. The runner writes it into program bundles, and
+# e2e/support/conformance.sh passes it to nextest on host lanes.
+[profile.openshell]
+fail-fast = false
+success-output = "immediate"
+failure-output = "immediate"
+# Longer than testkit's own step timeouts, so those report first.
+slow-timeout = { period = "900s", terminate-after = 1, grace-period = "10s" }
+
+[profile.openshell.junit]
+path = "junit.xml"
+store-success-output = true

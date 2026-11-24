@@ -55,12 +55,16 @@ pub struct Registration {
     /// The bootstrap could not resolve part of the configuration, so the
     /// session rebuilds it at once rather than at its first reconciliation.
     pub rebuild: bool,
+    /// Versioned policy capabilities reported in the supervisor hello.
+    pub supported_capabilities: Vec<String>,
 }
 
 #[derive(Debug)]
 pub(super) struct SessionRecord {
     pub(super) sandbox_id: String,
     pub(super) session_id: String,
+    /// Policy capabilities of this session; see [`Registration`].
+    pub(super) supported_capabilities: Vec<String>,
     workspace: String,
     marks: Mutex<Marks>,
     wake: Notify,
@@ -94,6 +98,7 @@ impl SessionRecord {
         Self {
             sandbox_id: registration.sandbox_id,
             session_id: registration.session_id,
+            supported_capabilities: registration.supported_capabilities.clone(),
             workspace: registration.workspace,
             marks: Mutex::new(Marks {
                 providers: registration.providers,
@@ -337,6 +342,9 @@ mod tests {
             provider_environment: None,
             captured_seq: 0,
             rebuild: false,
+            supported_capabilities: vec![
+                openshell_core::extension_protocol::POLICY_CEDAR_V1.to_string(),
+            ],
         }))
     }
 

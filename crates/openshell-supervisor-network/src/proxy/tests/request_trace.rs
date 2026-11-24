@@ -131,7 +131,7 @@ network_policies:
     let proxy = ProxyHandle::start_with_bind_addr(
         &ProxyPolicy { http_addr: None },
         Some(([127, 0, 0, 1], 0).into()),
-        engine,
+        engine.into(),
         Arc::new(BinaryIdentityCache::new()),
         Arc::new(AtomicU32::new(0)),
         Some(tls.clone()),
@@ -152,6 +152,7 @@ network_policies:
             },
             ancestors: Vec::new(),
             cmdline_paths: Vec::new(),
+            process: None,
         }),
         None,
         None,
@@ -386,6 +387,7 @@ network_policies:
         },
         ancestors: Vec::new(),
         cmdline_paths: vec![executable_path("/workspace/investigate.py")],
+        process: None,
     });
     let expect_export = matches!(sampler, Some(Sampler::AlwaysOn));
     let capture = RequestTracing::new(sampler);
@@ -422,7 +424,7 @@ network_policies:
                         "192.0.2.20:42123".parse().unwrap(),
                         "192.0.2.10:3128".parse().unwrap(),
                     )),
-                    engine,
+                    engine.into(),
                     Arc::new(BinaryIdentityCache::new()),
                     Arc::new(AtomicU32::new(0)),
                     None,
@@ -830,6 +832,7 @@ network_policies:
                 },
                 ancestors: Vec::new(),
                 cmdline_paths: Vec::new(),
+                process: None,
             });
             let mut proxy: ProxyClient = tokio::io::BufReader::new(Box::new(proxy));
             Box::pin(handle_forward_proxy(
@@ -843,7 +846,7 @@ network_policies:
                     "192.0.2.20:42123".parse().unwrap(),
                     "192.0.2.10:3128".parse().unwrap(),
                 )),
-                engine,
+                engine.into(),
                 Arc::new(BinaryIdentityCache::new()),
                 Arc::new(AtomicU32::new(0)),
                 None,

@@ -18,8 +18,13 @@ REPORT_DIR="${TRIVY_REPORT_DIR:-reports/trivy}"
 IGNORE_UNFIXED="${TRIVY_IGNORE_UNFIXED:-true}"
 PLATFORMS="${TRIVY_PLATFORMS:-linux/amd64 linux/arm64}"
 
-# Disable cluster discovery while rendering charts offline.
-PREFLIGHT_OFF=(--helm-set agentSandbox.preflight.enabled=false)
+# Disable cluster discovery while rendering charts offline. Trivy uses the
+# chart name as the release name, so pin resource names: findings name the
+# rendered resources, and a chart rename must not make old findings look new.
+HELM_SCAN_SETS=(
+  --helm-set agentSandbox.preflight.enabled=false
+  --helm-set fullnameOverride=openshell
+)
 
 # These Dockerfiles do not produce release runtime images.
 SKIP_DOCKERFILES=(
@@ -108,7 +113,7 @@ scan() {
 scan_config() {
   scan config config-static deploy/ "${SKIP_DOCKERFILES[@]}" \
     --skip-dirs deploy/helm deploy
-  scan config config-defaults deploy/helm/ "${PREFLIGHT_OFF[@]}" deploy/helm
+  scan config config-defaults deploy/helm/ "${HELM_SCAN_SETS[@]}" deploy/helm
 
   local values fixture
   for fixture in "${HELM_PROFILES[@]}"; do
@@ -121,7 +126,7 @@ scan_config() {
       return 2
     fi
     scan config "config-fixture-${fixture}" deploy/helm/openshell/ \
-      "${PREFLIGHT_OFF[@]}" --helm-values "${values}" deploy/helm/openshell
+      "${HELM_SCAN_SETS[@]}" --helm-values "${values}" deploy/helm/openshell
   done
 }
 
@@ -143,6 +148,8 @@ scan_packaged_chart() {
   local repo chart_name chart_dir="" candidate dir
   repo="${ref%:*}"
   chart_name="${repo##*/}"
+  # Releases before the rename published the gateway chart as helm-chart.
+  [ "${chart_name}" = helm-chart ] && chart_name=openshell
   for candidate in deploy/helm/*/; do
     [ -f "${candidate}Chart.yaml" ] || continue
     [ "$(sed -n 's/^name:[[:space:]]*//p' "${candidate}Chart.yaml" | head -1)" \
@@ -160,7 +167,7 @@ scan_packaged_chart() {
 
   helm pull "${repo}" --version "${ref##*:}" --destination "${dir}"
   scan config "config-packaged-$(artifact_slug "${ref}")" "${chart_dir}" \
-    "${PREFLIGHT_OFF[@]}" "$(find "${dir}" -name '*.tgz' -print -quit)"
+    "${HELM_SCAN_SETS[@]}" "$(find "${dir}" -name '*.tgz' -print -quit)"
 }
 
 scan_images() {

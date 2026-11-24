@@ -92,6 +92,7 @@ pub async fn start_boundary_access(
     supervisor_session_updates: Option<tokio::sync::watch::Sender<Option<String>>>,
     config_apply_tx: tokio::sync::mpsc::Sender<crate::supervisor_session::ConfigApplyRequest>,
     config_push_updates: tokio::sync::watch::Sender<bool>,
+    supported_capabilities: Vec<String>,
     host_key: Option<russh::keys::PrivateKey>,
     gateway_home: Option<tokio::sync::watch::Receiver<Option<String>>>,
     app_installations: Option<openshell_core::app_listener::InstallationSource>,
@@ -134,6 +135,7 @@ pub async fn start_boundary_access(
                     config_apply_tx,
                     config_push_updates,
                     gateway_home,
+                    supported_capabilities,
                 },
             );
             (Some(task), Some(accepted))
@@ -377,6 +379,7 @@ mod tests {
             None,
             tokio::sync::mpsc::channel(1).0,
             tokio::sync::watch::channel(false).0,
+            Vec::new(),
             None,
             None,
             None,
@@ -420,6 +423,7 @@ mod tests {
             None,
             tokio::sync::mpsc::channel(1).0,
             tokio::sync::watch::channel(false).0,
+            Vec::new(),
             None,
             None,
             None,

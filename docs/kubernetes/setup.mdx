@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "Set Up OpenShell on Kubernetes"
 sidebar-title: "Setup"
-description: "Deploy the OpenShell gateway to a Kubernetes cluster using the official Helm chart from GHCR."
-keywords: "Generative AI, Cybersecurity, Kubernetes, Helm, Gateway, Deployment, OCI, GHCR, Installation"
+description: "Deploy the OpenShell gateway to a Kubernetes cluster using the official Helm chart from Quay."
+keywords: "Generative AI, Cybersecurity, Kubernetes, Helm, Gateway, Deployment, OCI, Quay, Installation"
 position: 1
 ---
 
@@ -62,7 +62,7 @@ gateway resources. This preflight is enabled by default. Disable it only for
 offline `helm template` rendering, where Helm cannot discover cluster APIs:
 
 ```shell
-helm template openshell oci://ghcr.io/nvidia/openshell/helm-chart \
+helm template openshell oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --set agentSandbox.preflight.enabled=false
 ```
@@ -114,11 +114,11 @@ kubectl create namespace openshell
 
 ## Install the chart
 
-Install from the OCI registry on GHCR. Replace `<version>` with the chart version you want to install.
+Install from the OCI registry on Quay. Replace `<version>` with the chart version you want to install.
 
 ```shell
 helm upgrade --install openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --namespace openshell
 ```
@@ -127,7 +127,7 @@ To use the latest development build instead of a stable release:
 
 ```shell
 helm upgrade --install openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version 0.0.0-dev \
   --namespace openshell
 ```
@@ -157,14 +157,14 @@ sandbox resources, then install the workspace chart in the sandbox namespace:
 
 ```shell
 helm upgrade --install openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --namespace openshell \
   --set workspaceResources.enabled=false \
   --set server.sandboxNamespace=app-a
 
 helm upgrade --install openshell-workspace \
-  oci://ghcr.io/nvidia/openshell/openshell-workspace \
+  oci://quay.io/ai-openshell/charts/openshell-workspace \
   --version <version> \
   --namespace app-a \
   --set gateway.serviceAccount.name=openshell \
@@ -194,7 +194,7 @@ namespace:
 
 ```shell
 helm upgrade --install openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --namespace openshell \
   --set server.credentialDrivers.kubernetesSecrets.enabled=true \
@@ -281,7 +281,7 @@ For example, set the gateway log level with:
 
 ```shell
 helm upgrade openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --namespace openshell \
   --set 'gatewayConfig.openshell\.gateway.log_level=debug'
@@ -314,7 +314,7 @@ The most commonly changed values are:
 | Value | Purpose |
 |---|---|
 | `global.image.registry` / `global.image.tag` / `global.image.pullPolicy` | Shared registry, tag, and pull policy for the gateway, supervisor, and trusted sandbox runtime. Individual image settings take precedence. |
-| `gateway.image.registry` / `gateway.image.repository` / `gateway.image.tag` / `gateway.image.digest` | Gateway container image. Defaults to `ghcr.io/nvidia/openshell/gateway:latest`. |
+| `gateway.image.registry` / `gateway.image.repository` / `gateway.image.tag` / `gateway.image.digest` | Gateway container image. Defaults to `quay.io/ai-openshell/gateway:latest`. |
 | `replicaCount` | Number of gateway replicas. Values above `1` require shared PostgreSQL through `server.externalDbSecret`. |
 | `priorityClassName` | Existing Kubernetes PriorityClass for gateway pods. Empty by default. |
 | `topologySpreadConstraints` | Kubernetes topology spread constraints for gateway replicas. Empty by default. Set selectors to match the gateway pod labels. |
@@ -344,14 +344,14 @@ Use a values file for repeatable deployments:
 
 ```shell
 helm upgrade --install openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --namespace openshell \
   --values my-values.yaml
 ```
 
 <Warning>
-`server.dataStorageSize` and `server.dataStorageClass` feed the gateway StatefulSet's immutable `volumeClaimTemplates`. Set them at install time. Changing them later fails the upgrade and does not move existing data; refer to the [Helm chart README](https://github.com/NVIDIA/OpenShell/blob/main/deploy/helm/openshell/README.md#data-pvc-storage) for migration steps.
+`server.dataStorageSize` and `server.dataStorageClass` feed the gateway StatefulSet's immutable `volumeClaimTemplates`. Set them at install time. Changing them later fails the upgrade and does not move existing data; refer to the [Helm chart README](https://github.com/ai-openshell/openshell/blob/main/deploy/helm/openshell/README.md#data-pvc-storage) for migration steps.
 </Warning>
 
 To use private sandbox images, create a `kubernetes.io/dockerconfigjson` Secret
@@ -452,7 +452,7 @@ To use an existing ServiceAccount instead of creating one, set `serviceAccount.c
 
 ```shell
 helm upgrade --install openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --namespace openshell \
   --set serviceAccount.create=false \
@@ -475,7 +475,7 @@ match the configured workspace mode and credential driver:
 
 ```shell
 helm template openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --namespace openshell \
   -f my-values.yaml \
@@ -492,7 +492,7 @@ permission on `clusterroles` or `clusterrolebindings`:
 
 ```shell
 helm upgrade --install openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --namespace openshell \
   -f my-values.yaml \
@@ -556,7 +556,7 @@ same step by adding it to the render:
 
 ```shell
 helm template openshell \
-  oci://ghcr.io/nvidia/openshell/helm-chart \
+  oci://quay.io/ai-openshell/charts/openshell \
   --version <version> \
   --namespace openshell \
   -f my-values.yaml \

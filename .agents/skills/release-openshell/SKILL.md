@@ -34,7 +34,9 @@ stable artifacts without rerunning qualification. Embedded versions change, so
 stable artifacts are not byte-identical to the qualified prerelease. An existing
 stable tag may be retried only if it already points to the selected commit. A retry
 publishes only missing artifacts; published images, charts, release assets, and
-npm versions are kept, while the snap is uploaded again.
+npm versions are kept. Automatic snap publishing is disabled pending migration
+to the upcoming packages repository under `ai-openshell`; manual dispatch remains
+available through `snap-publish.yml`.
 Stable images are saved as OCI archives during the build and pushed under the
 stable version tags during publication. Their SBOMs are verified before updating
 `latest`; the qualified prerelease's commit-SHA image tags remain unchanged.
@@ -76,8 +78,8 @@ Wait for the entire Pre-release run to pass before promoting it. Stable tag push
 start Release. Release Auto-Tag creates and dispatches prereleases on `main`.
 
 Stable releases serialize across branches. A release older than the highest
-stable Git tag publishes versioned artifacts without moving GHCR `latest`, the
-GitHub latest release, npm `latest`, or snap `latest/stable`. Its npm package
+stable Git tag publishes versioned artifacts without moving Quay `latest`, the
+GitHub latest release, or npm `latest`. Its npm package
 uses `release-X.Y`; snap files remain available in its GitHub Release rather than
 updating a Snap Store support track. Docs retain an
 immutable version and advance latest only for a newer version.

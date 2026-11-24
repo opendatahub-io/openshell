@@ -46,11 +46,14 @@ tag, or start a second `Pre-release` run for a tag; it has no concurrency guard.
   repository must exist and Actions must have a `BUF_TOKEN` secret with write
   access. A failed Buf push fails the release run; follow Recovery before
   rerunning the failed publication job.
+- Pre-release and stable builds leave the `experimental` feature disabled. Release
+  Dev enables it through `experimental: true`. Normal workspace builds, lint,
+  and tests enable `experimental` without separate CI lanes for development features.
 
 ## Setup
 
 ```shell
-export GH_REPO=NVIDIA/OpenShell
+export GH_REPO=ai-openshell/openshell
 git fetch origin main --tags --force
 PREV=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
 git tag -l 'v*' --sort=-v:refname | grep -E -- '-pre\.[0-9]+$' | head -5
@@ -71,7 +74,7 @@ Preview the candidate `Release` would promote, read-only:
 VERSION=vX.Y.Z
 wt=$(mktemp -d)
 git worktree add -q --detach "$wt" origin/main
-(cd "$wt" && GITHUB_REPOSITORY=NVIDIA/OpenShell uv run -q --no-project python tasks/scripts/select-release-candidate.py "$VERSION" --branch main | jq .)
+(cd "$wt" && GITHUB_REPOSITORY=ai-openshell/openshell uv run -q --no-project python tasks/scripts/select-release-candidate.py "$VERSION" --branch main | jq .)
 git worktree remove --force "$wt"
 ```
 
@@ -180,7 +183,7 @@ git worktree remove --force "$wt"
    to the release notes rather than repeating them:
 
    ```text
-   :white_check_mark: :ship: OpenShell vX.Y.Z is out: https://github.com/NVIDIA/OpenShell/releases/tag/vX.Y.Z
+   :white_check_mark: :ship: OpenShell vX.Y.Z is out: https://github.com/ai-openshell/openshell/releases/tag/vX.Y.Z
 
    It shipped from vX.Y.Z-pre.N (<commit>). I'll be starting the <next version>-pre.* jobs shortly for next week.
 

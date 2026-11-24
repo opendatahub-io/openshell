@@ -1538,11 +1538,12 @@ fn merge_rootfs_tar_driver_config(
     Ok(config)
 }
 
-/// Load sandbox policy YAML.
+/// Load a sandbox policy file, YAML or Cedar.
 ///
 /// Resolution order: `--policy` flag > `OPENSHELL_SANDBOX_POLICY` env var.
 /// Returns `None` when no policy source is configured, allowing the server
-/// to apply its own default.
+/// to apply its own default. A Cedar file is carried as-is; the gateway
+/// validates it.
 fn load_sandbox_policy(cli_path: Option<&str>) -> Result<Option<SandboxPolicy>> {
     openshell_policy::load_sandbox_policy(cli_path)
 }
@@ -1657,6 +1658,7 @@ where
             workspace_scope: Some(openshell_core::proto::workspace_selector(
                 workspace.to_string(),
             )),
+            ..Default::default()
         })
         .await;
     let config = match config_result {
@@ -5537,6 +5539,7 @@ pub async fn sandbox_settings_get(
             workspace_scope: Some(openshell_core::proto::workspace_selector(
                 workspace.to_string(),
             )),
+            ..Default::default()
         })
         .await
         .into_diagnostic()?
@@ -5993,6 +5996,7 @@ pub async fn sandbox_policy_update(
             workspace_scope: Some(openshell_core::proto::workspace_selector(
                 workspace.to_string(),
             )),
+            ..Default::default()
         })
         .await
         .into_diagnostic()?
@@ -6001,6 +6005,12 @@ pub async fn sandbox_policy_update(
     if current.policy_source == PolicySource::Global as i32 {
         return Err(miette!(
             "policy is managed globally; delete the global policy before using `openshell policy update`"
+        ));
+    }
+    if current.policy.as_ref().is_some_and(SandboxPolicy::is_cedar) {
+        return Err(miette!(
+            "incremental policy updates are not available for Cedar policies; edit the Cedar \
+             policy and replace it with `openshell policy set`"
         ));
     }
 
@@ -6248,7 +6258,7 @@ where
                 writeln!(stdout, "---").into_diagnostic()?;
                 let policy = policy_for_view(policy, view);
                 let yaml_str = openshell_policy::serialize_sandbox_policy(policy.as_ref())
-                    .wrap_err("failed to serialize policy to YAML")?;
+                    .wrap_err("failed to serialize policy")?;
                 write!(stdout, "{yaml_str}").into_diagnostic()?;
             } else {
                 writeln!(stderr, "Policy payload not available for this version")
@@ -6284,6 +6294,7 @@ where
             workspace_scope: Some(openshell_core::proto::workspace_selector(
                 workspace.to_string(),
             )),
+            ..Default::default()
         })
         .await
         .into_diagnostic()?
@@ -6356,7 +6367,7 @@ where
                 writeln!(stdout, "---").into_diagnostic()?;
                 let policy = policy_for_view(policy, view);
                 let yaml_str = openshell_policy::serialize_sandbox_policy(policy.as_ref())
-                    .wrap_err("failed to serialize policy to YAML")?;
+                    .wrap_err("failed to serialize policy")?;
                 write!(stdout, "{yaml_str}").into_diagnostic()?;
             }
         }
@@ -6418,7 +6429,7 @@ pub async fn sandbox_policy_get_global(
                 println!("---");
                 let policy = policy_for_view(policy, view);
                 let yaml_str = openshell_policy::serialize_sandbox_policy(policy.as_ref())
-                    .wrap_err("failed to serialize policy to YAML")?;
+                    .wrap_err("failed to serialize policy")?;
                 print!("{yaml_str}");
             } else {
                 eprintln!("Policy payload not available for this version");
@@ -6503,9 +6514,7 @@ fn policy_for_view(policy: &SandboxPolicy, view: PolicyGetView) -> Cow<'_, Sandb
     }
 
     let mut base_policy = policy.clone();
-    base_policy
-        .network_policies
-        .retain(|name, _| !openshell_policy::is_provider_rule_name(name));
+    openshell_policy::strip_provider_rule_names(&mut base_policy);
     Cow::Owned(base_policy)
 }
 
