@@ -70,6 +70,7 @@ RUN set -eu \
 
 COPY crates/ crates/
 COPY proto/ proto/
+COPY tests/policy-conformance/ tests/policy-conformance/
 COPY providers/ providers/
 
 # Scope workspace to CLI crates only -- avoids pulling in server/sandbox
