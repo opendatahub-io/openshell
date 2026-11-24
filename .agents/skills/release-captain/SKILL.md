@@ -91,8 +91,10 @@ git worktree remove --force "$wt"
 
    If the next version has no `-pre.1`, start the train (Tuesday step 6).
 
-2. **Triage the compatibility review** for the candidate's run. It's advisory,
-   and a green job doesn't mean it found no breaks:
+2. **Triage the compatibility review** when enabled for the candidate's run.
+   Both Codex review jobs are temporarily skipped pending fixes; skip this step
+   while they are disabled. When enabled, the review is advisory, and a green
+   job doesn't mean it found no breaks:
 
    ```shell
    ATTEMPT=$(gh run view "$RUN" --json attempt --jq .attempt)

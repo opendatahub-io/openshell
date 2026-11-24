@@ -97,8 +97,10 @@ capable host and the [Windows runtime tests](https://github.com/ai-openshell/ope
 
 ### Advisory compatibility review
 
-`Codex Compatibility Review` runs in Branch Checks and alongside tagged release
-qualification. Branch checks compare the prospective merge tree with its target,
+`Codex Compatibility Review` runs in Branch Checks. Both Codex review jobs in
+release qualification are temporarily skipped pending fixes. The release review
+behavior described below applies when those jobs are enabled.
+Branch checks compare the prospective merge tree with its target,
 using workflow-revision review tooling and the target's tag-derived train policy.
 Release qualification reviews the cumulative diff from the previous reachable
 stable release to the exact candidate commit, using the same tag-derived
@@ -292,8 +294,8 @@ scanners upload results directly:
   E2E test code are excluded. It runs nightly on `main`, remains manually
   dispatchable for diagnostics, uploads results to Code Scanning, and retains
   workflow artifacts.
-- `Codex Security Release Qualification` runs as an advisory job during
-  prerelease qualification. Each scan reviews the cumulative
+- `Codex Security Release Qualification` is temporarily skipped during
+  prerelease qualification pending fixes. When enabled, each scan reviews the cumulative
   stable-to-candidate diff. It calls
   `https://inference-api.nvidia.com/v1` with
   `openai/openai/gpt-6.1-sol` at high reasoning effort. The
@@ -327,8 +329,8 @@ nix develop --command zizmor --offline --persona=regular --min-severity=high --n
 
 `Security Scan` (`.github/workflows/security-scan.yml`) calls CodeQL, Trivy,
 Cargo Deny, and Workflow Security Reports (Actionlint/Zizmor) in parallel for a
-release tag. Codex Security runs separately as an advisory prerelease
-qualification job. Run the parent manually from
+release tag. The separate advisory Codex Security prerelease
+qualification job is temporarily skipped pending fixes. Run the parent manually from
 Actions or call it from another workflow. All applicable children analyze the
 candidate snapshot. Cargo Deny runs in the CI container.
 
@@ -741,7 +743,7 @@ CI builds push SHA-tagged images to the private CI registry, `ghcr.io/<owner>/op
 | `.github/workflows/release-build.yml` | Shared version computation, binary and image builds, and package builds. Validates that the tag matches the caller's release kind. |
 | `.github/workflows/release-publish.yml` | Shared artifact assembly, OCI image tags and Helm chart publication, and package publication. Stable releases also publish release-labeled public schemas to Buf (`BUF_TOKEN` required) and GitHub Releases, and call the npm publisher. The Python SDK is released from [ai-openshell/sdk-python](https://github.com/ai-openshell/sdk-python), so no GitHub Release carries a wheel. |
 | `.github/workflows/release-notes.yml` | Shared prompt-driven release notes generation through Inference Hub, used by prerelease previews, notes-only previews, and stable releases. Stable releases reuse the promoted prerelease's preview when available. |
-| `.github/workflows/release-qualification.yml` | Reusable qualification suites and result aggregation. Runs security scans, conformance, continuity, and feature integration, Docker and VM E2E, protobuf compatibility, and advisory compatibility review. |
+| `.github/workflows/release-qualification.yml` | Reusable qualification suites and result aggregation. Runs security scans, conformance, continuity, and feature integration, Docker and VM E2E, and protobuf compatibility. Both Codex review jobs are temporarily skipped pending fixes. |
 | `.github/workflows/snap-package.yml` | Builds snap and component artifacts for Release Dev, Release, and Pre-release without Store credentials or publication. |
 | `.github/workflows/snap-publish.yml` | Uploads existing snap and component artifacts directly to a Store channel without rebuilding. Automatic publishing to `latest/edge`, `latest/beta`, and `latest/stable` is disabled pending migration to the upcoming packages repository under `ai-openshell`. Uploads queue per channel and architecture, so tagged beta and stable jobs recheck repository tags after earlier publication finishes and before updating their floating channels. Manual dispatch uploads the `snap-linux-*` artifacts from `artifact-run-id`. |
 | `.github/workflows/sdk-typescript-publish.yml` | Publishes the deprecated `@nvidia/openshell-sdk` stub to GitHub Packages. Manual dispatch only: run it for a stable tag after ai-openshell/sdk-typescript publishes the matching `@ai-openshell/sdk` release. |
