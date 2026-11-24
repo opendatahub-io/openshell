@@ -1,0 +1,111 @@
+# RHAIV auto-tag workflow for the OpenShell midstream fork.
+# Creates -rhaiv.N tags based on the latest upstream version tag.
+#
+# Logic:
+#   1. Fetch NVIDIA/OpenShell tags separately and select the latest stable vX.Y.Z
+#      Wait if that release has not been merged into midstream main
+#   2. If no vX.Y.Z-rhaiv.0 exists, create it
+#   3. If vX.Y.Z-rhaiv.N exists, create vX.Y.Z-rhaiv.(N+1)
+#   4. Always create -rhaiv.0 for a new upstream tag (no diff check)
+#   5. Skip -rhaiv.N+1 only if no new commits since -rhaiv.N
+#
+# Once a new stable upstream vX.Y.Z is synced, the next run creates -rhaiv.0.
+# Prereleases are ignored; upstream tags never overwrite midstream tags.
+
+name: RHAIV Auto-Tag
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "30 14 * * 1-5"  # 7:30 AM PDT, weekdays
+
+permissions: {}
+
+concurrency:
+  group: rhaiv-auto-tag
+  cancel-in-progress: false
+
+jobs:
+  create-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Determine next rhaiv tag
+        id: version
+        run: |
+          set -euo pipefail
+          : "${GITHUB_OUTPUT:?GITHUB_OUTPUT must name the workflow output file}"
+
+          # Midstream's plain tags can point at midstream merge commits. Keep upstream
+          # refs separate, including on repeated runs, and never overwrite release tags.
+          git fetch --no-tags --prune https://github.com/NVIDIA/OpenShell.git \
+            '+refs/tags/*:refs/upstream-tags/*'
+
+          # Filter before choosing the latest version: prereleases such as v0.1.0-pre.1
+          # must not hide the latest stable release. awk consumes all input (no SIGPIPE).
+          latest_upstream=$(git for-each-ref --sort=-v:refname \
+            --format='%(refname:strip=2)' refs/upstream-tags/ |
+            awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ && !found { print; found=1 }')
+          if [ -z "$latest_upstream" ]; then
+            echo "::error::No stable upstream vN.N.N tags found"
+            exit 1
+          fi
+          echo "Latest upstream tag: $latest_upstream"
+
+          # A new upstream release may arrive before the source sync. Do not label older
+          # code with that version or keep incrementing the stale release train.
+          upstream_commit=$(git rev-parse "refs/upstream-tags/${latest_upstream}^{commit}")
+          if git merge-base --is-ancestor "$upstream_commit" HEAD; then
+            :
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+            echo "Upstream $latest_upstream is not merged into HEAD -- waiting for source sync"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          latest_rhaiv=$(git tag -l "${latest_upstream}-rhaiv.*" --sort=-v:refname |
+            awk '/^v[0-9]+\.[0-9]+\.[0-9]+-rhaiv\.[0-9]+$/ && !found { print; found=1 }')
+          if [ -z "$latest_rhaiv" ]; then
+            next="${latest_upstream}-rhaiv.0"
+            echo "No existing rhaiv tags for $latest_upstream -- creating initial -rhaiv.0"
+          else
+            current_n=${latest_rhaiv##*-rhaiv.}
+            next="${latest_upstream}-rhaiv.$((10#$current_n + 1))"
+            echo "Latest rhaiv tag: $latest_rhaiv (N=$current_n)"
+            commit_count=$(git rev-list "${latest_rhaiv}..HEAD" --count)
+            echo "Commits since $latest_rhaiv: $commit_count"
+            if [ "$commit_count" -eq 0 ]; then
+              echo "No new commits since $latest_rhaiv -- skipping"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          if ! [[ "$next" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rhaiv\.[0-9]+$ ]]; then
+            echo "::error::Generated tag '$next' has unexpected format"
+            exit 1
+          fi
+          if git show-ref --verify --quiet "refs/tags/$next"; then
+            echo "::error::Tag $next already exists"
+            exit 1
+          fi
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "Next tag: $next"
+
+      - name: Create and push tag
+        if: steps.version.outputs.skip != 'true'
+        env:
+          NEXT_TAG: ${{ steps.version.outputs.next }}
+        run: |
+          git tag "$NEXT_TAG"
+          git push origin "$NEXT_TAG"

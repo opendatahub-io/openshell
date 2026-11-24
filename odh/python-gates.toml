@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Upstream Python gateway E2E that cannot yet run on the downstream OpenShift
+# lane. Each entry is an exact upstream node ID (without parametrization), so
+# an upstream rename or removal fails the entrypoint's collection preflight.
+# OIDC tests retain their own upstream skip conditions and are owned by the
+# separate downstream Keycloak/OIDC lane.
+
+[[gate]]
+category = "docker-host"
+reason = "requires a fake inference endpoint on the test host, which sandbox pods cannot reach through host.openshell.internal"
+tests = [
+  "e2e/python/test_sandbox_providers.py::test_imported_openai_profile_allows_native_endpoint_with_attached_provider",
+  "e2e/python/test_sandbox_providers.py::test_imported_anthropic_profile_allows_native_endpoint_with_attached_provider",
+]
+
+[[gate]]
+category = "egress"
+reason = "requires sandbox egress to PyPI or GitHub, which downstream CI clusters do not guarantee"
+tests = [
+  "e2e/python/test_sandbox_venv.py::test_pip_install_in_sandbox",
+  "e2e/python/test_sandbox_venv.py::test_uv_pip_install_in_sandbox",
+  "e2e/python/test_sandbox_venv.py::test_uv_run_with_ephemeral_dependency",
+  "e2e/python/test_sandbox_providers.py::test_github_provider_allows_https_git_clone",
+]
+
+[[gate]]
+category = "workload-image"
+reason = "requires Python or /sandbox/.venv in the sandbox; the current OpenShift workload is Ubuntu, while upstream builds e2e/python/Dockerfile.workload locally"
+tests = [
+  "e2e/python/test_sandbox_exec_python.py::test_exec_python_accepts_bound_methods",
+  "e2e/python/test_sandbox_exec_python.py::test_exec_python_surfaces_callable_errors",
+  "e2e/python/test_sandbox_landlock.py::test_landlock_blocks_write_to_read_only_path",
+  "e2e/python/test_sandbox_landlock.py::test_landlock_allows_write_to_read_write_path",
+  "e2e/python/test_sandbox_landlock.py::test_landlock_allows_read_on_read_only_path",
+  "e2e/python/test_sandbox_landlock.py::test_landlock_blocks_access_outside_policy",
+  "e2e/python/test_sandbox_api.py::test_sandbox_api_crud_and_exec",
+  "e2e/python/test_sandbox_policy.py::test_policy_applies_to_exec_commands",
+  "e2e/python/test_sandbox_policy.py::test_transparent_tcp_policy_denies_unauthorized_connections",
+  "e2e/python/test_sandbox_providers.py::test_provider_credentials_available_as_env_vars",
+  "e2e/python/test_sandbox_providers.py::test_endpointless_profile_credentials_fail_closed_without_policy_binding",
+  "e2e/python/test_sandbox_providers.py::test_nvidia_provider_injects_nvidia_api_key_env_var",
+  "e2e/python/test_sandbox_providers.py::test_endpointless_profile_credentials_use_explicit_policy_binding",
+  "e2e/python/test_sandbox_providers.py::test_attach_detach_updates_credentials_for_later_exec_launches",
+  "e2e/python/test_sandbox_venv.py::test_sandbox_venv_in_path",
+  "e2e/python/test_sandbox_providers.py::test_google_metadata_sdk_discovery",
+]
+
+[[gate]]
+category = "workload-fixture"
+reason = "upstream Python E2E builds and selects e2e/python/Dockerfile.workload; this OpenShift lane uses the product-default Ubuntu workload, so these no-image sandbox tests never reach Ready"
+tests = [
+  "e2e/python/test_exec_admission.py::test_exec_request_timeout_keeps_launch_unresolved",
+  "e2e/python/test_sandbox_api.py::test_mutation_replay_preserves_sandbox_lifecycle_and_replacement",
+]
+
+[[gate]]
+category = "lifecycle-timeout"
+reason = "the shared Python fixture's 30-second delete RPC deadline is shorter than the Kubernetes driver's bounded Pod-termination wait; an upstream fixture-timeout correction is being validated before these tests are re-enabled"
+tests = [
+  "e2e/python/test_exec_admission.py::test_exec_request_id_never_relaunches_or_replays_output",
+  "e2e/python/test_exec_admission.py::test_exec_client_cancellation_does_not_clear_launch_admission",
+  "e2e/python/test_policy_validation.py::test_update_policy_rejects_immutable_fields",
+  "e2e/python/test_sandbox_api.py::test_sandbox_interactive_exec_honors_tty",
+  "e2e/python/test_sandbox_api.py::test_interactive_exec_drains_output_after_request_eof",
+  "e2e/python/test_sandbox_landlock.py::test_landlock_blocks_user_owned_path_outside_policy",
+  "e2e/python/test_sandbox_providers.py::test_credentials_not_in_persisted_spec_environment",
+]

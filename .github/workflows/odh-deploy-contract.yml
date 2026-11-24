@@ -1,0 +1,64 @@
+# Midstream cluster-free deploy contract checks. Runs the digest/Helm
+# regression suite for the Quay deploy script without a cluster, so PRs
+# touching the deploy path get automated validation. Kept separate from
+# branch-checks.yml so ODH does not depend on NVIDIA self-hosted runners.
+
+name: ODH Deploy Contract
+
+on:
+  pull_request:
+    paths:
+      - odh/scripts/**
+      - e2e/support/gateway-common.sh
+      - e2e/rust/tests/odh/tier_plan.py
+      - e2e/rust/tests/odh/tiers.toml
+      - deploy/helm/openshell/ci/values-openshift-e2e.yaml
+      - odh/values-openshift-e2e.yaml
+      - deploy/docker/Dockerfile.konflux.e2e-odh
+      - deploy/konflux/e2e-odh/**
+      - renovate.json
+      - tasks/test-odh.toml
+      - .github/workflows/odh-deploy-contract.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: odh-deploy-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy-contract:
+    name: Cluster-free deploy script contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The deploy plan resolver imports tomllib (Python 3.11+); pin the
+      # interpreter so the check does not depend on the runner default.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Keep this version aligned with mise.toml. This workflow stays lean and
+      # installs only uv instead of bootstrapping the full mise toolchain.
+      - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.10.12"
+
+      - name: Run the deploy digest contract suite
+        run: bash odh/scripts/tests/test-openshell-deploy-from-quay.sh
+
+      - name: Verify generic-fetcher synchronization
+        env:
+          # Keep pytest on the Python version installed above instead of
+          # resolving the repository-wide development interpreter.
+          UV_PYTHON: ${{ env.pythonLocation }}/bin/python
+        run: |
+          python3 deploy/konflux/e2e-odh/sync-generic-fetcher.py --check
+          # Keep this invocation in sync with test:odh-generic-fetcher in tasks/test-odh.toml.
+          uv run --no-project --with "pytest==9.0.3" --with "pytest-asyncio==1.3.0" pytest -o "python_files=*_test.py" deploy/konflux/e2e-odh/

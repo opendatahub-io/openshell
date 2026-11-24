@@ -1,0 +1,17 @@
+# Hermeto cargo prefetch for cargo-auditable. It is bin-only, so it cannot be a
+# normal workspace dependency. cfg(target_os = "none") still locks and vendors it.
+# Image builds strip the published crate's dev-dependencies and rewrite this
+# lock into a path lock so `cargo install --locked` uses these versions.
+# Bump the version, then:
+#   cargo generate-lockfile --manifest-path deploy/konflux/cargo-auditable/Cargo.toml
+
+[workspace]
+
+[package]
+name = "konflux-prefetch-auditable"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[target.'cfg(target_os = "none")'.dependencies]
+cargo-auditable = "=0.7.5"

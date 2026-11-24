@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 OpenShell contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: RHOAI Installer
+
+on:
+  pull_request:
+    paths:
+      - "deploy/rhoai/**"
+      - ".github/workflows/rhoai-installer.yml"
+      - "pyproject.toml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/rhoai/**"
+      - ".github/workflows/rhoai-installer.yml"
+      - "pyproject.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.10.12"
+          python-version: "3.12"
+      - name: Installer regression tests
+        run: uv run --script --python 3.12 deploy/rhoai/test_install.py
+      - name: Authorization verifier tests
+        run: uv run --no-project --python 3.12 deploy/rhoai/test_verify.py
+      - name: Lint and formatting
+        run: |
+          uvx ruff==0.14.14 check deploy/rhoai
+          uvx ruff==0.14.14 format --check deploy/rhoai

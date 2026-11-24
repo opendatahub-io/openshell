@@ -227,9 +227,10 @@ async fn managed_creates_namespace_with_labels() {
         "openshell"
     );
     assert_eq!(policy["spec"]["ingress"][0]["ports"][0]["port"], 2222);
+    let gateway_namespace = std::env::var("NAMESPACE").unwrap_or_else(|_| "openshell".into());
     assert_eq!(
         policy["spec"]["ingress"][0]["from"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
-        "openshell"
+        gateway_namespace
     );
     assert!(
         policy["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"]

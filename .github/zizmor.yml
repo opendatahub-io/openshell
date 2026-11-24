@@ -2,6 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 rules:
+  unpinned-uses:
+    config:
+      policies:
+        # DRS onboarding writes this reusable workflow at floating @v1.
+        # SHA-pinning is not the supported consumer pattern and would be
+        # overwritten by create-drs-prs.yml. Use /* so the subpath
+        # .github/workflows/disconnected-readiness-check.yml matches;
+        # owner/repo alone does not. Everything else stays hash-pinned.
+        "opendatahub-io/disconnected-readiness-scorer/*": ref-pin
   dangerous-triggers:
     ignore:
       # These base-branch workflows never check out or execute pull request
