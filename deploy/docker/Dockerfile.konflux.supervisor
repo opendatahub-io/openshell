@@ -66,6 +66,7 @@ RUN set -eu \
 
 COPY crates/ crates/
 COPY proto/ proto/
+COPY tests/policy-conformance/ tests/policy-conformance/
 
 # Version stamped into the binary via openshell-core::VERSION; tag builds
 # pass the git tag with the leading "v" stripped. Empty otherwise.

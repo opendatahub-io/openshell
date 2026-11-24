@@ -53,6 +53,7 @@ COPY .cargo/ .cargo/
 COPY .config/ .config/
 COPY crates/ crates/
 COPY proto/ proto/
+COPY tests/policy-conformance/ tests/policy-conformance/
 COPY python/ python/
 COPY providers/ providers/
 COPY examples/ examples/
