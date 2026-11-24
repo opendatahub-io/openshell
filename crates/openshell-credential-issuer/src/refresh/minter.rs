@@ -604,8 +604,8 @@ async fn request_token(
     grant_kind: OAuthGrantKind,
     endpoint_allowlists: &[Vec<String>],
 ) -> Result<MintedCredential, RefreshFailure> {
-    let parsed = reqwest::Url::parse(token_url)
-        .map_err(|_| Status::invalid_argument("token_url must be an absolute URL"))?;
+    let parsed = crate::endpoint::parse_auth_url(token_url)
+        .map_err(|reason| Status::invalid_argument(format!("token_url {reason}")))?;
     match parsed.scheme() {
         "https" => {}
         "http" if parsed.host_str().is_some_and(is_loopback_host) => {}
@@ -622,7 +622,7 @@ async fn request_token(
     // the body to the new location.
     let secret_bound = !endpoint_allowlists.is_empty();
     if secret_bound {
-        ensure_endpoint_allowed(token_url, endpoint_allowlists)?;
+        ensure_endpoint_allowed(parsed.as_str(), endpoint_allowlists)?;
     }
     openshell_crypto::tls::ensure_default_provider();
     let mut client = reqwest::Client::builder().timeout(Duration::from_secs(30));
@@ -1993,7 +1993,7 @@ KfNSI8uuA8PLqmUY30I9KFWzN6VDLu00eKa90F4w3CeWRRQWXW1+007tTz3V1mNw
 pM2zFU8SeVkvHKlEuoHaP0s=
 -----END PRIVATE KEY-----";
 
-    fn secret_bound_refresh_request(token_url: String, allowed: &str) -> MintRequest {
+    fn secret_bound_refresh_request(token_url: String, stored_endpoint: &str) -> MintRequest {
         MintRequest {
             strategy: ProviderCredentialRefreshStrategy::Oauth2RefreshToken as i32,
             material: HashMap::from([
@@ -2002,27 +2002,52 @@ pM2zFU8SeVkvHKlEuoHaP0s=
                 ("refresh_token".into(), "refresh-token".into()),
             ]),
             token_url,
-            secret_endpoint_allowlists: vec![vec![
-                crate::endpoint::normalize_token_endpoint(allowed).unwrap(),
-            ]],
+            secret_endpoint_allowlists: vec![vec![stored_endpoint.to_owned()]],
             ..Default::default()
         }
     }
 
     #[test]
-    fn persisted_endpoint_allowlists_distinguish_literal_and_encoded_carets() {
+    fn an_encoded_path_requires_an_explicitly_encoded_grant() {
         let literal = "https://login.example/a^b";
         let encoded = "https://login.example/a%5Eb";
-        for (allowed, denied) in [(literal, encoded), (encoded, literal)] {
-            let stored = [vec![allowed.to_string()]];
-            assert!(
-                ensure_endpoint_allowed(allowed, &stored).is_ok(),
-                "{allowed}"
+        for endpoint in [literal, encoded] {
+            let stored = [vec![endpoint.to_owned()]];
+            assert!(ensure_endpoint_allowed(literal, &stored).is_err());
+            assert_eq!(
+                ensure_endpoint_allowed(encoded, &stored).is_ok(),
+                endpoint == encoded
             );
-            assert!(
-                ensure_endpoint_allowed(denied, &stored).is_err(),
-                "{denied}"
-            );
+        }
+    }
+
+    #[tokio::test]
+    async fn secret_bound_mint_sends_the_exact_persisted_path() {
+        use axum::http::Uri;
+        use axum::routing::post;
+        use axum::{Form, Json, Router};
+
+        // The handler returns the HTTP target before any URL parsing can change its spelling.
+        let app = Router::new().fallback_service(post(
+            |uri: Uri, Form(form): Form<HashMap<String, String>>| async move {
+                assert_eq!(form["client_secret"], "shared-client-secret");
+                Json(serde_json::json!({"access_token": uri.path(), "expires_in": 3600}))
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let exercise = async {
+            for path in ["/a%5Eb", "/a%5eb", "/a%255Eb", "/mixed%5E%5e%255E"] {
+                let endpoint = format!("http://{address}{path}");
+                let request = secret_bound_refresh_request(endpoint.clone(), &endpoint);
+                assert_eq!(mint_credential(&request).await.unwrap().access_token, path);
+            }
+        };
+        tokio::select! {
+            result = axum::serve(listener, app) => panic!("loopback server stopped: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(10), exercise) => {
+                result.expect("loopback token exchanges timed out");
+            }
         }
     }
 
@@ -2048,21 +2073,51 @@ pM2zFU8SeVkvHKlEuoHaP0s=
     #[tokio::test]
     async fn secret_bound_mint_never_contacts_a_disallowed_endpoint() {
         let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
+        Mock::given(wiremock::matchers::any())
             .respond_with(ResponseTemplate::new(200))
             .expect(0)
             .mount(&mock_server)
             .await;
-        let request = secret_bound_refresh_request(
-            format!("{}/token", mock_server.uri()),
-            "https://login.example.com/token",
-        );
-        let failure = mint_credential(&request).await.err().unwrap();
-        assert_eq!(failure.failure_code, "secret_endpoint_not_allowed");
-        assert_eq!(
-            failure.recovery_action,
-            ProviderCredentialRefreshRecoveryAction::FixConfiguration
-        );
+        let base = mock_server.uri();
+        let literal = format!("{base}/a^b");
+        let encoded = format!("{base}/a%5Eb");
+        let mut request = secret_bound_refresh_request(literal.clone(), &literal);
+        for grants in [
+            vec![vec![literal.clone()]],
+            vec![vec![encoded.clone()]],
+            Vec::new(),
+        ] {
+            request.secret_endpoint_allowlists = grants;
+            let failure = mint_credential(&request).await.err().unwrap();
+            assert_eq!(
+                failure.recovery_action,
+                ProviderCredentialRefreshRecoveryAction::FixConfiguration
+            );
+            assert!(
+                failure.status.message().contains("literal")
+                    && failure.status.message().contains("caret")
+            );
+        }
+
+        for (requested, stored) in [
+            (
+                format!("{base}/token"),
+                "https://login.example.com/token".to_owned(),
+            ),
+            (encoded.clone(), literal),
+            (format!("{base}/a%5eb"), encoded),
+        ] {
+            let mut request = secret_bound_refresh_request(requested.clone(), &stored);
+            // Every referenced secret must authorize the exact endpoint.
+            request
+                .secret_endpoint_allowlists
+                .insert(0, vec![requested]);
+            let failure = mint_credential(&request).await.err().unwrap();
+            assert_eq!(
+                failure.recovery_action,
+                ProviderCredentialRefreshRecoveryAction::FixConfiguration
+            );
+        }
     }
 
     #[tokio::test]
@@ -2168,13 +2223,13 @@ pM2zFU8SeVkvHKlEuoHaP0s=
             strategy: ProviderCredentialRefreshStrategy::GithubAppInstallation as i32,
             material: HashMap::from([("installation_id".into(), "123".into())]),
             token_url:
-                "https://github.example/a^b/api/v3/app/installations/{installation_id}/access_tokens"
+                "https://github.example/a%5Eb/api/v3/app/installations/{installation_id}/access_tokens"
                     .into(),
             ..Default::default()
         };
         assert_eq!(
             effective_token_endpoint(&github).unwrap(),
-            "https://github.example/a^b/api/v3/app/installations/123/access_tokens"
+            "https://github.example/a%5Eb/api/v3/app/installations/123/access_tokens"
         );
         let aws = MintRequest {
             strategy: ProviderCredentialRefreshStrategy::AwsStsAssumeRole as i32,

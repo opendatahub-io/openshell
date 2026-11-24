@@ -9,7 +9,7 @@ use std::sync::Arc;
 use openshell_core::proto::datamodel::v1::ObjectMeta;
 use openshell_core::proto::{
     ConfigureProviderRefreshRequest, CreateSecretRequest, DeleteSecretRequest,
-    GetProviderRefreshStatusRequest, ImportProviderProfilesRequest,
+    GetProviderRefreshStatusRequest, GetSecretRequest, ImportProviderProfilesRequest,
     InlineProviderRefreshSecretsRequest, Provider, ProviderCredentialRefresh,
     ProviderCredentialRefreshMaterial, ProviderCredentialRefreshStatus,
     ProviderCredentialRefreshStrategy, ProviderProfile, ProviderProfileCategory,
@@ -27,7 +27,9 @@ use super::provider::{
     handle_import_provider_profiles, handle_inline_provider_refresh_secrets,
     handle_rotate_provider_credential,
 };
-use super::secret::{handle_create_secret, handle_delete_secret, handle_update_secret};
+use super::secret::{
+    handle_create_secret, handle_delete_secret, handle_get_secret, handle_update_secret,
+};
 use super::test_support::{authed_request, test_server_state};
 use crate::ServerState;
 
@@ -247,6 +249,43 @@ async fn mount_token(server: &MockServer, client_secret: &str, access_token: &st
         .expect(1)
         .mount(server)
         .await;
+}
+
+#[tokio::test]
+async fn creating_a_literal_caret_grant_requires_an_explicit_new_destination() {
+    let state = enabled_state().await;
+    let encoded = "https://login.example/a%5Eb";
+    let error = handle_create_secret(
+        &state,
+        authed_request(CreateSecretRequest {
+            workspace_scope: Some(default_workspace()),
+            name: "acme".to_string(),
+            value: "dummy-secret".to_string(),
+            refresh_use: Some(SecretRefreshUse {
+                allowed_endpoints: vec!["https://login.example/a^b".to_owned(), encoded.to_owned()],
+            }),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(error.message().contains("literal") && error.message().contains("caret"));
+
+    create_secret(&state, "dummy-secret", encoded).await;
+    let secret = handle_get_secret(
+        &state,
+        authed_request(GetSecretRequest {
+            workspace_scope: Some(default_workspace()),
+            name: "acme".to_string(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .secret
+    .unwrap();
+    assert_eq!(secret.refresh_use.unwrap().allowed_endpoints, [encoded]);
 }
 
 #[tokio::test]

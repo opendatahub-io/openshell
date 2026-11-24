@@ -43,6 +43,60 @@ the OIDC browser flow itself. Its non-interactive refresh-token exchange also
 accepts scopes that identity providers may require to select the API resource
 for the refreshed access token.
 
+## Sandbox create retries
+
+The plain sandbox-create methods never retry. Opt in per call with
+`create_sandbox_with_retry` or `create_sandbox_from_template_with_retry` on
+both `OpenShellClient` and `WorkspaceScopedClient`, passing
+`CreateRetryOptions`; the default budget is 60 seconds.
+
+Only `MUTATION_LOCK_TIMEOUT` retries. `SdkError::mutation_lock_timeout()`
+matches that reason exactly over `UNAVAILABLE`, so `DATABASE_UNAVAILABLE`, a
+bare `UNAVAILABLE`, and every other failure stay terminal, because a create can
+fail after the gateway persisted it. `retryable()` keeps its auth-only contract
+and does not report lock timeouts. The reason covers two gateway steps: a
+create that loses the pre-record creation guard is rejected before any write
+runs, while one that loses the SSH identity step reports it after the record
+was persisted. That second failure is safe to repeat because the gateway
+compensates the failed record and the next attempt resolves the name through
+the `AlreadyExists` wait below.
+
+Each attempt waits the server's `RetryInfo` delay, or one second when the
+gateway supplies none, doubling that floor per retry up to 10 seconds (a server
+delay above that ceiling stays binding), plus jitter of at most half the delay
+(or half the failed attempt's wait, if longer), so a burst that times out
+together spreads its retries instead of retrying in lockstep. The jitter seed is drawn
+once per retrying call, so clients contending on one name spread their attempts.
+A retrying call makes at most five create attempts, including the first, so it
+cannot keep re-entering the gateway's lock wait on the budget alone. One
+wall-clock budget covers those delays and the `AlreadyExists` cleanup waits
+below. The budget bounds the waits, not the attempt in flight: the attempt that
+starts as the budget runs out can still wait the gateway's 10-second
+mutation-lock budget before answering, so the total can exceed the budget by
+that much. When it runs out, the error names the create attempt count, plus the
+last mutation-lock message when the surfaced failure is not itself a lock
+timeout.
+
+A named create that hits `AlreadyExists` polls the holder in the create's
+workspace. A holder that is being deleted is polled again, backing off from one
+second to a five-second ceiling and jittered like the retry delays; the
+`AlreadyExists` status carries no delay hint of its own. A holder that is still
+being created is polled the same way only when an earlier attempt of the same
+call may have left it, which the client infers from a mutation-lock timeout it
+already observed; a holder another caller is provisioning keeps the name, so
+that conflict surfaces immediately instead of waiting out the budget. Cleanup
+waits and retries also stop once the create attempt cap is spent, because no
+further create could take the name. A holder
+that is not found permits an immediate create retry, up to
+three consecutive times, after which the conflict is surfaced. A live holder,
+including one that was deleting and returns live, is a terminal conflict, and a
+different sandbox ID under the same name surfaces `AlreadyExists` immediately.
+The wait never follows a same-name replacement. A transient `Unavailable` while
+polling the holder is retried while the budget allows; any other poll failure
+surfaces the `AlreadyExists` conflict with the poll error appended. Retries
+leave `request_id` empty so durable request admission cannot replay the recorded
+failure.
+
 ## Transport modes
 
 - Plaintext (local development)
@@ -55,8 +109,10 @@ for the refreshed access token.
 ## Public surface
 
 `OpenShellClient::connect(ClientConfig)` returns a connected client exposing
-`health`, `create_sandbox`, `get_sandbox`, `list_sandboxes`, `list_all_sandboxes`, `delete_sandbox`,
-`create_sandbox_from_template`, `create_sandbox_template`,
+`health`, `create_sandbox`, `create_sandbox_with_retry`, `get_sandbox`,
+`list_sandboxes`, `list_all_sandboxes`, `delete_sandbox`,
+`create_sandbox_from_template`, `create_sandbox_from_template_with_retry`,
+`create_sandbox_template`,
 `get_sandbox_template`, `list_sandbox_templates`, `delete_sandbox_template`,
 `list_sandboxes_all_workspaces`, `list_sandbox_templates_all_workspaces`,
 `wait_ready`, `wait_deleted`, and `exec`. Curated types (`SandboxSpec`,

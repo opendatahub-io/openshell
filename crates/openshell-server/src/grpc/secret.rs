@@ -166,7 +166,7 @@ fn normalize_allowed_endpoints(endpoints: &[String]) -> Result<Vec<String>, Stat
         )));
     }
     let mut normalized = BTreeSet::new();
-    for endpoint in endpoints {
+    for (index, endpoint) in endpoints.iter().enumerate() {
         if endpoint.len() > MAX_ENDPOINT_LEN {
             return Err(Status::invalid_argument(format!(
                 "allowed_endpoints entry exceeds maximum length ({} > {MAX_ENDPOINT_LEN})",
@@ -174,7 +174,7 @@ fn normalize_allowed_endpoints(endpoints: &[String]) -> Result<Vec<String>, Stat
             )));
         }
         let value = normalize_token_endpoint(endpoint).map_err(|reason| {
-            Status::invalid_argument(format!("allowed_endpoints entry '{endpoint}' {reason}"))
+            Status::invalid_argument(format!("allowed_endpoints[{index}] {reason}"))
         })?;
         normalized.insert(value);
     }

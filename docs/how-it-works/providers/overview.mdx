@@ -391,6 +391,39 @@ to remove the reference without replacing the provider's current grant. Use
 If credential storage fails during deletion, `openshell secret list` shows the
 secret as `deleting`. Rerun `openshell secret delete` to finish the cleanup.
 
+### Replace a token endpoint with a literal caret
+
+The gateway refuses a refresh endpoint with a literal `^` in its path before
+sending credentials. For example, `/a^b` and `/a%5Eb` can reach different
+handlers on the same server. A secret granted access to `/a^b` needs a new
+grant to reach `/a%5Eb`.
+
+1. Before upgrading, check each workspace with `openshell secret list` and
+   follow any `--page-token`. This lists grants without revealing secret values.
+   Use `openshell profile list` and `openshell profile export ID` to check
+   refresh and dynamic token-grant URLs, including profiles that use inline
+   credentials. Add `--global` to inspect platform profiles. An existing refresh
+   record can still use the URL from an earlier profile revision.
+2. Confirm the intended destination with the endpoint operator. For refresh
+   credentials, update the profile's `token_url` or the material that supplies
+   the endpoint. Keep `{installation_id}` in a GitHub Enterprise Server
+   template. For a dynamic token grant, update `token_grant.token_endpoint`
+   in the profile and verify a new exchange.
+3. For an immutable workspace secret grant, create a replacement secret with a
+   new name, supply the value through `--value-env` or `--value-file`, and set
+   `--allowed-endpoint` to the exact URL the owner approved. A GitHub App
+   grant uses the numeric installation ID.
+4. For each affected refresh credential, run `openshell provider refresh
+   configure` with its complete material and any new secret references. Run
+   `openshell provider refresh rotate NAME --credential-key KEY` and verify a
+   new successful mint with `openshell provider refresh status NAME`. Restart
+   workloads that hold the previous credential handle.
+
+Apply the same steps to any old refresh record that reports a literal-caret
+error after the upgrade. During an upgrade or rollback, use one gateway version
+at a time against the same refresh records. Update supervisors that perform
+dynamic token exchanges as well. Older binaries can still use literal paths.
+
 ### AWS STS
 
 The gateway can mint short-lived AWS credentials with `sts:AssumeRole` for

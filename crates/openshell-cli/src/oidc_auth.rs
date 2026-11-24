@@ -20,6 +20,7 @@ use oauth2::{
     RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
 use openshell_bootstrap::oidc_token::OidcTokenBundle;
+use openshell_core::token_endpoint::parse_auth_url;
 use openshell_sdk::oidc::RefreshTokenInput;
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -65,6 +66,10 @@ struct DeviceTokenErrorResponse {
     error_description: String,
 }
 
+fn parse_oidc_url(raw: &str, field: &str) -> Result<reqwest::Url> {
+    parse_auth_url(raw).map_err(|reason| miette::miette!("OIDC {field} {reason}"))
+}
+
 /// Discover OIDC endpoints from the issuer's well-known configuration.
 ///
 /// Validates that the discovery document's `issuer` field matches the
@@ -74,7 +79,7 @@ async fn discover(issuer: &str, insecure: bool) -> Result<OidcDiscovery> {
     let url = format!("{normalized_issuer}/.well-known/openid-configuration");
     let client = http_client(insecure);
     let resp: OidcDiscovery = client
-        .get(&url)
+        .get(parse_oidc_url(&url, "issuer URL")?)
         .send()
         .await
         .into_diagnostic()?
@@ -90,6 +95,7 @@ async fn discover(issuer: &str, insecure: bool) -> Result<OidcDiscovery> {
             discovered_issuer
         ));
     }
+    parse_oidc_url(&resp.token_endpoint, "token endpoint")?;
     Ok(resp)
 }
 
@@ -204,7 +210,10 @@ pub async fn oidc_browser_auth_flow(
     let redirect_uri = callback_redirect_uri(&listener)?;
 
     let client = BasicClient::new(ClientId::new(client_id.to_string()))
-        .set_auth_uri(AuthUrl::new(discovery.authorization_endpoint).into_diagnostic()?)
+        .set_auth_uri(AuthUrl::from_url(parse_oidc_url(
+            &discovery.authorization_endpoint,
+            "authorization endpoint",
+        )?))
         .set_token_uri(TokenUrl::new(discovery.token_endpoint).into_diagnostic()?)
         .set_redirect_uri(RedirectUrl::new(redirect_uri).into_diagnostic()?);
 
@@ -340,6 +349,9 @@ pub async fn oidc_device_code_flow(
              Enable the device authorization grant on this client, or use client credentials for headless automation."
         )
     })?;
+
+    let device_auth_endpoint =
+        parse_oidc_url(device_auth_endpoint, "device authorization endpoint")?;
 
     // Step 1: Request device and user codes
     let http = http_client(insecure);
@@ -895,6 +907,45 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async { client.get("https://127.0.0.1:1").send().await });
         assert!(result.is_err(), "connection to closed port should fail");
+    }
+
+    #[tokio::test]
+    async fn device_flow_refuses_ambiguous_endpoints_before_requesting_codes() {
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let invalid = format!("{issuer}/private^endpoint");
+        for (token, device, field) in [
+            (invalid.as_str(), issuer.as_str(), "token endpoint"),
+            (
+                issuer.as_str(),
+                invalid.as_str(),
+                "device authorization endpoint",
+            ),
+        ] {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/.well-known/openid-configuration"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "issuer": issuer,
+                    "authorization_endpoint": issuer,
+                    "token_endpoint": token,
+                    "device_authorization_endpoint": device,
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let error = oidc_device_code_flow(&issuer, "cli", None, None, false)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(field) && error.contains("literal caret"),
+                "{error}"
+            );
+            assert!(!error.contains("private^endpoint"), "{error}");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
     }
 
     #[test]

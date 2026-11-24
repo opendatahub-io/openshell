@@ -16,7 +16,7 @@ inputs:
     required: false
     default: deb
   github-token:
-    description: Token that reads the release and pulls its images from GHCR
+    description: Token that reads the release and pulls pre-move images from GHCR
     required: true
 
 runs:
@@ -68,8 +68,18 @@ runs:
         echo "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
         image_tag="${SOURCE_TAG#v}"
         mkdir -p artifacts/upgrade/source-images
+        # Releases from before the move to Quay are published only to GHCR, and
+        # each release's gateway asks for its images where they were published.
+        image_ref() {
+          local quay="quay.io/ai-openshell/$1:${image_tag}"
+          if docker manifest inspect "$quay" >/dev/null 2>&1; then
+            echo "$quay"
+          else
+            echo "ghcr.io/nvidia/openshell/$1:${image_tag}"
+          fi
+        }
         for image in sandbox supervisor; do
-          docker pull "ghcr.io/nvidia/openshell/${image}:${image_tag}"
-          docker save --output "artifacts/upgrade/source-images/openshell-${image}-tmachine.tar" \
-            "ghcr.io/nvidia/openshell/${image}:${image_tag}"
+          ref=$(image_ref "$image")
+          docker pull "$ref"
+          docker save --output "artifacts/upgrade/source-images/openshell-${image}-tmachine.tar" "$ref"
         done

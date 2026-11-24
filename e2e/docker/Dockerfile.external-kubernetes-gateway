@@ -7,8 +7,8 @@ ARG GATEWAY_BASE_IMAGE=gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8
 FROM ${GATEWAY_BASE_IMAGE}
 
 ARG TARGETARCH
-ARG SUPERVISOR_IMAGE=ghcr.io/nvidia/openshell/supervisor:latest
-ARG SANDBOX_RUNTIME_IMAGE=ghcr.io/nvidia/openshell/sandbox:latest
+ARG SUPERVISOR_IMAGE=quay.io/ai-openshell/supervisor:latest
+ARG SANDBOX_RUNTIME_IMAGE=quay.io/ai-openshell/sandbox:latest
 COPY deploy/docker/.build/prebuilt-binaries/${TARGETARCH}/openshell-gateway /usr/local/bin/openshell-gateway
 COPY deploy/docker/.build/prebuilt-binaries/${TARGETARCH}/openshell-driver-kubernetes /usr/local/bin/openshell-driver-kubernetes
 

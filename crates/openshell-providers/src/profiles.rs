@@ -2045,7 +2045,7 @@ pub fn profiles_to_json(profiles: &[ProviderTypeProfile]) -> Result<String, Prof
 ///
 /// Nothing in a release binary parses a profile *set* from YAML any more: the
 /// gateway validates the sets its configured sources return, through
-/// `validate_profile_set`. This is the loader behind the example profiles in
+/// `validate_catalog_profiles`. This is the loader behind the example profiles in
 /// `providers/`, so it is compiled for tests and for the `example-profiles`
 /// feature only.
 #[cfg(any(test, feature = "example-profiles"))]
@@ -2150,6 +2150,42 @@ fn is_valid_profile_id(id: &str) -> bool {
 
 #[must_use]
 pub fn validate_profile_set(
+    profiles: &[(String, ProviderTypeProfile)],
+) -> Vec<ProfileValidationDiagnostic> {
+    let mut diagnostics = validate_catalog_profiles(profiles);
+    for (source, profile) in profiles {
+        for credential in &profile.credentials {
+            let refresh = credential
+                .refresh
+                .as_ref()
+                .map(|refresh| ("credentials.refresh.token_url", &refresh.token_url));
+            let grant = credential.token_grant.as_ref().map(|grant| {
+                (
+                    "credentials.token_grant.token_endpoint",
+                    &grant.token_endpoint,
+                )
+            });
+            for (field, raw) in [refresh, grant].into_iter().flatten() {
+                if raw.contains('^')
+                    && let Err(reason) = openshell_core::token_endpoint::parse_auth_url(raw)
+                {
+                    diagnostics.push(ProfileValidationDiagnostic::error(
+                        source,
+                        &profile.id,
+                        field,
+                        format!("URL {reason}"),
+                    ));
+                }
+            }
+        }
+    }
+    diagnostics
+}
+
+/// Validate a loaded catalog without preventing owners from reading and
+/// replacing legacy credential endpoint paths. Minting checks the original URL.
+#[must_use]
+pub fn validate_catalog_profiles(
     profiles: &[(String, ProviderTypeProfile)],
 ) -> Vec<ProfileValidationDiagnostic> {
     let mut diagnostics = Vec::new();
@@ -2444,10 +2480,11 @@ pub fn validate_profile_set(
                             "github_app_installation requires at least one environment alias",
                         ));
                     }
-                    if let Err(reason) = openshell_core::token_endpoint::github_app_installation_url(
-                        &refresh.token_url,
-                        1,
-                    ) {
+                    if let Err(reason) =
+                        openshell_core::token_endpoint::validate_github_app_template(
+                            &refresh.token_url,
+                        )
+                    {
                         diagnostics.push(ProfileValidationDiagnostic::error(
                             source,
                             profile_id,

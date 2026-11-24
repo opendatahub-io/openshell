@@ -9,6 +9,7 @@
 use crate::error::{Result, SdkError};
 use oauth2::basic::BasicClient;
 use oauth2::{ClientId, RefreshToken, Scope, TokenResponse, TokenUrl};
+use openshell_core::token_endpoint::parse_auth_url;
 use serde::Deserialize;
 
 /// OIDC discovery document (subset of fields callers consume).
@@ -116,7 +117,10 @@ pub async fn discover(issuer: &str, insecure: bool) -> Result<OidcDiscovery> {
     let url = format!("{normalized_issuer}/.well-known/openid-configuration");
     let client = http_client(insecure);
     let resp: OidcDiscovery = client
-        .get(&url)
+        .get(
+            parse_auth_url(&url)
+                .map_err(|reason| SdkError::auth(format!("OIDC issuer URL {reason}")))?,
+        )
         .send()
         .await
         .map_err(|e| SdkError::auth(format!("OIDC discovery request failed: {e}")))?
@@ -130,6 +134,8 @@ pub async fn discover(issuer: &str, insecure: bool) -> Result<OidcDiscovery> {
             "OIDC discovery issuer mismatch: expected '{normalized_issuer}', got '{discovered_issuer}'"
         )));
     }
+    parse_auth_url(&resp.token_endpoint)
+        .map_err(|reason| SdkError::auth(format!("OIDC token endpoint {reason}")))?;
     Ok(resp)
 }
 
@@ -213,6 +219,40 @@ mod tests {
         assert!(!rendered.contains("access-secret"));
         assert!(!rendered.contains("refresh-secret"));
         assert!(rendered.contains("has_refresh_token"));
+    }
+
+    #[tokio::test]
+    async fn refresh_refuses_ambiguous_issuer_and_token_paths() {
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let ambiguous = format!("{issuer}/private^endpoint");
+        let input = RefreshTokenInput::new("refresh-secret", &ambiguous, "cli");
+        let error = refresh_token(&input).await.unwrap_err().to_string();
+        assert!(
+            error.contains("issuer URL") && error.contains("literal caret"),
+            "{error}"
+        );
+        assert!(!error.contains("private^endpoint"), "{error}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "issuer": issuer,
+                "authorization_endpoint": issuer,
+                "token_endpoint": ambiguous,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let input = RefreshTokenInput::new("refresh-secret", &issuer, "cli");
+        let error = refresh_token(&input).await.unwrap_err().to_string();
+        assert!(
+            error.contains("token endpoint") && error.contains("literal caret"),
+            "{error}"
+        );
+        assert!(!error.contains("private^endpoint"), "{error}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

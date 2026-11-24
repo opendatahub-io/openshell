@@ -412,7 +412,7 @@ qualification. Failed checks fail the parent workflow and retain evidence in Act
 Each qualification attempt writes its result to the Actions run summary and
 uploads `qualification-summary.json` as a 90-day workflow artifact. The qualification
 workflow attempts to publish passing and failing summaries to
-`ghcr.io/nvidia/openshell/qualification:<version>-run-<run-id>-attempt-<run-attempt>`.
+`ghcr.io/ai-openshell/openshell/qualification:<version>-run-<run-id>-attempt-<run-attempt>`.
 The summary contains qualification results and policy coverage only; artifact
 identity belongs in the release manifest. The run ID and attempt distinguish
 reruns without overwriting earlier evidence.

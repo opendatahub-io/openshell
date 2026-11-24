@@ -173,6 +173,12 @@ gatewayConfig:
     scopes_claim: ""
 ```
 
+Use OIDC issuer and endpoint URLs whose paths contain no literal caret
+(`^`). If a gateway or login client reports a literal-caret error, confirm
+the intended route with the identity provider administrator and update the
+issuer configuration or discovery document. A literal caret and `%5E` can
+reach different routes on the same host.
+
 The gateway requires HTTPS for OIDC discovery and JWKS retrieval, rejects
 redirects, and trusts the issuer origin for JWKS by default. Add a
 `jwks_allowed_origins` entry only when the identity provider intentionally serves

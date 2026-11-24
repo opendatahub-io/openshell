@@ -16,7 +16,7 @@ The Release Canary (`.github/workflows/release-canary.yml`) smoke-tests the arti
 | `macos` | `macos-latest-xlarge` | Installs the dev Homebrew artifacts, reaches the VM gateway, and creates, executes in, and deletes a sandbox. |
 | `ubuntu-deb` | `ubuntu-latest` | Installs the dev Debian package, reaches the Docker gateway, and creates, executes in, and deletes a sandbox. |
 | `fedora` | `fedora:latest` container | Installs the dev RPM packages, reaches the Podman gateway, and creates, executes in, and deletes a sandbox. |
-| `ubuntu-snap-system-docker` | `ubuntu-latest` | Uses `install.sh` to install the snap from `latest/edge`, reuses system Docker, verifies the packaged prover version and a local policy boundary check, reaches the Docker gateway, creates, executes in, and deletes a sandbox, and verifies that the Docker snap is not installed. |
+| `ubuntu-snap-system-docker` | `ubuntu-24.04` | Uses `install.sh` to install the snap from `latest/edge`, reuses system Docker, verifies the packaged prover version and a local policy boundary check, reaches the Docker gateway, creates, executes in, and deletes a sandbox, and verifies that the Docker snap is not installed. |
 | `ubuntu-snap-docker-preflight` | `ubuntu-latest` | Verifies that `install.sh` rejects the OpenShell snap path when Docker is absent or supplied by the Docker snap, without installing OpenShell. |
 | `kubernetes` | `ubuntu-latest` + kind | Installs the dev Helm chart, reaches the in-cluster gateway, and creates, executes in, and deletes a sandbox using the published runtime images. |
 

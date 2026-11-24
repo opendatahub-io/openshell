@@ -19,7 +19,8 @@ use openshell_gateway_interceptors::{
     ProviderProfileSourceSnapshot as InterceptorProfileSnapshot,
 };
 use openshell_providers::{
-    ProfileValidationDiagnostic, ProviderTypeProfile, normalize_profile_id, validate_profile_set,
+    ProfileValidationDiagnostic, ProviderTypeProfile, normalize_profile_id,
+    validate_catalog_profiles,
 };
 use prost::Message as _;
 use sha2::{Digest, Sha256};
@@ -1026,7 +1027,7 @@ fn validate_source_profiles(
     source_id: &str,
     profiles: &[(String, ProviderTypeProfile)],
 ) -> Result<(), Status> {
-    let diagnostics = validate_profile_set(profiles);
+    let diagnostics = validate_catalog_profiles(profiles);
     if let Some(diagnostic) = diagnostics
         .into_iter()
         .find(|diagnostic| diagnostic.severity == "error")

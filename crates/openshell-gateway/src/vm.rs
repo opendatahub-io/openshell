@@ -81,6 +81,8 @@ pub struct VmComputeConfig {
 
     /// Bootstrap image used to boot and prepare VM sandbox target images.
     pub bootstrap_image: String,
+    /// Per-image byte limit for host extraction of registry bootstrap layers.
+    pub bootstrap_extraction_max_bytes: Option<std::num::NonZeroU64>,
 
     /// libkrun log level used by the VM driver helper.
     pub krun_log_level: u32,
@@ -252,6 +254,7 @@ impl Default for VmComputeConfig {
             default_image: openshell_core::image::default_sandbox_image(),
             grpc_endpoint: String::new(),
             bootstrap_image: String::new(),
+            bootstrap_extraction_max_bytes: None,
             krun_log_level: Self::default_krun_log_level(),
             vcpus: Self::default_vcpus(),
             mem_mib: Self::default_mem_mib(),
@@ -584,7 +587,7 @@ pub async fn spawn(
         .arg("--overlay-disk-mib")
         .arg(vm_config.overlay_disk_mib.to_string());
     append_vm_identity_args(&mut command, vm_config);
-    append_vm_rootfs_tar_args(&mut command, vm_config);
+    append_vm_image_size_and_staging_args(&mut command, vm_config);
     if let Some(tls) = guest_tls_paths {
         command.arg("--guest-tls-ca").arg(tls.ca);
     }
@@ -637,7 +640,12 @@ fn append_vm_identity_args(command: &mut Command, config: &VmComputeConfig) {
 }
 
 #[cfg(unix)]
-fn append_vm_rootfs_tar_args(command: &mut Command, config: &VmComputeConfig) {
+fn append_vm_image_size_and_staging_args(command: &mut Command, config: &VmComputeConfig) {
+    if let Some(max_bytes) = config.bootstrap_extraction_max_bytes {
+        command
+            .arg("--bootstrap-extraction-max-bytes")
+            .arg(max_bytes.to_string());
+    }
     if let Some(path) = config.rootfs_tar_staging_dir.as_ref() {
         command.arg("--rootfs-tar-staging-dir").arg(path);
     }
@@ -850,8 +858,9 @@ async fn connect_compute_driver(socket_path: &Path) -> Result<Channel> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        VmComputeConfig, append_otlp_args, append_vm_identity_args, append_vm_network_trust_args,
-        append_vm_proxy_and_spiffe_args, append_vm_rootfs_tar_args, compute_driver_guest_tls_paths,
+        VmComputeConfig, append_otlp_args, append_vm_identity_args,
+        append_vm_image_size_and_staging_args, append_vm_network_trust_args,
+        append_vm_proxy_and_spiffe_args, compute_driver_guest_tls_paths,
         compute_driver_socket_path, current_euid, prepare_compute_driver_socket_path,
         prepare_vm_state_dir, resolve_compute_driver_bin, resolve_driver_search_dirs,
         validate_vm_sandbox_identity,
@@ -1290,11 +1299,12 @@ nat64_prefixes = ["2001:db8:64::/96"]
     }
 
     #[test]
-    fn vm_gateway_toml_forwards_rootfs_tar_settings() {
+    fn vm_gateway_toml_forwards_image_size_and_staging_settings() {
         let config: VmComputeConfig = toml::from_str(
             r#"
                 grpc_endpoint = "http://127.0.0.1:50051"
                 rootfs_tar_staging_dir = "/var/lib/openshell/rootfs-tar-staging"
+                bootstrap_extraction_max_bytes = 33554432
                 rootfs_tar_max_bytes = 1073741824
             "#,
         )
@@ -1304,7 +1314,7 @@ nat64_prefixes = ["2001:db8:64::/96"]
             .expect("rootfs tar settings must pass static validation");
 
         let mut command = tokio::process::Command::new("openshell-driver-vm");
-        append_vm_rootfs_tar_args(&mut command, &config);
+        append_vm_image_size_and_staging_args(&mut command, &config);
         let args = command
             .as_std()
             .get_args()
@@ -1314,6 +1324,8 @@ nat64_prefixes = ["2001:db8:64::/96"]
         assert_eq!(
             args,
             [
+                "--bootstrap-extraction-max-bytes",
+                "33554432",
                 "--rootfs-tar-staging-dir",
                 "/var/lib/openshell/rootfs-tar-staging",
                 "--rootfs-tar-max-bytes",

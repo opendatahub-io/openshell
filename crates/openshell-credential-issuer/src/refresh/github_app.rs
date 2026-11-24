@@ -470,6 +470,21 @@ mod tests {
             server.uri()
         )]];
         assert!(mint(&request).await.is_err());
+        let base = server.uri();
+        for (prefix, grant) in [("/a^b", "/a^b"), ("/a^b", "/a%5Eb"), ("/a%5Eb", "/a^b")] {
+            let mut request = state(&format!("{base}{prefix}"));
+            request.secret_endpoint_allowlists = vec![vec![format!(
+                "{base}{grant}/app/installations/123/access_tokens"
+            )]];
+            let failure = mint(&request).await.err().unwrap();
+            assert_eq!(failure.recovery_action, Recovery::FixConfiguration);
+            if prefix.contains('^') {
+                assert!(
+                    failure.status.message().contains("literal")
+                        && failure.status.message().contains("caret")
+                );
+            }
+        }
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
@@ -517,6 +532,44 @@ mod tests {
         assert!(claims["iat"].as_i64().unwrap() <= current_time_ms() / 1000 - 60);
         assert!(claims["exp"].as_i64().unwrap() <= current_time_ms() / 1000 + 600);
         assert!(!String::from_utf8_lossy(&requests[0].body).contains("PRIVATE KEY"));
+    }
+
+    #[tokio::test]
+    async fn github_app_posts_to_the_exact_encoded_installation_path() {
+        use axum::http::Uri;
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let app = Router::new().fallback_service(post(|uri: Uri, headers: HeaderMap| async move {
+            assert!(
+                headers["authorization"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("Bearer ")
+            );
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "token": uri.path(), "expires_at": "2099-01-01T00:00:00Z"
+                })),
+            )
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let exercise = async {
+            for prefix in ["/a%5Eb", "/a%5eb", "/a%255Eb"] {
+                let mut input = state(&format!("{base}{prefix}/api/v3"));
+                let path = format!("{prefix}/api/v3/app/installations/123/access_tokens");
+                input.secret_endpoint_allowlists = vec![vec![format!("{base}{path}")]];
+                assert_eq!(mint(&input).await.unwrap().access_token, path);
+            }
+        };
+        tokio::select! {
+            result = axum::serve(listener, app) => panic!("loopback server stopped: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(10), exercise) => {
+                result.expect("GitHub App token exchanges timed out");
+            }
+        }
     }
 
     #[tokio::test]

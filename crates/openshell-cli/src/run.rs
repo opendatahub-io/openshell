@@ -42,12 +42,16 @@ pub use crate::commands::secret::{
 use crate::color::Colorize;
 use crate::policy_update::build_policy_update_plan;
 use crate::tls::{
-    TlsOptions, grpc_client, owner_replica, retry_unrouted, routed_to, with_owner_hint,
+    GrpcClient, TlsOptions, grpc_client, owner_replica, retry_unrouted, routed_to, with_owner_hint,
 };
 use futures::StreamExt;
 use miette::{IntoDiagnostic, Result, WrapErr, miette};
 use openshell_bootstrap::{
     GatewayMetadata, clear_last_sandbox_if_matches, get_gateway_metadata, save_last_sandbox,
+};
+use openshell_core::create_retry::{
+    AlreadyExistsPlan, CleanupPhase, HolderProvenance, RetryPlan, cleanup_wait_delay,
+    plan_already_exists, plan_retry, retry_stopped_suffix,
 };
 use openshell_core::net::set_tcp_nodelay_best_effort;
 use openshell_core::proto::{
@@ -62,13 +66,14 @@ use openshell_core::proto::{
     ListSandboxPoliciesRequest, ListSandboxTemplatesRequest, ListSandboxesRequest,
     ListServicesRequest, PolicySource, PolicyStatus, RejectDraftChunkRequest, ResourceRequirements,
     ResumeSandboxRequest, RevokeSshSessionRequest, Sandbox, SandboxCondition, SandboxPhase,
-    SandboxPolicy, SandboxResources, SandboxRestartPolicy, SandboxServiceExposure,
+    SandboxPolicy, SandboxResources, SandboxResponse, SandboxRestartPolicy, SandboxServiceExposure,
     SandboxServiceLevel, SandboxSpec, SandboxStartup, SandboxTemplate, SandboxWorkloadConfig,
     SandboxWorkloadTemplate, SandboxWorkloadTemplateSpec, ServiceAuthorizationMode,
     ServiceEndpointResponse, SettingScope, StartSandboxRequest, StopSandboxRequest,
     SuspendSandboxRequest, TcpForwardFrame, TcpForwardInit, TcpRelayTarget, UpdateConfigRequest,
     WatchSandboxRequest, exec_sandbox_event, tcp_forward_init,
 };
+use openshell_core::rpc_error::{MUTATION_LOCK_TIMEOUT, decode_details, is_mutation_lock_timeout};
 use openshell_core::settings;
 use openshell_core::{ObjectId, ObjectName, ObjectWorkspace};
 use prost::Message;
@@ -463,6 +468,10 @@ pub struct SandboxCreateConfig<'a> {
     pub suppress_credential_warnings: bool,
     pub restart_policy: &'a str,
     pub provision_timeout_secs: Option<u32>,
+    /// Seconds to retry a create that lost the gateway mutation lock. `Some(0)`
+    /// disables retries; `None` reads `OPENSHELL_CREATE_RETRY_TIMEOUT` or the
+    /// 60s default.
+    pub create_retry_timeout_secs: Option<u32>,
 }
 
 impl Default for SandboxCreateConfig<'_> {
@@ -495,7 +504,513 @@ impl Default for SandboxCreateConfig<'_> {
             suppress_credential_warnings: false,
             restart_policy: "never",
             provision_timeout_secs: None,
+            create_retry_timeout_secs: None,
         }
+    }
+}
+
+/// Upper bound on `OPENSHELL_CREATE_RETRY_TIMEOUT`, so an oversized value
+/// cannot build a budget that overflows the retry deadline.
+const MAX_CREATE_RETRY_TIMEOUT_SECS: u64 = 86_400;
+
+/// Resolve the create-retry budget from the flag value and the environment.
+///
+/// The flag wins; `OPENSHELL_CREATE_RETRY_TIMEOUT` follows the
+/// `OPENSHELL_PROVISION_TIMEOUT` precedent; the default keeps retries on for
+/// 60 seconds. A zero budget disables retries, which `--no-create-retry`
+/// selects. Both sources are clamped to 24 hours, so neither can build a
+/// budget that runs without bound.
+fn resolve_create_retry_timeout(flag_secs: Option<u32>) -> Duration {
+    if let Some(secs) = flag_secs {
+        return Duration::from_secs(u64::from(secs).min(MAX_CREATE_RETRY_TIMEOUT_SECS));
+    }
+    let secs = std::env::var("OPENSHELL_CREATE_RETRY_TIMEOUT")
+        .ok()
+        .map_or(60, |value| {
+            // An all-digits value that overflows `u64` is still a budget, not
+            // garbage: clamp it to the ceiling instead of falling back to the
+            // default.
+            value.parse::<u64>().unwrap_or_else(|_| {
+                if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    u64::MAX
+                } else {
+                    60
+                }
+            })
+        });
+    Duration::from_secs(secs.min(MAX_CREATE_RETRY_TIMEOUT_SECS))
+}
+
+/// Deadline `budget` from now, saturating rather than panicking when the
+/// budget is larger than an [`Instant`] can represent.
+fn deadline_after(budget: Duration) -> Instant {
+    let now = Instant::now();
+    let mut budget = budget;
+    loop {
+        if let Some(deadline) = now.checked_add(budget) {
+            return deadline;
+        }
+        budget /= 2;
+    }
+}
+
+/// Seed for create-retry jitter, drawn once per create call.
+///
+/// `RandomState::new()` mixes a per-process and per-thread counter, so separate
+/// CLI invocations retrying the same sandbox name pick different jitter.
+/// Deriving it from the sandbox name instead would make every contender
+/// re-collide in lockstep.
+fn create_retry_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
+}
+
+/// Decoded `RetryInfo` delay from a gateway status, when present.
+fn gateway_retry_delay(status: &Status) -> Option<Duration> {
+    decode_details(status)?.retry_info()?.retry_delay
+}
+
+/// One-decimal seconds for retry progress lines, e.g. `1.2s`.
+fn format_retry_delay(delay: Duration) -> String {
+    format!("{:.1}s", delay.as_secs_f64())
+}
+
+/// Whole seconds left in the retry budget, e.g. `47s`.
+fn format_retry_budget(remaining: Duration) -> String {
+    format!("{}s", remaining.as_secs())
+}
+
+/// Decision for the next create attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateAttemptPlan {
+    /// Sleep, then send the create again.
+    Sleep(Duration),
+    /// Stop and surface the failure.
+    Stop,
+}
+
+/// Wall-clock budget and jitter seed shared by one create retry loop.
+#[derive(Debug, Clone, Copy)]
+struct CreateRetry {
+    deadline: Instant,
+    seed: u64,
+}
+
+impl CreateRetry {
+    fn new(budget: Duration, seed: u64) -> Self {
+        Self {
+            deadline: deadline_after(budget),
+            seed,
+        }
+    }
+
+    /// Time left for retries and the `AlreadyExists` cleanup wait.
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    /// Plan the next attempt after a failed create.
+    ///
+    /// Only `MUTATION_LOCK_TIMEOUT` retries: every other failure may have run
+    /// after the gateway persisted the create, so repeating it can duplicate a
+    /// sandbox. `attempts_made` counts the create sends so far, so the shared
+    /// decision layer can stop at its attempt cap; `waited` is how long the
+    /// failed send took.
+    fn plan_create(
+        &self,
+        status: &Status,
+        attempts_made: u32,
+        waited: Duration,
+    ) -> CreateAttemptPlan {
+        if !is_mutation_lock_timeout(status) {
+            return CreateAttemptPlan::Stop;
+        }
+        match plan_retry(
+            gateway_retry_delay(status),
+            attempts_made,
+            waited,
+            self.seed,
+            self.remaining(),
+        ) {
+            RetryPlan::Sleep(delay) => CreateAttemptPlan::Sleep(delay),
+            RetryPlan::Stop => CreateAttemptPlan::Stop,
+        }
+    }
+}
+
+/// Hint shown when a live sandbox keeps the requested name.
+const SANDBOX_NAME_TAKEN_HINT: &str = "\n\nhint: delete it first with: openshell sandbox delete <name>\n      or use a different name";
+
+/// Report for a create that failed with `AlreadyExists` without retrying.
+fn already_exists_report(status: &Status) -> miette::Report {
+    miette::miette!("{}{SANDBOX_NAME_TAKEN_HINT}", status.message())
+}
+
+/// Annotation for a create failure that ended the retry loop.
+///
+/// Names the attempt count and, when the surfaced failure is not itself a lock
+/// timeout, the original lock timeout.
+fn create_retry_annotation(attempts: u32, lock_timeout: Option<&str>) -> String {
+    retry_stopped_suffix(attempts, lock_timeout)
+}
+
+/// Report for a lock timeout that ended the retry loop.
+fn create_timeout_report(status: &Status, attempts: u32) -> miette::Report {
+    miette::miette!(
+        "{}{}",
+        status.message(),
+        create_retry_annotation(attempts, None)
+    )
+}
+
+/// Report for a named create that ended retrying on `AlreadyExists`.
+///
+/// A terminal stop on the first attempt with no prior lock timeout keeps its
+/// plain shape; every other stop names the attempt count so a cleanup-wait
+/// timeout is never misread as a bare name conflict. `budget_exhausted` forces
+/// the annotation even on the first attempt, because an exhausted cleanup wait
+/// is never a terminal "name taken" answer. `detail` appends the observation
+/// that ended the wait, such as an unreadable holder status. The delete-first
+/// hint appears only when a live holder keeps the name.
+fn create_conflict_report(
+    status: &Status,
+    attempts: u32,
+    lock_timeout: Option<&str>,
+    holder_is_live: bool,
+    budget_exhausted: bool,
+    detail: Option<&str>,
+) -> miette::Report {
+    let mut message = status.message().to_string();
+    if let Some(detail) = detail {
+        message.push_str("; ");
+        message.push_str(detail);
+    }
+    if budget_exhausted || attempts > 1 || lock_timeout.is_some() {
+        message.push_str(&create_retry_annotation(attempts, lock_timeout));
+    }
+    if holder_is_live {
+        message.push_str(SANDBOX_NAME_TAKEN_HINT);
+    }
+    miette::miette!("{message}")
+}
+
+/// Send one create attempt without retrying.
+async fn create_sandbox_once(
+    client: &mut GrpcClient,
+    request: CreateSandboxRequest,
+) -> Result<SandboxResponse> {
+    match client.create_sandbox(request).await {
+        Ok(response) => Ok(response.into_inner()),
+        Err(status) if status.code() == Code::AlreadyExists => Err(already_exists_report(&status)),
+        Err(status) => Err(miette::miette!(status.to_string())),
+    }
+}
+
+/// Send the create, retrying only while the gateway mutation lock is busy.
+///
+/// `workspace` scopes the `AlreadyExists` phase poll the way the create request
+/// was scoped: a poll without it would disambiguate the name against the wrong
+/// workspace. Progress lines go to stderr so structured output on stdout stays
+/// parseable.
+async fn create_sandbox_with_retry(
+    client: &mut GrpcClient,
+    request: CreateSandboxRequest,
+    workspace: &str,
+    retry: CreateRetry,
+) -> Result<SandboxResponse> {
+    let name = request.name.clone();
+    let mut create_attempts: u32 = 0;
+    let mut not_found_retries: u32 = 0;
+    // Dual use: the last lock-timeout message annotates the surfaced failure,
+    // and its presence is how the AlreadyExists wait derives
+    // `HolderProvenance` (a record this command may have left). It is set only
+    // when a retry was actually planned, so a Stop on the first lock timeout
+    // keeps the plain error shape.
+    let mut lock_timeout: Option<String> = None;
+    // Identity of the holder observed during the current AlreadyExists
+    // conflict. Reset when a NotFound observation drives a create retry:
+    // that holder is gone, and the next conflict's holder is expected to have
+    // a fresh id (an own re-attempt persists a new record), so the
+    // same-name-replacement guard must not compare against the stale one.
+    let mut holder_id: Option<String> = None;
+
+    loop {
+        create_attempts += 1;
+        let sent = Instant::now();
+        match client.create_sandbox(request.clone()).await {
+            Ok(response) => return Ok(response.into_inner()),
+            // A lock timeout means different things per gateway step. The
+            // pre-record creation guard rejects before any write ran, so the
+            // request stays repeatable as-is. The SSH identity step also
+            // reports this reason, but only after the record was persisted:
+            // that failure is compensated server-side, and the next attempt
+            // resolves through the AlreadyExists cleanup wait below. A `--from`
+            // create whose staged archive was consumed by that step surfaces
+            // the gateway's spent-token error instead of retrying; re-staging
+            // the archive is tracked separately. `request_id` stays empty: a
+            // non-empty one would engage mutation replay and surface the
+            // recorded failure instead of retrying.
+            Err(status) if is_mutation_lock_timeout(&status) => {
+                let remaining = retry.remaining();
+                match retry.plan_create(&status, create_attempts, sent.elapsed()) {
+                    CreateAttemptPlan::Sleep(delay) => {
+                        eprintln!(
+                            "gateway busy ({MUTATION_LOCK_TIMEOUT}); retrying in {} (attempt {}, budget {} left)",
+                            format_retry_delay(delay),
+                            create_attempts + 1,
+                            format_retry_budget(remaining),
+                        );
+                        let message = status.message().to_string();
+                        tokio::time::sleep(delay).await;
+                        // A late timer wake must not start an attempt outside
+                        // the budget; an attempt that starts inside it may
+                        // still overrun, per the retry policy's contract.
+                        if retry.remaining().is_zero() {
+                            return Err(create_timeout_report(&status, create_attempts));
+                        }
+                        lock_timeout = Some(message);
+                    }
+                    CreateAttemptPlan::Stop => {
+                        return Err(create_timeout_report(&status, create_attempts));
+                    }
+                }
+            }
+            // A named create can lose the name to a sandbox that is still
+            // being deleted or still being created. The name frees when
+            // cleanup finishes, so the decision layer below waits, retries, or
+            // stops per phase.
+            Err(status) if status.code() == Code::AlreadyExists => {
+                if name.is_empty() {
+                    return Err(already_exists_report(&status));
+                }
+                let poll_delay = gateway_retry_delay(&status);
+                let mut wait_attempt: u32 = 0;
+                loop {
+                    let remaining = retry.remaining();
+                    if remaining.is_zero() {
+                        // The budget is spent before the poll: surface the
+                        // conflict instead of starting a read that cannot be
+                        // bounded.
+                        return Err(create_conflict_report(
+                            &status,
+                            create_attempts,
+                            lock_timeout.as_deref(),
+                            false,
+                            true,
+                            None,
+                        ));
+                    }
+                    let poll = GetSandboxRequest {
+                        name: name.clone(),
+                        workspace_scope: Some(openshell_core::proto::workspace_selector(
+                            workspace.to_string(),
+                        )),
+                    };
+                    // Bound the read itself: a stuck GetSandbox must not keep
+                    // the retrying create pending past its budget.
+                    let observed = match tokio::time::timeout(remaining, client.get_sandbox(poll))
+                        .await
+                    {
+                        Err(_elapsed) => {
+                            return Err(create_conflict_report(
+                                &status,
+                                create_attempts,
+                                lock_timeout.as_deref(),
+                                false,
+                                true,
+                                None,
+                            ));
+                        }
+                        Ok(result) => match result {
+                            Ok(response) => match response.into_inner().sandbox {
+                                Some(sandbox) => {
+                                    let observed = match sandbox.phase() {
+                                        phase if phase == SandboxPhase::Deleting as i32 => {
+                                            CleanupPhase::Deleting
+                                        }
+                                        phase if phase == SandboxPhase::Provisioning as i32 => {
+                                            CleanupPhase::Provisioning
+                                        }
+                                        _ => CleanupPhase::Live,
+                                    };
+                                    // A missing id cannot identify the holder, so
+                                    // it neither counts as a change nor replaces
+                                    // the recorded id with an empty string.
+                                    let id = sandbox
+                                        .metadata
+                                        .as_ref()
+                                        .map(|metadata| metadata.id.as_str())
+                                        .filter(|id| !id.is_empty());
+                                    // A different id means the name changed hands;
+                                    // waiting on it would watch the wrong holder. A
+                                    // live replacement keeps the name, so it gets
+                                    // the same delete-first hint as a live holder.
+                                    if let (Some(held), Some(id)) = (holder_id.as_deref(), id)
+                                        && held != id
+                                    {
+                                        return Err(create_conflict_report(
+                                            &status,
+                                            create_attempts,
+                                            lock_timeout.as_deref(),
+                                            observed == CleanupPhase::Live,
+                                            false,
+                                            None,
+                                        ));
+                                    }
+                                    if let Some(id) = id {
+                                        holder_id = Some(id.to_string());
+                                    }
+                                    observed
+                                }
+                                None => CleanupPhase::NotFound,
+                            },
+                            Err(not_found) if not_found.code() == Code::NotFound => {
+                                CleanupPhase::NotFound
+                            }
+                            // A transient read failure says nothing about the
+                            // holder: wait one poll interval and ask again while
+                            // the budget allows.
+                            Err(transient) if transient.code() == Code::Unavailable => {
+                                let delay =
+                                    cleanup_wait_delay(poll_delay, wait_attempt, retry.seed);
+                                if delay > retry.remaining() {
+                                    return Err(create_conflict_report(
+                                        &status,
+                                        create_attempts,
+                                        lock_timeout.as_deref(),
+                                        false,
+                                        true,
+                                        None,
+                                    ));
+                                }
+                                eprintln!(
+                                    "sandbox '{name}' holder status unavailable; retrying in {} (budget {} left)",
+                                    format_retry_delay(delay),
+                                    format_retry_budget(retry.remaining()),
+                                );
+                                tokio::time::sleep(delay).await;
+                                wait_attempt += 1;
+                                continue;
+                            }
+                            // Any other read failure says nothing about the holder
+                            // either, but waiting cannot resolve it. Surface the
+                            // name conflict, not the read error, so the caller
+                            // keeps the AlreadyExists contract and the delete-first
+                            // hint.
+                            Err(other) => {
+                                let detail =
+                                    format!("holder status unavailable: {}", other.message());
+                                return Err(create_conflict_report(
+                                    &status,
+                                    create_attempts,
+                                    lock_timeout.as_deref(),
+                                    false,
+                                    false,
+                                    Some(&detail),
+                                ));
+                            }
+                        },
+                    };
+                    if observed != CleanupPhase::NotFound {
+                        not_found_retries = 0;
+                    }
+                    // A provisioning holder is only waited out when an earlier
+                    // attempt of this command may have left it: a lock timeout
+                    // was already observed.
+                    let provenance = if lock_timeout.is_some() {
+                        HolderProvenance::OwnPriorAttempt
+                    } else {
+                        HolderProvenance::OtherCaller
+                    };
+                    match plan_already_exists(
+                        observed,
+                        not_found_retries,
+                        poll_delay,
+                        wait_attempt,
+                        create_attempts,
+                        retry.seed,
+                        provenance,
+                    ) {
+                        AlreadyExistsPlan::Wait(delay) => {
+                            if delay > retry.remaining() {
+                                return Err(create_conflict_report(
+                                    &status,
+                                    create_attempts,
+                                    lock_timeout.as_deref(),
+                                    false,
+                                    true,
+                                    None,
+                                ));
+                            }
+                            eprintln!(
+                                "sandbox '{name}' exists and {}; waiting for cleanup ({}, budget {} left)",
+                                cleanup_phase_progress(observed),
+                                format_retry_delay(delay),
+                                format_retry_budget(retry.remaining()),
+                            );
+                            tokio::time::sleep(delay).await;
+                            wait_attempt += 1;
+                        }
+                        AlreadyExistsPlan::RetryCreate => {
+                            if retry.remaining().is_zero() {
+                                return Err(create_conflict_report(
+                                    &status,
+                                    create_attempts,
+                                    lock_timeout.as_deref(),
+                                    false,
+                                    true,
+                                    None,
+                                ));
+                            }
+                            eprintln!(
+                                "sandbox '{name}' is not visible; retrying the create (budget {} left)",
+                                format_retry_budget(retry.remaining()),
+                            );
+                            not_found_retries += 1;
+                            // The observed holder is gone (NotFound drove this
+                            // retry), so the next conflict starts without a
+                            // recorded id to compare against.
+                            holder_id = None;
+                            break;
+                        }
+                        AlreadyExistsPlan::Stop => {
+                            // A Provisioning holder under OwnPriorAttempt
+                            // reaches Stop only through the attempt cap, which
+                            // the attempt-count annotation already names; only
+                            // another caller's provisioning holder gets the
+                            // attribution.
+                            return Err(create_conflict_report(
+                                &status,
+                                create_attempts,
+                                lock_timeout.as_deref(),
+                                observed == CleanupPhase::Live,
+                                false,
+                                if observed == CleanupPhase::Provisioning
+                                    && provenance == HolderProvenance::OtherCaller
+                                {
+                                    Some("the holder is still being created by another caller")
+                                } else {
+                                    None
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(status) => return Err(miette::miette!(status.to_string())),
+        }
+    }
+}
+
+/// Progress phrase for a holder observed during the cleanup wait.
+fn cleanup_phase_progress(observed: CleanupPhase) -> &'static str {
+    match observed {
+        CleanupPhase::Deleting => "is being deleted",
+        CleanupPhase::Provisioning => "is still being created",
+        CleanupPhase::NotFound | CleanupPhase::Live => "cannot be observed",
     }
 }
 
@@ -535,6 +1050,7 @@ pub async fn sandbox_create(
         suppress_credential_warnings,
         restart_policy,
         provision_timeout_secs,
+        create_retry_timeout_secs,
     } = config;
 
     if editor.is_some() && !command.is_empty() {
@@ -601,8 +1117,8 @@ pub async fn sandbox_create(
     }
 
     // Resolve the --from flag into a container image reference, or stage a
-    // rootfs tar on the gateway and retain its staging token. Template creates
-    // resolve workload shape on the gateway and skip --from.
+    // rootfs tar on the gateway and retain its single-use staging token.
+    // Template creates resolve workload shape on the gateway and skip --from.
     let (image, rootfs_tar_token): (Option<String>, Option<String>) = if template.is_some() {
         (None, None)
     } else {
@@ -719,17 +1235,20 @@ pub async fn sandbox_create(
             .collect(),
     };
 
-    let response = match client.create_sandbox(request).await {
-        Ok(resp) => resp,
-        Err(status) if status.code() == Code::AlreadyExists => {
-            return Err(miette::miette!(
-                "{}\n\nhint: delete it first with: openshell sandbox delete <name>\n      or use a different name",
-                status.message()
-            ));
-        }
-        Err(status) => return Err(miette::miette!(status.to_string())),
+    let create_retry_timeout = resolve_create_retry_timeout(create_retry_timeout_secs);
+    // Box the attempts: the retry loop carries enough state that inlining it
+    // pushes every caller's future past clippy's size lint.
+    let response = if create_retry_timeout.is_zero() {
+        Box::pin(create_sandbox_once(&mut client, request)).await?
+    } else {
+        Box::pin(create_sandbox_with_retry(
+            &mut client,
+            request,
+            workspace,
+            CreateRetry::new(create_retry_timeout, create_retry_seed()),
+        ))
+        .await?
     };
-    let response = response.into_inner();
     let application_service_urls = response.application_service_urls;
     let service_urls = response
         .service_urls
@@ -1391,7 +1910,7 @@ fn rootfs_tar_sources_supported_for_gateway(metadata: Option<&GatewayMetadata>) 
 /// file. Returns the token to pass on `CreateSandbox`.
 async fn stage_rootfs_tar(
     gateway_name: &str,
-    client: &mut crate::tls::GrpcClient,
+    client: &mut GrpcClient,
     workspace: &str,
     tar_path: &Path,
 ) -> Result<String> {
@@ -2264,7 +2783,7 @@ pub async fn service_forward_tcp(
 }
 
 async fn create_forward_session_token(
-    client: &mut crate::tls::GrpcClient,
+    client: &mut GrpcClient,
     sandbox_name: &str,
     workspace: &str,
 ) -> std::result::Result<String, ForwardTcpConnectionError> {
@@ -2290,7 +2809,7 @@ fn forward_requires_session_token(status: &Status) -> bool {
 
 /// Confirm the sandbox is still ready, returning the replica that owns it.
 async fn fetch_ready_sandbox_for_forward(
-    client: &mut crate::tls::GrpcClient,
+    client: &mut GrpcClient,
     name: &str,
     workspace: &str,
 ) -> Result<Option<AsciiMetadataValue>> {
@@ -2384,7 +2903,7 @@ fn parse_tcp_forward_spec(local: Option<&str>, default_port: u16) -> Result<(Str
 
 #[allow(clippy::too_many_arguments)] // one connection's sandbox, target, and authorization context
 async fn forward_one_tcp_connection(
-    client: &mut crate::tls::GrpcClient,
+    client: &mut GrpcClient,
     socket: tokio::net::TcpStream,
     sandbox_name: String,
     workspace: String,
@@ -2470,7 +2989,7 @@ type OpenForwardTcpStream = (
 );
 
 async fn open_forward_tcp_stream(
-    client: &mut crate::tls::GrpcClient,
+    client: &mut GrpcClient,
     init: TcpForwardInit,
     replica: Option<&AsciiMetadataValue>,
 ) -> std::result::Result<OpenForwardTcpStream, Status> {
@@ -2483,7 +3002,7 @@ async fn open_forward_tcp_stream(
     Ok((tx, response?.into_inner()))
 }
 
-async fn revoke_forward_session_token(client: &mut crate::tls::GrpcClient, token: Option<String>) {
+async fn revoke_forward_session_token(client: &mut GrpcClient, token: Option<String>) {
     if let Some(token) = token {
         let _ = client
             .revoke_ssh_session(RevokeSshSessionRequest {
@@ -2597,7 +3116,7 @@ impl Drop for TaskGuard {
 
 #[allow(clippy::too_many_arguments)]
 async fn sandbox_exec_streaming_grpc(
-    mut client: crate::tls::GrpcClient,
+    mut client: GrpcClient,
     sandbox: &Sandbox,
     command: &[String],
     workdir: Option<&str>,
@@ -4279,7 +4798,7 @@ fn lifecycle_phase_error(
 }
 
 async fn wait_for_lifecycle_phase(
-    client: &mut crate::tls::GrpcClient,
+    client: &mut GrpcClient,
     sandbox: Sandbox,
     target: SandboxPhase,
 ) -> Result<Sandbox> {
@@ -7175,6 +7694,9 @@ fn format_endpoint(endpoint: &openshell_core::proto::NetworkEndpoint) -> String 
     } else {
         endpoint.protocol.as_str()
     };
+    if endpoint.protocol.is_empty() || endpoint.protocol.eq_ignore_ascii_case("tcp") {
+        return format!("{host_port} [{layer_tag}, no HTTP method/path filter]");
+    }
     tags.push(layer_tag.to_string());
 
     if endpoint.access != 0 {
@@ -7203,15 +7725,17 @@ fn format_endpoint(endpoint: &openshell_core::proto::NetworkEndpoint) -> String 
 #[cfg(test)]
 mod tests {
     use super::{
-        ForwardTcpConnectionError, PolicyGetView, ProvisioningStep, build_sandbox_resource_limits,
-        format_endpoint, format_log_line, forward_requires_session_token, git_sync_files,
-        has_main_process_result, parse_cli_setting_value, parse_credential_expiry_cli_value,
-        parse_driver_config_json, parse_env_from_pairs, parse_secret_material_env_pairs,
-        policy_revision_list_json, policy_revision_to_json, proto_execution_timeout,
-        provisioning_blocker_message, provisioning_timeout_message, relay_local_socket,
-        resolve_from, rootfs_tar_sources_supported_for_gateway, sandbox_should_persist,
-        sandbox_upload_plan, service_endpoint_to_json, service_status_error,
-        service_url_for_gateway, workspace_member_to_json,
+        CreateAttemptPlan, CreateRetry, ForwardTcpConnectionError, MAX_CREATE_RETRY_TIMEOUT_SECS,
+        PolicyGetView, ProvisioningStep, build_sandbox_resource_limits, create_retry_annotation,
+        deadline_after, format_endpoint, format_log_line, forward_requires_session_token,
+        git_sync_files, has_main_process_result, parse_cli_setting_value,
+        parse_credential_expiry_cli_value, parse_driver_config_json, parse_env_from_pairs,
+        parse_secret_material_env_pairs, policy_revision_list_json, policy_revision_to_json,
+        proto_execution_timeout, provisioning_blocker_message, provisioning_timeout_message,
+        relay_local_socket, resolve_create_retry_timeout, resolve_from,
+        rootfs_tar_sources_supported_for_gateway, sandbox_should_persist, sandbox_upload_plan,
+        service_endpoint_to_json, service_status_error, service_url_for_gateway,
+        workspace_member_to_json,
     };
     use openshell_core::proto::TcpForwardFrame;
 
@@ -7280,6 +7804,191 @@ mod tests {
                 nanos: 0,
             }
         );
+    }
+
+    fn mutation_lock_timeout(delay: Duration) -> Status {
+        openshell_core::rpc_error::unavailable(
+            openshell_core::rpc_error::MUTATION_LOCK_TIMEOUT,
+            "gateway busy",
+            delay,
+        )
+    }
+
+    #[test]
+    fn create_retry_sleeps_between_the_server_floor_and_the_jitter_bound() {
+        let retry = CreateRetry::new(Duration::from_mins(1), 7);
+        let delay = Duration::from_millis(200);
+        for attempts_made in 1..=4 {
+            let floor = delay * (1 << (attempts_made - 1));
+            let CreateAttemptPlan::Sleep(sleep) =
+                retry.plan_create(&mutation_lock_timeout(delay), attempts_made, Duration::ZERO)
+            else {
+                panic!("a lock timeout inside the budget must retry");
+            };
+            assert!(sleep >= floor, "the floor must not be undercut: {sleep:?}");
+            assert!(
+                sleep <= floor + floor / 2,
+                "jitter is capped at half the delay: {sleep:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_retry_stops_at_the_attempt_cap() {
+        let retry = CreateRetry::new(Duration::from_mins(1), 7);
+        let status = mutation_lock_timeout(Duration::from_millis(1));
+        assert!(matches!(
+            retry.plan_create(
+                &status,
+                openshell_core::create_retry::MAX_CREATE_ATTEMPTS - 1,
+                Duration::ZERO
+            ),
+            CreateAttemptPlan::Sleep(_)
+        ));
+        assert_eq!(
+            retry.plan_create(
+                &status,
+                openshell_core::create_retry::MAX_CREATE_ATTEMPTS,
+                Duration::ZERO
+            ),
+            CreateAttemptPlan::Stop,
+            "the attempt cap must stop the retry even with budget left"
+        );
+    }
+
+    #[test]
+    fn create_retry_stops_when_the_budget_is_spent() {
+        let retry = CreateRetry::new(Duration::ZERO, 7);
+        assert_eq!(
+            retry.plan_create(
+                &mutation_lock_timeout(Duration::from_millis(1)),
+                1,
+                Duration::ZERO
+            ),
+            CreateAttemptPlan::Stop
+        );
+    }
+
+    #[test]
+    fn create_retry_ignores_other_transient_failures() {
+        // DATABASE_UNAVAILABLE and a bare UNAVAILABLE also carry RetryInfo, but
+        // a create may have persisted before them, so repeating is unsafe.
+        let retry = CreateRetry::new(Duration::from_mins(1), 7);
+        let database = openshell_core::rpc_error::unavailable(
+            "DATABASE_UNAVAILABLE",
+            "database is unavailable",
+            Duration::from_millis(10),
+        );
+        assert_eq!(
+            retry.plan_create(&database, 1, Duration::ZERO),
+            CreateAttemptPlan::Stop
+        );
+        assert_eq!(
+            retry.plan_create(
+                &Status::unavailable("gateway restarting"),
+                1,
+                Duration::ZERO
+            ),
+            CreateAttemptPlan::Stop
+        );
+        assert_eq!(
+            retry.plan_create(&Status::invalid_argument("bad name"), 1, Duration::ZERO),
+            CreateAttemptPlan::Stop
+        );
+    }
+
+    #[test]
+    fn create_retry_deadline_saturates_for_a_huge_budget() {
+        let deadline = deadline_after(Duration::MAX);
+        assert!(
+            deadline > Instant::now(),
+            "a budget that overflows Instant must still produce a future deadline"
+        );
+    }
+
+    #[test]
+    fn create_retry_annotation_names_the_attempts_and_the_lock_timeout() {
+        assert_eq!(
+            create_retry_annotation(2, Some("gateway busy")),
+            " (create retry stopped after 2 create attempts; last mutation lock timeout: gateway busy)"
+        );
+        assert_eq!(
+            create_retry_annotation(1, None),
+            " (create retry stopped after 1 create attempt)"
+        );
+    }
+
+    #[test]
+    fn create_retry_timeout_prefers_the_flag_then_the_environment() {
+        assert_eq!(
+            resolve_create_retry_timeout(Some(5)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            resolve_create_retry_timeout(Some(0)),
+            Duration::ZERO,
+            "--no-create-retry disables retries"
+        );
+        assert_eq!(
+            resolve_create_retry_timeout(Some(u32::MAX)),
+            Duration::from_secs(MAX_CREATE_RETRY_TIMEOUT_SECS),
+            "the flag is clamped to 24 hours like the environment"
+        );
+        Environment::new()
+            .set("OPENSHELL_CREATE_RETRY_TIMEOUT", "7")
+            .run(|| {
+                assert_eq!(
+                    resolve_create_retry_timeout(None),
+                    Duration::from_secs(7),
+                    "the environment supplies the budget when the flag is absent"
+                );
+                assert_eq!(
+                    resolve_create_retry_timeout(Some(3)),
+                    Duration::from_secs(3),
+                    "the flag wins over the environment"
+                );
+            });
+        Environment::new()
+            .remove("OPENSHELL_CREATE_RETRY_TIMEOUT")
+            .run(|| {
+                assert_eq!(
+                    resolve_create_retry_timeout(None),
+                    Duration::from_mins(1),
+                    "retries stay on by default"
+                );
+            });
+        Environment::new()
+            .set("OPENSHELL_CREATE_RETRY_TIMEOUT", "0")
+            .run(|| {
+                assert_eq!(
+                    resolve_create_retry_timeout(None),
+                    Duration::ZERO,
+                    "a zero environment budget disables retries like --no-create-retry"
+                );
+            });
+        for value in ["90000", "18446744073709551615", "18446744073709551616"] {
+            Environment::new()
+                .set("OPENSHELL_CREATE_RETRY_TIMEOUT", value)
+                .run(|| {
+                    assert_eq!(
+                        resolve_create_retry_timeout(None),
+                        Duration::from_secs(MAX_CREATE_RETRY_TIMEOUT_SECS),
+                        "an oversized environment budget is clamped to 24 hours, \
+                         including a value above u64::MAX"
+                    );
+                });
+        }
+        for value in ["abc", "-1"] {
+            Environment::new()
+                .set("OPENSHELL_CREATE_RETRY_TIMEOUT", value)
+                .run(|| {
+                    assert_eq!(
+                        resolve_create_retry_timeout(None),
+                        Duration::from_mins(1),
+                        "an unparseable environment budget falls back to the default"
+                    );
+                });
+        }
     }
     use crate::TEST_ENV_LOCK;
     use crate::commands::common::{
@@ -8777,9 +9486,30 @@ mod tests {
         let l4 = NetworkEndpoint {
             host: "host.example.test".to_string(),
             port: 443,
+            access: openshell_core::proto::NetworkAccessPreset::ReadOnly as i32,
+            rules: vec![L7Rule {
+                allow: Some(L7Allow {
+                    method: "GET".into(),
+                    path: "/orders".into(),
+                    ..Default::default()
+                }),
+            }],
             ..Default::default()
         };
-        assert_eq!(format_endpoint(&l4), "host.example.test:443 [L4]");
+        assert_eq!(
+            format_endpoint(&l4),
+            "host.example.test:443 [L4, no HTTP method/path filter]"
+        );
+        let tcp = NetworkEndpoint {
+            protocol: "tcp".to_string(),
+            access: 0,
+            rules: vec![],
+            ..l4
+        };
+        assert_eq!(
+            format_endpoint(&tcp),
+            "host.example.test:443 [tcp, no HTTP method/path filter]"
+        );
 
         let l7_readonly = NetworkEndpoint {
             host: "host.example.test".to_string(),

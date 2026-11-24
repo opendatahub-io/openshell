@@ -298,7 +298,7 @@ pub fn parse_token_endpoint_url(token_endpoint: &str) -> Result<reqwest::Url, To
         TokenGrantFailureKind::Configuration,
         TokenGrantStage::Configuration,
     );
-    let url = reqwest::Url::parse(token_endpoint).map_err(|_| invalid)?;
+    let url = crate::token_endpoint::parse_auth_url(token_endpoint).map_err(|_| invalid)?;
     if token_endpoint_transport_allowed(&url) {
         return Ok(url);
     }
@@ -998,6 +998,17 @@ mod tests {
         ] {
             parse_token_endpoint_url(endpoint).expect("should be allowed");
         }
+    }
+
+    #[test]
+    fn token_grants_require_an_explicitly_encoded_caret_endpoint() {
+        assert!(parse_token_endpoint_url("https://auth.example.com/a^b").is_err());
+        assert_eq!(
+            parse_token_endpoint_url("https://auth.example.com/a%5Eb")
+                .unwrap()
+                .path(),
+            "/a%5Eb"
+        );
     }
 
     #[test]

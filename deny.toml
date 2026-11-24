@@ -19,11 +19,6 @@ ignore = [
     # oauth2, oci-client, russh-sftp, and russh-util.
     # https://github.com/chronotope/chrono/issues/1768
     { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; remove after first-party time APIs and all covered dependency graphs migrate to maintained alternatives and pass validation" },
-    # The root and its aligned test workspaces retain url 2.5.8. Version 2.5.9
-    # encodes a literal caret in a credential endpoint path as %5E, changing
-    # both the persisted allowlist entry and the HTTP request target.
-    # https://github.com/servo/rust-url/commit/25137be1fc1d35cc8ea7d43fc0a02166b023a483
-    { id = "RUSTSEC-2026-0592", reason = "Remove when a patched url can preserve exact credential request targets and persisted endpoint grants across mixed gateway versions" },
 ]
 
 # -- Licenses ------------------------------------------------------------------
