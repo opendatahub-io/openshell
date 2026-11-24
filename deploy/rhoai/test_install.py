@@ -485,6 +485,25 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SQLite"):
             cluster.preflight()
 
+    def test_postgresql_preflight_reports_storage_class_without_explaining(self):
+        self.database_config()
+        cluster = self.cluster()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.cluster_checks(None)
+        self.assertIn("Default StorageClass: block\n", output.getvalue())
+        self.assertNotIn("workspace", output.getvalue().lower())
+
+        cluster.storage = [{"metadata": {"name": "custom"}}]
+        cluster.config["gateway"]["values"] = {
+            "server": {"workspaceStorageClass": "custom"}
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.cluster_checks(None)
+        self.assertIn("Default StorageClass: none\n", output.getvalue())
+        self.assertIn("server.workspaceStorageClass: custom", output.getvalue())
+
     def test_database_state_blocks_switching_and_reads_legacy_state_as_sqlite(self):
         cluster = self.cluster()
         cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])

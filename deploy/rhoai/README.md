@@ -1,10 +1,7 @@
 # Install OpenShell and the OpenShell Dashboard admin UI on OpenShift
 
-This guide walks you through installing
-[OpenShell](https://github.com/NVIDIA/openshell) and the
-[OpenShell Dashboard admin UI](https://github.com/ai-openshell/console) on an
-existing OpenShift cluster. OpenShell provides safe, sandboxed runtimes for
-autonomous AI agents; the admin UI is its browser console.
+This guide walks you through installing [OpenShell](https://github.com/NVIDIA/openshell) and the [OpenShell Dashboard](https://github.com/ai-openshell/console)
+web admin UI on an existing OpenShift cluster. OpenShell provides safe, sandboxed runtimes for autonomous AI agents; the admin UI is its browser console.
 
 The installer deploys two Helm releases, `openshell` for the gateway and
 `openshell-dashboard` for the admin UI, as one pair per namespace. The
@@ -25,29 +22,31 @@ gateway highly available on its own.
 
 ## Table of contents
 
-- [Prerequisites](#prerequisites)
-- [Choose a configuration](#choose-a-configuration)
-- [Copy the configuration](#copy-the-configuration)
-- [Edit the configuration](#edit-the-configuration)
-  - [Required](#required)
-  - [Optional](#optional)
-  - [OIDC issuer certificate](#oidc-issuer-certificate)
-  - [Chart and image pins](#chart-and-image-pins)
-  - [Operational values overrides](#operational-values-overrides)
-  - [Database backend](#database-backend)
-- [Save the client secret](#save-the-client-secret)
-- [Save the database URI](#save-the-database-uri)
-- [Development PostgreSQL](#development-postgresql)
-- [Validate, preflight, and install](#validate-preflight-and-install)
-- [Register the gateway and log in](#register-the-gateway-and-log-in)
-- [Create and use a sandbox](#create-and-use-a-sandbox)
-- [Using the OpenShell Dashboard UI](#using-the-openshell-dashboard-ui)
-- [Verify workspace authorization](#verify-workspace-authorization)
-- [Rerun and upgrade](#rerun-and-upgrade)
-- [Remove an installation](#remove-an-installation)
-- [Troubleshoot common failures](#troubleshoot-common-failures)
-- [Contributor checks](#contributor-checks)
-- [Related documentation](#related-documentation)
+- [Install OpenShell and the OpenShell Dashboard admin UI on OpenShift](#install-openshell-and-the-openshell-dashboard-admin-ui-on-openshift)
+  - [Table of contents](#table-of-contents)
+  - [Prerequisites](#prerequisites)
+  - [Choose a configuration](#choose-a-configuration)
+  - [Copy the configuration](#copy-the-configuration)
+  - [Edit the configuration](#edit-the-configuration)
+    - [Required](#required)
+    - [Optional](#optional)
+    - [OIDC issuer certificate](#oidc-issuer-certificate)
+    - [Chart and image pins](#chart-and-image-pins)
+    - [Operational values overrides](#operational-values-overrides)
+    - [Database backend](#database-backend)
+  - [Save the client secret](#save-the-client-secret)
+  - [Save the database URI](#save-the-database-uri)
+  - [Development PostgreSQL](#development-postgresql)
+  - [Validate, preflight, and install](#validate-preflight-and-install)
+  - [Register the gateway and log in](#register-the-gateway-and-log-in)
+  - [Create and use a sandbox](#create-and-use-a-sandbox)
+  - [Using the OpenShell Dashboard UI](#using-the-openshell-dashboard-ui)
+  - [Verify workspace authorization](#verify-workspace-authorization)
+  - [Rerun and upgrade](#rerun-and-upgrade)
+  - [Remove an installation](#remove-an-installation)
+  - [Troubleshoot common failures](#troubleshoot-common-failures)
+  - [Contributor checks](#contributor-checks)
+  - [Related documentation](#related-documentation)
 
 ## Prerequisites
 
@@ -66,10 +65,9 @@ gateway highly available on its own.
   compatibility. Only the SQLite opt-in avoids this requirement. For
   development, [Development PostgreSQL](#development-postgresql) deploys one
   in the OpenShell namespace.
-- A default StorageClass for sandbox workspace volumes. SQLite mode also uses
-  it for the gateway's database PVC; in PostgreSQL mode a configured
-  `server.workspaceStorageClass` can satisfy the workspace requirement when
-  the cluster has no default class.
+- A default StorageClass for sandbox workspace volumes. Without one, the
+  sandbox's 2Gi workspace PersistentVolumeClaim stays Pending and the sandbox
+  never starts.
 - An OIDC provider with a confidential browser client that uses PKCE S256. For
   development, set one up with the
   [Keycloak development guide](keycloak-dev-guide.md).
@@ -86,9 +84,8 @@ console integration. It targets the current kubeconfig context unless you pass
 
 ## Choose a configuration
 
-Start with
-`config-examples/config.example-rhoai-3.6-postgresql-keycloak.json`. It pins
-the RHOAI 3.6 builds by digest, selects PostgreSQL, and pairs them with the
+Start with `config-examples/config.example-rhoai-3.6-postgresql-keycloak.json`.
+It pins the RHOAI 3.6 builds by digest, selects PostgreSQL, and pairs them with the
 Keycloak realm from [keycloak-dev-guide.md](keycloak-dev-guide.md). It also
 needs a `gateway-db-uri.txt` beside the configuration; see
 [Save the database URI](#save-the-database-uri).
@@ -105,8 +102,8 @@ and PVC, and `-postgresql` selects an external database. The generic
 `config.example-sqlite.json` carries placeholders for custom registries and
 versions.
 
-[config-examples/README.md](config-examples/README.md) describes all five
-examples, including the generic and non-Keycloak variants.
+[config-examples/README.md](config-examples/README.md) describes all five examples, including the
+ generic and non-Keycloak variants.
 
 ## Copy the configuration
 
@@ -123,11 +120,7 @@ cp deploy/rhoai/config-examples/config.example-rhoai-3.6-postgresql-keycloak.jso
 chmod 600 "$CONFIG_DIR/config.json"
 ```
 
-Users who want operational overrides also copy
-`config-examples/gateway-values.example.yaml` and/or
-`config-examples/dashboard-values.example.yaml` beside the configuration. The
-[Operational values overrides](#operational-values-overrides) section explains
-how to wire them.
+Users who want operational overrides also copy `config-examples/gateway-values.example.yaml` and/or `config-examples/dashboard-values.example.yaml` beside the configuration. The [Operational values overrides](#operational-values-overrides) section explains how to wire them.
 
 ## Edit the configuration
 
@@ -386,12 +379,19 @@ oc -n "$NS" new-app registry.access.redhat.com/hi/postgresql:18.4 \
 ```
 
 Do not pass the password through `oc new-app`; it would appear in the process
-table and in the Deployment. Add the Secret reference and swap the emptyDir
-volume for the claim:
+table and in the Deployment. Add the reference from
+`openshell-db-secret` instead:
 
 ```shell
 oc -n "$NS" patch deployment/openshell-db --type=json -p \
   '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"POSTGRES_PASSWORD","valueFrom":{"secretKeyRef":{"name":"openshell-db-secret","key":"password"}}}}]'
+```
+
+Replace the image's emptyDir volume with the claim. The image names its volume
+`openshell-db-volume-1` at `/var/lib/postgresql`; inspect the Deployment if the
+name differs in your image version:
+
+```shell
 oc -n "$NS" set volume deployment/openshell-db \
   --add --overwrite --name=openshell-db-volume-1 \
   --type=persistentVolumeClaim \
@@ -399,9 +399,6 @@ oc -n "$NS" set volume deployment/openshell-db \
   --mount-path=/var/lib/postgresql
 oc -n "$NS" rollout status deployment/openshell-db
 ```
-
-The image names its volume `openshell-db-volume-1`. Inspect the Deployment if
-another image version uses a different name.
 
 Build the URI file from the Secret so the password appears neither on screen nor
 in the shell history:
@@ -491,12 +488,12 @@ trust setup for custom identity providers.
 The installer prints these commands with the values from your configuration; use
 its output when it differs from the examples below.
 
-Install the OpenShell CLI. The examples in this guide use `v0.1.7`; install the
-version that matches the gateway release you deployed:
+Install the OpenShell CLI. Install the version that matches the gateway release
+you deployed; the RHOAI 3.6 examples use `v0.1.3`:
 
 ```shell
 curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh \
-  | OPENSHELL_VERSION=v0.1.7 sh
+  | OPENSHELL_VERSION=v0.1.3 sh
 ```
 
 The upstream installer also deploys and starts a local gateway on the
@@ -820,21 +817,21 @@ delete its Deployment, Service, claim, and Secret separately.
 
 ## Troubleshoot common failures
 
-| Symptom | Cause and fix |
-|---|---|
-| `oidc.client_secret_file is required for the first install` | Create the client secret file before `--check`, or reuse installer state from an earlier successful install. |
-| `Missing or empty gateway.database.uri_file` | Create `gateway-db-uri.txt` beside the configuration (see [Save the database URI](#save-the-database-uri)), or set `gateway.database.mode` to `sqlite`. |
-| `Database URI differs from Secret openshell-gateway-db` | Rotate the Secret explicitly and restart the gateway; the installer does not rewrite an existing database credential. |
-| Gateway is not ready and logs show database connection errors | The installer does not preflight connectivity. Check that the namespace can reach the database host and port, that the URI credentials work, and that any TLS parameters in the URI match the server. |
-| `Database backend differs from the installer state` | The recorded backend and the configured mode differ. Existing SQLite installs must set `"database": { "mode": "sqlite" }`; migrate the data explicitly before switching either way. |
-| No default StorageClass | In SQLite mode, mark a block-backed StorageClass as default for the gateway PVC. In PostgreSQL mode, either set a default class or configure `server.workspaceStorageClass` for sandbox workspace volumes. |
-| Preflight fails with `This installer supports amd64 clusters only` | The cluster has non-amd64 nodes, including a mixed amd64/arm64 cluster. Mixed clusters are not supported because the Red Hat Build of Agent Sandbox Operator is not available on arm64; run the installer against an amd64-only cluster. |
-| Agent Sandbox readiness fails | Install or start the Agent Sandbox controller, or override `agent_sandbox_namespace` and `agent_sandbox_deployment`. |
-| `x509` error during `openshell gateway add` | Distinguish the two trust paths: copy the gateway CA into the CLI mtls directory, and build the `SSL_CERT_FILE` bundle for OIDC discovery. |
-| `dns error` from `openshell status` after `gateway add` succeeds | The gateway host is outside the router's `*.apps.<domain>` wildcard, so it has no DNS record. Registration only contacts the OIDC issuer; `status` is the first gateway connection. Correct `gateway.host`, or remove it to derive `gateway-<namespace>.<apps-domain>` from the ingress domain. Reinstall when the installer already recorded the old host. |
-| `Could not resolve the OpenShift apps domain` | Grant read access to `ingresses.config.openshift.io/cluster`, or set `gateway.host` and `dashboard.host` explicitly. |
-| HTTP 403 after login | The user holds no role in `allowed_roles`, or no group in `allowed_groups` for generic OIDC. Add a listed role or group to the user, then rerun the install command. |
-| Gateway host or issuer change is rejected | The installer state records the original identity. With omitted hosts, a namespace or ingress-domain change also changes the gateway host. Migrate the certificate and endpoint explicitly instead of editing state. |
+| Symptom                                                            | Cause and fix                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `oidc.client_secret_file is required for the first install`        | Create the client secret file before `--check`, or reuse installer state from an earlier successful install.                                                                                                                                                                                                                                                |
+| `Missing or empty gateway.database.uri_file`                       | Create `gateway-db-uri.txt` beside the configuration (see [Save the database URI](#save-the-database-uri)), or set `gateway.database.mode` to `sqlite`.                                                                                                                                                                                                     |
+| `Database URI differs from Secret openshell-gateway-db`            | Rotate the Secret explicitly and restart the gateway; the installer does not rewrite an existing database credential.                                                                                                                                                                                                                                       |
+| Gateway is not ready and logs show database connection errors      | The installer does not preflight connectivity. Check that the namespace can reach the database host and port, that the URI credentials work, and that any TLS parameters in the URI match the server.                                                                                                                                                       |
+| `Database backend differs from the installer state`                | The recorded backend and the configured mode differ. Existing SQLite installs must set `"database": { "mode": "sqlite" }`; migrate the data explicitly before switching either way.                                                                                                                                                                         |
+| No default StorageClass                                            | Preflight fails, or a created sandbox never starts. The sandbox's workspace PVC stays Pending when no class can bind it. In PostgreSQL mode, mark a class default or set `server.workspaceStorageClass` in a [gateway values override](#operational-values-overrides) to an existing class. SQLite mode additionally needs a default block-backed class for the gateway's database PVC; the installer does not accept an override for that claim. Check `oc get storageclass` and `oc -n <namespace> get pvc`. |
+| Preflight fails with `This installer supports amd64 clusters only` | The cluster has non-amd64 nodes, including a mixed amd64/arm64 cluster. Mixed clusters are not supported because the Red Hat Build of Agent Sandbox Operator is not available on arm64; run the installer against an amd64-only cluster.                                                                                                                    |
+| Agent Sandbox readiness fails                                      | Install or start the Agent Sandbox controller, or override `agent_sandbox_namespace` and `agent_sandbox_deployment`.                                                                                                                                                                                                                                        |
+| `x509` error during `openshell gateway add`                        | Distinguish the two trust paths: copy the gateway CA into the CLI mtls directory, and build the `SSL_CERT_FILE` bundle for OIDC discovery.                                                                                                                                                                                                                  |
+| `dns error` from `openshell status` after `gateway add` succeeds   | The gateway host is outside the router's `*.apps.<domain>` wildcard, so it has no DNS record. Registration only contacts the OIDC issuer; `status` is the first gateway connection. Correct `gateway.host`, or remove it to derive `gateway-<namespace>.<apps-domain>` from the ingress domain. Reinstall when the installer already recorded the old host. |
+| `Could not resolve the OpenShift apps domain`                      | Grant read access to `ingresses.config.openshift.io/cluster`, or set `gateway.host` and `dashboard.host` explicitly.                                                                                                                                                                                                                                        |
+| HTTP 403 after login                                               | The user holds no role in `allowed_roles`, or no group in `allowed_groups` for generic OIDC. Add a listed role or group to the user, then rerun the install command.                                                                                                                                                                                        |
+| Gateway host or issuer change is rejected                          | The installer state records the original identity. With omitted hosts, a namespace or ingress-domain change also changes the gateway host. Migrate the certificate and endpoint explicitly instead of editing state.                                                                                                                                        |
 
 For Keycloak-specific failures, see
 [Troubleshooting](keycloak-dev-guide.md#troubleshooting) in the Keycloak

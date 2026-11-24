@@ -842,14 +842,18 @@ class Installer:
                 "No default StorageClass and no server.workspaceStorageClass; "
                 "sandbox workspace volumes require one",
             )
-            print(
+            line = (
                 f"{colorize('Default StorageClass:', '1')} "
-                f"{', '.join(defaults) or 'none (using server.workspaceStorageClass)'}\n"
-                "  PostgreSQL mode keeps the gateway database outside the cluster and\n"
-                "  creates no gateway PVC. Sandbox workspace volumes still need a\n"
-                "  StorageClass; a configured server.workspaceStorageClass can provide\n"
-                "  one when the cluster has no default class."
+                f"{', '.join(defaults) or 'none'}"
             )
+            if custom:
+                print(
+                    f"{line}\n"
+                    "  Sandbox workspace volumes use the configured "
+                    f"server.workspaceStorageClass: {custom}"
+                )
+            else:
+                print(line)
         if custom:
             require(
                 any(item["metadata"]["name"] == custom for item in storage["items"]),
