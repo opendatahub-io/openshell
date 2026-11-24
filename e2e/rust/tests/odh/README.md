@@ -165,8 +165,8 @@ managed-only binary there. It also keeps the existing exact exclusions for
 Excluded tests do not appear as passes or skips in the JUnit report.
 
 `tier2::network_policy` creates a probe Pod and applies the workload boundary
-labels to verify that the namespace-wide workload egress fence is enforced.
-The test reads Services and NetworkPolicies, so the test identity needs the
+labels to verify that the namespace-wide workload egress fence is enforced. The
+test reads Services and NetworkPolicies, so the test identity needs the
 following RBAC permissions in the sandbox namespace:
 
 ```yaml
