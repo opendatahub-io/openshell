@@ -18,20 +18,20 @@
 # image; rpm-lockfile-prototype resolves versions from the CDN and cannot read
 # /etc/yum.repos.d from inside the base image.
 # Conforma allows only arch-qualified repo IDs (known_rpm_repositories.yml).
-# Do not copy section names from the UBI image's ubi.repo: ubi-9-baseos-rpms
+# Do not copy section names from the UBI image's ubi.repo: ubi-10-baseos-rpms
 # omits the architecture and fails rpm_repos.ids_known. $basearch is expanded
 # per package URL in the lockfile. CodeReady Builder is
-# codeready-builder-for-ubi-9-$basearch-rpms.
+# codeready-builder-for-ubi-10-$basearch-rpms.
 contentOrigin:
   repos:
-    - repoid: ubi-9-for-$basearch-baseos-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/baseos/os/
-    - repoid: ubi-9-for-$basearch-appstream-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/appstream/os/
+    - repoid: ubi-10-for-$basearch-baseos-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/baseos/os/
+    - repoid: ubi-10-for-$basearch-appstream-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/appstream/os/
     # glibc-static (for `-C target-feature=+crt-static`) ships in CodeReady
     # Builder, whose content is public on the UBI CDN.
-    - repoid: codeready-builder-for-ubi-9-$basearch-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/codeready-builder/os/
+    - repoid: codeready-builder-for-ubi-10-$basearch-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/codeready-builder/os/
 packages:
   # Build stage: static glibc. The rust-builder image already ships rust,
   # cargo, gcc, gcc-c++, make, cmake, openssl-devel and git.

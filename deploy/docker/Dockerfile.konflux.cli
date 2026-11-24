@@ -5,7 +5,7 @@
 
 # CLI image for RHEL/Konflux (hermetic build).
 #
-# Multi-stage build that compiles the openshell CLI from source on UBI9,
+# Multi-stage build that compiles the openshell CLI from source on UBI10,
 # dynamically linked against glibc, so the build has no dependency on musl.
 #
 # The CLI must not be linked statically against glibc: a static glibc binary
@@ -14,16 +14,19 @@
 # the process and crashes hostname lookups (RHAI-1927). Linking dynamically
 # uses the host's own libc and NSS, so host resolvers such as myhostname
 # (*.localhost), resolve and sss keep working; pinning NSS the way the static
-# sandbox does would drop them. The trade-off: the binary needs glibc 2.34 or
-# newer on the host (RHEL 9+, Fedora, current Debian and Ubuntu) and no longer
-# runs on older-glibc hosts such as RHEL 8, or on musl hosts.
+# sandbox does would drop them. The trade-off: the binary needs glibc 2.38 or
+# newer on the host (RHEL 10+, Fedora 39+, Debian 13+, Ubuntu 24.04+) and no
+# longer runs on older-glibc hosts such as RHEL 9, or on musl hosts. On hosts
+# with glibc 2.38 the loader prints a warning about the weakly linked
+# GLIBC_2.39 symbols (pidfd_spawnp/pidfd_getpid). On x86_64 the binary also
+# needs an x86-64-v3 CPU, because RHEL 10's GCC targets x86-64-v3 by default
+# when building the C dependencies.
 #
 # Requires prefetched dependencies via Hermeto (cargo, rpm). The Rust
-# toolchain comes from the Red Hat rust-builder image, since UBI9 ships
-# rust 1.92.0, below the workspace MSRV.
-# The image ships Rust 1.99.0, newer than the 1.95.0 that rust-toolchain.toml
-# pins and CI tests. The rust-rhel9 1.95.0 tag has not been rebuilt since
-# 2026-05-19, so pinning it would ship builds from a stale base.
+# toolchain comes from the Red Hat rust-builder image, since UBI10's
+# rust-toolset is below the workspace MSRV.
+# The image ships Rust 1.99.1, newer than the 1.95.0 that rust-toolchain.toml
+# pins and CI tests.
 # cargo-auditable is cargo-prefetched from crates.io so the CLI binary embeds
 # crate versions for image CVE scanners. See deploy/konflux/cargo-auditable.
 #
@@ -32,7 +35,7 @@
 # ---------------------------------------------------------------------------
 # Build stage: compile CLI (dynamically linked glibc binary)
 # ---------------------------------------------------------------------------
-FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.0@sha256:b00aaa63f7d6f5b857c170e4aed9d77f013f507ba97e72ebfcac48a7d3760310 AS builder
+FROM registry.redhat.io/rust-builder-image/rust-rhel10:1.99.1@sha256:a416031b065e20e2eacfa1ec256657b0a9e857618675839b8a6aac99eb27de06 AS builder
 
 # The builder image runs as 1001; cargo install needs root. It already
 # ships gcc, gcc-c++, make, cmake, openssl-devel and git, so no dnf step.
@@ -73,8 +76,10 @@ COPY proto/ proto/
 COPY providers/ providers/
 
 # Scope workspace to CLI crates only -- avoids pulling in server/sandbox
-# dependencies (aws-lc-sys, russh) that are unnecessary for the CLI.
-RUN sed -i 's|members = \["crates/\*"\]|members = ["crates/openshell-cli", "crates/openshell-core", "crates/openshell-bootstrap", "crates/openshell-policy", "crates/openshell-prover", "crates/openshell-providers", "crates/openshell-sdk", "crates/openshell-tui"]|' Cargo.toml
+# dependencies (aws-lc-sys, russh) that are unnecessary for the CLI, and
+# drops test-only workspace members (tests/policy-conformance) that are not
+# copied into the build context.
+RUN sed -i 's|^members = .*|members = ["crates/openshell-cli", "crates/openshell-core", "crates/openshell-bootstrap", "crates/openshell-policy", "crates/openshell-prover", "crates/openshell-providers", "crates/openshell-sdk", "crates/openshell-tui"]|' Cargo.toml
 
 # Version stamped into the binary via openshell-core::VERSION; tag builds
 # pass the git tag with the leading "v" stripped. Empty otherwise.
@@ -101,22 +106,25 @@ RUN . /tmp/build-env && \
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
-# ubi-minimal-pqc already ships DEFAULT:PQ, so this stage does not install
-# crypto-policies-scripts (and the Python stack it pulls).
-FROM registry.redhat.io/ubi9/ubi-minimal-pqc:9.8@sha256:d638f3b49b79575329aacdae2739f954effe2467c12147711e73445c4fc97819
+# RHEL 10 has no PQ crypto subpolicy: its stock DEFAULT policy already
+# enables the post-quantum ML-KEM hybrid key exchange groups, so this stage
+# does not install crypto-policies-scripts (and the Python stack it pulls).
+FROM registry.access.redhat.com/ubi10/ubi-minimal:10.2@sha256:f0c7b9ae9914fcf183e7c36fc46864903c2d2caf3af327421913ae54b3d29e94
 
 RUN microdnf install -y --nodocs ca-certificates git-core \
     && microdnf clean all
 
-# Fail the build if the PQC base stops shipping DEFAULT:PQ.
-RUN test "$(cat /etc/crypto-policies/config)" = "DEFAULT:PQ"
+# Fail the build if the stock policy stops being DEFAULT or stops enabling
+# the ML-KEM hybrid groups.
+RUN test "$(cat /etc/crypto-policies/config)" = "DEFAULT" \
+    && grep -q MLKEM /etc/crypto-policies/back-ends/opensslcnf.config
 
 COPY --from=builder --chmod=0555 /build/output/openshell /usr/local/bin/openshell
 
 LABEL com.redhat.component="odh-openshell-cli-container" \
       description="CLI for OpenShell sandboxed AI agent runtimes" \
       summary="CLI for OpenShell sandboxed AI agent runtimes" \
-      name="rhoai/odh-openshell-cli-rhel9" \
+      name="rhoai/odh-openshell-cli-rhel10" \
       maintainer="['managed-open-data-hub@redhat.com']" \
       io.openshift.expose-services="" \
       io.k8s.display-name="odh-openshell-cli" \

@@ -9,7 +9,9 @@
 # inside arbitrary agent workloads (Alpine, Debian, distroless, UBI), so it
 # MUST be a fully-static binary. It is built against glibc with
 # `-C target-feature=+crt-static` using Red Hat's glibc-static package
-# (CodeReady Builder), so the build has no dependency on musl.
+# (CodeReady Builder), so the build has no dependency on musl. On x86_64 the
+# binary needs an x86-64-v3 CPU, because RHEL 10 builds libc.a and its GCC
+# compiles the C dependencies for x86-64-v3.
 #
 # Static glibc still loads the NSS modules listed in the workload's
 # /etc/nsswitch.conf, and those crash a static binary (RHAI-1927). The build
@@ -17,11 +19,10 @@
 # files and dns services at startup, matching upstream's musl behavior.
 #
 # Requires prefetched dependencies via Hermeto (cargo, rpm). The Rust
-# toolchain comes from the Red Hat rust-builder image, since UBI9 ships
-# rust 1.92.0, below the workspace MSRV.
-# The image ships Rust 1.99.0, newer than the 1.95.0 that rust-toolchain.toml
-# pins and CI tests. The rust-rhel9 1.95.0 tag has not been rebuilt since
-# 2026-05-19, so pinning it would ship builds from a stale base.
+# toolchain comes from the Red Hat rust-builder image, since UBI10's
+# rust-toolset is below the workspace MSRV.
+# The image ships Rust 1.99.1, newer than the 1.95.0 that rust-toolchain.toml
+# pins and CI tests.
 # cargo-auditable is cargo-prefetched from crates.io so the sandbox binary
 # embeds crate versions for image CVE scanners. See deploy/konflux/cargo-auditable.
 #
@@ -30,7 +31,7 @@
 # ---------------------------------------------------------------------------
 # Build stage: compile sandbox runtime (fully-static glibc binary)
 # ---------------------------------------------------------------------------
-FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.0@sha256:b00aaa63f7d6f5b857c170e4aed9d77f013f507ba97e72ebfcac48a7d3760310 AS builder
+FROM registry.redhat.io/rust-builder-image/rust-rhel10:1.99.1@sha256:a416031b065e20e2eacfa1ec256657b0a9e857618675839b8a6aac99eb27de06 AS builder
 
 # The builder image runs as 1001; dnf and cargo install need root.
 USER 0
@@ -50,6 +51,10 @@ ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo/ .cargo/
+
+# The image builds only product crates; drop test-only workspace members
+# (tests/policy-conformance) that are not copied into the build context.
+RUN sed -i 's|^members = .*|members = ["crates/*"]|' Cargo.toml
 
 # Install before the sources so application changes do not rebuild it.
 # The published lock's dev-dependencies are not vendored. Strip them and pin
@@ -147,9 +152,9 @@ RUN set -eu; \
 # ---------------------------------------------------------------------------
 # ubi-micro with no extra RPMs: the Podman driver mounts this whole image into
 # every workload, so keep it small. Unlike the other Konflux images, it does
-# not set the DEFAULT:PQ crypto policy: the static binary uses its own TLS
-# stack and never reads the system policy.
-FROM registry.access.redhat.com/ubi9/ubi-micro:9.8@sha256:5be877a2a280ae36eb9ab80ca4efb28bbf77c57abbba38137cdc37a03b8465e6
+# not check the crypto policy: the static binary uses its own TLS stack and
+# never reads the system policy.
+FROM registry.access.redhat.com/ubi10/ubi-micro:10.2@sha256:8488f5ec082768a01d1ce4e0ef3878f782a40ff6d233afa74bc23d4e740620a4
 
 # Keep the binary root-owned for image-volume mounts and executable by the
 # sandbox runtime's non-root UID.
@@ -158,7 +163,7 @@ COPY --from=builder --chmod=0555 /build/output/openshell-sandbox /openshell-sand
 LABEL com.redhat.component="odh-openshell-sandbox-container" \
       description="Statically linked (glibc) sandbox runtime for OpenShell, injected into arbitrary agent workloads" \
       summary="Statically linked (glibc) sandbox runtime for OpenShell, injected into arbitrary agent workloads" \
-      name="rhoai/odh-openshell-sandbox-rhel9" \
+      name="rhoai/odh-openshell-sandbox-rhel10" \
       maintainer="['managed-open-data-hub@redhat.com']" \
       io.openshift.expose-services="" \
       io.k8s.display-name="odh-openshell-sandbox" \

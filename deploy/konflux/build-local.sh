@@ -101,7 +101,7 @@ build_image() {
             prefetch_input="[
             {\"path\": \".\", \"type\": \"cargo\"},
             {\"path\": \"e2e/rust\", \"type\": \"cargo\"},
-            {\"path\": \"odh\", \"type\": \"pip\", \"requirements_files\": [\"requirements.txt\"], \"binary\": {\"packages\": \":all:\", \"arch\": \"x86_64,aarch64\", \"os\": \"linux\", \"py_version\": 311, \"py_impl\": \"cp\"}},
+            {\"path\": \"odh\", \"type\": \"pip\", \"requirements_files\": [\"requirements.txt\"], \"binary\": {\"packages\": \":all:\", \"arch\": \"x86_64,aarch64\", \"os\": \"linux\", \"py_version\": 312, \"py_impl\": \"cp\"}},
             {\"path\": \"${konfig_dir}\", \"type\": \"rpm\"},
             {\"path\": \"${konfig_dir}\", \"type\": \"generic\", \"lockfile\": \"generic-fetcher.yaml\"}
         ]"
@@ -203,14 +203,14 @@ build_image() {
         "${REPO_ROOT}"
 
     echo "=== ${component} built successfully ==="
-    # Sandbox is ubi-micro without crypto-policies. OpenClaw still installs
-    # crypto-policies-scripts; smoke-test.sh asserts DEFAULT:PQ. Product
-    # runtimes use ubi-minimal-pqc, which has no update-crypto-policies
-    # binary, so read the policy file instead. e2e-odh still has the binary.
-    if [[ "${component}" == "gateway" || "${component}" == "supervisor" || "${component}" == "cli" ]]; then
-        test "$(podman run --rm --platform "${PLATFORM}" --user=0 --entrypoint /bin/sh "${image_name}" -c 'cat /etc/crypto-policies/config')" = "DEFAULT:PQ"
-    elif [[ "${component}" == "e2e-odh" ]]; then
-        test "$(podman run --rm --platform "${PLATFORM}" --user=0 --entrypoint /usr/bin/update-crypto-policies "${image_name}" --show)" = "DEFAULT:PQ"
+    # Sandbox is ubi-micro without crypto-policies. OpenClaw's smoke-test.sh
+    # asserts the policy itself. Every other image runs on RHEL 10, whose
+    # stock DEFAULT policy must keep the post-quantum ML-KEM hybrid groups;
+    # none of them ships the update-crypto-policies binary, so read the
+    # policy files instead.
+    if [[ "${component}" != "sandbox" && "${component}" != "openclaw" ]]; then
+        test "$(podman run --rm --platform "${PLATFORM}" --user=0 --entrypoint /bin/sh "${image_name}" -c 'cat /etc/crypto-policies/config')" = "DEFAULT"
+        podman run --rm --platform "${PLATFORM}" --user=0 --entrypoint /bin/grep "${image_name}" -q MLKEM /etc/crypto-policies/back-ends/opensslcnf.config
     fi
     if [[ "${component}" == "openclaw" ]]; then
         PLATFORM="${PLATFORM}" bash "${REPO_ROOT}/deploy/konflux/openclaw/smoke-test.sh" "openshell-${component}-konflux"

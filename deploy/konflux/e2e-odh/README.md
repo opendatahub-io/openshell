@@ -1,7 +1,7 @@
 # ODH E2E Image Build
 
 The ODH Konflux e2e image is a separate test artifact. Its
-multi-stage UBI9 build compiles the CLI and a nextest archive from two
+multi-stage UBI10 build compiles the CLI and a nextest archive from two
 independent Cargo lockfiles on the Red Hat rust-builder image, with crates,
 RPMs, and cluster tools prefetched by Hermeto for a network-isolated build. The runtime image carries the compiled
 archive, Cargo and nextest executables, cluster tools, the SSH client needed
@@ -48,7 +48,7 @@ match `^[a-z0-9._/-]+@sha256:[0-9a-f]{64}$`. Per-image environment overrides
 take precedence. See [runtime image selection](../../../e2e/rust/tests/odh/README.md#runtime-image-selection)
 for selection rules, permissions, and fallback behavior.
 
-The image also carries a fully prefetched Python 3.11 test environment and
+The image also carries a fully prefetched Python 3.12 test environment and
 generated protobuf bindings. The `python` entrypoint mode uses that environment
 to run the supported upstream Python gateway E2E on OpenShift without runtime
 dependency downloads.
@@ -66,7 +66,7 @@ Python dependencies at `odh`:
     "packages": ":all:",
     "arch": "x86_64,aarch64",
     "os": "linux",
-    "py_version": 311,
+    "py_version": 312,
     "py_impl": "cp"
   }
 }

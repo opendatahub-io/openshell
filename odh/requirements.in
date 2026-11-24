@@ -3,7 +3,7 @@
 #
 # Fork-local Python runtime and test dependencies for the ODH E2E image.
 # Regenerate requirements.txt with:
-#   uv pip compile --universal --generate-hashes --python-version 3.11 \
+#   uv pip compile --universal --generate-hashes --python-version 3.12 \
 #       --output-file odh/requirements.txt odh/requirements.in
 cloudpickle>=3.0
 googleapis-common-protos>=1.63

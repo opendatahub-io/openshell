@@ -7,19 +7,21 @@
 #       deploy/konflux/e2e-odh/rpms.in.yaml
 contentOrigin:
   repos:
-    - repoid: ubi-9-baseos-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/baseos/os/
-    - repoid: ubi-9-appstream-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/appstream/os/
+    - repoid: ubi-10-baseos-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/baseos/os/
+    - repoid: ubi-10-appstream-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/appstream/os/
 packages:
-  # The build stage installs nothing: the rust-builder image ships rust,
-  # cargo, gcc, gcc-c++, make, cmake, openssl-devel, git and tar.
-  # Runtime stage
+  # The build stage adds only python3.12 for the locked E2E test
+  # environment; the rust-builder image already ships rust, cargo, gcc,
+  # gcc-c++, make, cmake, openssl-devel, git and tar. This lockfile serves
+  # both stages.
+  # Runtime stage. The post-quantum ML-KEM hybrid groups come from RHEL 10's
+  # stock DEFAULT crypto policy, so no crypto-policies-scripts.
   - git-core
   - tar
   - ca-certificates
-  - crypto-policies-scripts
-  - python3.11
+  - python3.12
   - libxslt
   - util-linux
   - openssh-clients
