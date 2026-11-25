@@ -49,8 +49,19 @@ impl PolicyBackend for OpaEngine {
     fn current_generation(&self) -> u64 {
         self.current_generation()
     }
+    fn publish_credential_change(&self) -> Result<u64> {
+        self.publish_credential_change()
+    }
     fn generation_guard(&self, expected: u64) -> Result<PolicyGenerationGuard> {
         self.generation_guard(expected)
+    }
+    fn connection_generation_guard(
+        self: std::sync::Arc<Self>,
+        input: NetworkInput,
+        expected: u64,
+        credentials: Option<&openshell_core::provider_credentials::ProviderCredentialState>,
+    ) -> Result<PolicyGenerationGuard> {
+        self.revalidating_generation_guard(input, expected, credentials)
     }
     fn with_current_generation(
         &self,

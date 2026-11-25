@@ -93,8 +93,7 @@ enum Probe {
     /// `answers` for every name.
     /// Outcome: `dns refused: <reason>`, the denial, or
     /// `RelayReady/<dialed addresses>/<correlated|uncorrelated>`, where
-    /// `correlated` means the decision names an endpoint of the mapping, as
-    /// the transparent TCP listener requires.
+    /// `correlated` means the admitted decision names the policy-backed mapping.
     TransparentOpen {
         name: String,
         port: u16,

@@ -354,6 +354,7 @@ pub struct EgressAuthorization {
 }
 
 /// Input for a network access policy evaluation.
+#[derive(Clone, Debug)]
 pub struct NetworkInput {
     pub host: String,
     pub port: u16,
@@ -367,12 +368,20 @@ pub struct NetworkInput {
     pub cmdline_paths: Vec<PathBuf>,
 }
 
+/// Backend-owned validation of an established connection across policy publications.
+/// Implementations must reject any intervening narrowing, including quarantines.
+pub trait ConnectionRevalidator: std::fmt::Debug + Send + Sync {
+    fn follow(&self, pin: &AtomicU64, live: &AtomicU64) -> bool;
+    fn pinned_policy_hash(&self, generation: u64) -> Option<String>;
+}
+
 /// Generation guard captured when an HTTP tunnel or request path starts.
 #[derive(Clone, Debug)]
 pub struct PolicyGenerationGuard {
-    captured_generation: u64,
+    captured_generation: Arc<AtomicU64>,
     current_generation: Arc<AtomicU64>,
     generation_rx: watch::Receiver<u64>,
+    revalidator: Option<Arc<dyn ConnectionRevalidator>>,
 }
 
 /// Builds a [`PolicyGenerationGuard`] for any state holding a plain
@@ -398,15 +407,29 @@ pub fn generation_guard_for(
         ));
     }
     Ok(PolicyGenerationGuard {
-        captured_generation: current_generation_value,
+        captured_generation: Arc::new(AtomicU64::new(current_generation_value)),
         current_generation: Arc::clone(current_generation),
         generation_rx: generation_tx.subscribe(),
+        revalidator: None,
     })
 }
 
 impl PolicyGenerationGuard {
+    /// Attach a backend-owned connection contract. Ordinary guards remain strict.
+    #[must_use]
+    pub fn with_revalidator(mut self, revalidator: Option<Arc<dyn ConnectionRevalidator>>) -> Self {
+        self.revalidator = revalidator;
+        self
+    }
+
+    pub fn pinned_policy_hash(&self) -> Option<String> {
+        self.revalidator
+            .as_ref()?
+            .pinned_policy_hash(self.captured_generation())
+    }
+
     pub fn captured_generation(&self) -> u64 {
-        self.captured_generation
+        self.captured_generation.load(Ordering::Acquire)
     }
 
     pub fn current_generation(&self) -> u64 {
@@ -414,7 +437,10 @@ impl PolicyGenerationGuard {
     }
 
     pub fn is_stale(&self) -> bool {
-        self.current_generation() != self.captured_generation
+        self.revalidator.as_ref().map_or_else(
+            || self.current_generation() != self.captured_generation(),
+            |revalidator| !revalidator.follow(&self.captured_generation, &self.current_generation),
+        )
     }
 
     pub fn ensure_current(&self) -> Result<()> {
@@ -428,10 +454,10 @@ impl PolicyGenerationGuard {
         Ok(())
     }
 
-    /// Wait until the policy generation changes.
+    /// Wait until the authorizing policy no longer applies.
     ///
-    /// Relay boundaries use this to close even an idle or raw stream as soon
-    /// as a new generation (including fail-closed quarantine) is published.
+    /// Plain guards close on every publication; connection guards may follow
+    /// unrelated changes, but must close on a quarantine or relevant narrowing.
     pub async fn wait_until_stale(&self) {
         let mut receiver = self.generation_rx.clone();
         while !self.is_stale() {

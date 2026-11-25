@@ -102,7 +102,18 @@ pub trait PolicyBackend: Send + Sync {
     fn label(&self) -> &'static str;
     fn authorize_egress(&self, input: &NetworkInput) -> Result<EgressAuthorization>;
     fn current_generation(&self) -> u64;
+    /// Notify established relays after credentials change outside a policy commit.
+    fn publish_credential_change(&self) -> Result<u64>;
     fn generation_guard(&self, expected: u64) -> Result<PolicyGenerationGuard>;
+    /// Pin a relay; backends without connection contracts close on every change.
+    fn connection_generation_guard(
+        self: Arc<Self>,
+        _input: NetworkInput,
+        expected: u64,
+        _credentials: Option<&openshell_core::provider_credentials::ProviderCredentialState>,
+    ) -> Result<PolicyGenerationGuard> {
+        self.generation_guard(expected)
+    }
     fn with_current_generation(
         &self,
         expected: u64,
@@ -178,6 +189,16 @@ impl PolicyEngine {
             })?;
         Ok(result)
     }
+    pub fn connection_generation_guard(
+        &self,
+        input: NetworkInput,
+        expected: u64,
+        credentials: Option<&openshell_core::provider_credentials::ProviderCredentialState>,
+    ) -> Result<PolicyGenerationGuard> {
+        self.0
+            .clone()
+            .connection_generation_guard(input, expected, credentials)
+    }
     pub fn passthrough_middleware(&self) -> Result<PassthroughMiddleware<'_>> {
         Ok(self.0.passthrough_snapshot()?.map_or_else(
             || PassthroughMiddleware::Live(self),
@@ -247,6 +268,11 @@ impl TunnelPolicyEngine {
             websocket_assembly_budget,
             evaluator: Box::new(evaluator),
         }
+    }
+    #[must_use]
+    pub fn with_generation_guard(mut self, guard: PolicyGenerationGuard) -> Self {
+        self.generation_guard = guard;
+        self
     }
     pub fn captured_generation(&self) -> u64 {
         self.generation_guard.captured_generation()

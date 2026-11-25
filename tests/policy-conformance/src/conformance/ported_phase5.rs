@@ -382,7 +382,8 @@ when { context.binary_path == "/usr/bin/curl" };
             same_probe(
                 format!("{NAME} undeclared port"),
                 transparent_open("db.example", 443, BINARY),
-            ),
+            )
+            .asserting_yaml("Denied(PolicyDenied)"),
             same_probe(
                 format!("{NAME} undeclared name"),
                 transparent_open("unknown.example", 5432, BINARY),

@@ -45,6 +45,9 @@ impl PolicyBackend for CedarOnlyEngine {
     fn current_generation(&self) -> u64 {
         self.current_generation()
     }
+    fn publish_credential_change(&self) -> Result<u64> {
+        self.publish_credential_change()
+    }
     fn generation_guard(&self, expected: u64) -> Result<PolicyGenerationGuard> {
         self.generation_guard(expected)
     }

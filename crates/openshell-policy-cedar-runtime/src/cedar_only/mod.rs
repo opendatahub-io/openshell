@@ -651,6 +651,15 @@ impl CedarOnlyEngine {
         })
     }
 
+    /// Invalidate relays and configuration guards after credential revocation.
+    /// The loaded policy and any quarantine remain unchanged.
+    pub fn publish_credential_change(&self) -> Result<u64> {
+        self.middleware.change_configuration(|| {
+            let _guard = self.write_engine()?;
+            Ok((self.advance_generation(), true))
+        })
+    }
+
     /// Reactivates the active policy after a quarantine.
     ///
     /// Returns the current Cedar generation, advanced only if a quarantine

@@ -354,7 +354,7 @@
     "0: proxy.rs::staged_transparent_open_dials_only_pinned_policy_dns_addresses / transparent-open": "RelayReady/203.0.113.8:5432/correlated",
     "1: proxy.rs::staged_transparent_open_dials_only_pinned_policy_dns_addresses plain L4 control / transparent-open": "RelayReady/203.0.113.8:80/correlated",
     "2: proxy.rs::staged_transparent_open_dials_only_pinned_policy_dns_addresses other binary / transparent-open": "Denied(PolicyDenied)",
-    "3: proxy.rs::staged_transparent_open_dials_only_pinned_policy_dns_addresses undeclared port / transparent-open": "Denied(InvalidDestination)",
+    "3: proxy.rs::staged_transparent_open_dials_only_pinned_policy_dns_addresses undeclared port / transparent-open": "Denied(PolicyDenied)",
     "4: proxy.rs::staged_transparent_open_dials_only_pinned_policy_dns_addresses undeclared name / transparent-open": "Denied(PolicyDenied)"
   },
   "Supplied identity": {

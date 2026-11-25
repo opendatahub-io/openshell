@@ -53,13 +53,12 @@ transparent connections lazily refresh expired, policy-backed mappings through
 the same trusted resolver and destination-validation path as sandbox DNS
 queries. Refreshes for one address share a lock; failed refreshes back off for
 one second and never authorize expired upstream addresses.
-`PolicyDnsService::lookup_for_connect` owns refresh coordination and returns
-the resulting mapping; the underlying store stays synchronous. Observation-only
-mappings, wrong ports, and mappings from a previous policy generation cannot refresh.
-Refresh eligibility uses the authored ports, independently of which ports the
-latest DNS addresses satisfied. Dispatch reauthorizes mapped connections and
-rebuilds their connectors from current pins instead of retaining staged pins
-across a refresh.
+`PolicyDnsService::lookup_for_connect` and `lookup_for_pin` coordinate refreshes;
+the underlying store stays synchronous. Observation-only mappings cannot refresh.
+A synthetic address identifies a name and address family across policy reloads.
+Each connection is authorized by the current policy, and its destination rules
+filter the mapping's pinned addresses. Dispatch rebuilds connectors from current
+pins instead of retaining staged pins across a refresh.
 
 ## Reserved destinations
 
@@ -133,6 +132,11 @@ backend once at startup. `opa::OpaEngine` implements the YAML backend here;
 `openshell-policy-cedar-runtime` implements Cedar in a separate crate.
 
 The proxy, relay, and policy DNS use shared decisions and generation guards.
+YAML relays attach a connection revalidator that compares full Rego endpoint
+rules across every intervening generation and checks credentials the connection
+used. Unrelated changes re-pin the connection; narrowing, quarantine, expired
+history, or a used credential's rotation closes it. Ordinary guards and Cedar
+connections retain strict invalidation on reload.
 An admitted connection carries an opaque destination authorizer that checks
 resolved addresses against the same policy snapshot. Networking applies its
 always-blocked address checks before the authorizer and blocks control-plane

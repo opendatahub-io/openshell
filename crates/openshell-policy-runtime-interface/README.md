@@ -11,3 +11,9 @@ before service connections begin and commits policy, middleware, and credentials
 together. Request and address authorizers remain bound to the policy generation
 that admitted their connection. The relay keeps credentials and I/O state outside
 the policy-visible `L7PolicyContext`.
+
+`PolicyBackend::connection_generation_guard` defaults to a strict generation
+check. Backends may attach a `ConnectionRevalidator` to follow publications that
+preserve an established connection's contract. Guard clones share the pin;
+ordinary configuration guards remain strict. The backend must reject intervening
+policy narrowing and quarantines, even if a later publication restores access.

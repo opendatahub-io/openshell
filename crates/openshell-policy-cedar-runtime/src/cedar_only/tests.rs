@@ -2460,3 +2460,26 @@ fn destination_control_plane_checks_recognize_bracketed_ip_literals() {
         );
     }
 }
+
+#[test]
+fn credential_publication_invalidates_relays_and_configuration_without_ending_quarantine() {
+    let cedar = Arc::new(CedarOnlyEngine::from_policy_str(POLICY).expect("policy parses"));
+    let engine = openshell_policy_runtime_interface::PolicyEngine::from(Arc::clone(&cedar));
+    for quarantined in [false, true] {
+        if quarantined {
+            cedar.enter_fail_closed("revocation test").unwrap();
+        }
+        let generation = engine.current_generation();
+        let input = middleware_input("api.example.com");
+        let connection = engine
+            .connection_generation_guard(input, generation, None)
+            .unwrap();
+        let configuration = engine.configuration_generation_guard().unwrap();
+        let tunnel = engine.tunnel_engine(generation).unwrap();
+        assert_eq!(engine.publish_credential_change().unwrap(), generation + 1);
+        assert!(connection.is_stale());
+        assert!(configuration.is_stale());
+        assert!(tunnel.is_stale());
+        assert_eq!(cedar.fail_closed_reason().is_some(), quarantined);
+    }
+}

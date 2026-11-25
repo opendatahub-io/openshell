@@ -95,20 +95,16 @@ pub async fn dns_answers_outcome(
         Ok(resolved) => resolved,
         Err(refusal) => return refusal,
     };
-    let Ok(mapping) = store.lookup(
-        answer.address,
-        port,
-        answer.policy_generation,
-        std::time::Instant::now(),
-    ) else {
+    let Ok(mapping) = store.lookup_intent(answer.address, port, std::time::Instant::now()) else {
         return "no mapping for port".to_string();
     };
+    if mapping.record.is_observation() {
+        return "no mapping for port".to_string();
+    }
     let mut pinned: Vec<String> = mapping
         .record
-        .contracts
+        .pinned_addresses
         .iter()
-        .filter(|contract| contract.port == mapping.port)
-        .flat_map(|contract| contract.pinned_addresses.iter())
         .map(ToString::to_string)
         .collect();
     pinned.sort();

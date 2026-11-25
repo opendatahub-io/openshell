@@ -366,16 +366,10 @@ process: { run_as_user: sandbox, run_as_group: sandbox }
             assert!(pool.contains(&address));
             let mapping = service
                 .store()
-                .lookup(
-                    IpAddr::V6(address),
-                    5432,
-                    service.policy.current_generation(),
-                    Instant::now(),
-                )
+                .lookup(IpAddr::V6(address), 5432, Instant::now())
                 .unwrap();
-            let endpoint_ids = mapping.endpoint_ids().cloned().collect::<Vec<_>>();
             assert_eq!(
-                mapping.pinned_addresses_for(&endpoint_ids).unwrap(),
+                mapping.record.pinned_addresses,
                 ["2001:4860:4860::8888".parse::<IpAddr>().unwrap()]
             );
         }

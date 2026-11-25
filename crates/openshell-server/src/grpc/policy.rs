@@ -16285,6 +16285,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_env_revision_ignores_unrelated_profile_import_and_delete() {
+        use crate::provider_profile_sources::stored_provider_profile;
+        use openshell_core::proto::ProviderProfile;
+
+        let store = test_store().await;
+        let mut provider = test_provider("work-github", "github");
+        provider.profile_workspace.clear();
+        store.put_message(&provider).await.unwrap();
+        let providers = ["work-github".to_string()];
+        let revision = || compute_provider_env_revision(&store, "default", &providers);
+        let before = revision().await.unwrap();
+
+        let mut unrelated = stored_provider_profile(ProviderProfile {
+            id: "unrelated".to_string(),
+            display_name: "Unrelated".to_string(),
+            ..Default::default()
+        });
+        unrelated.metadata.as_mut().unwrap().workspace = "default".to_string();
+        store.put_message(&unrelated).await.unwrap();
+        assert_eq!(
+            before,
+            revision().await.unwrap(),
+            "unrelated profile import"
+        );
+
+        assert!(
+            store
+                .delete(StoredProviderProfile::object_type(), unrelated.object_id())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            before,
+            revision().await.unwrap(),
+            "unrelated profile delete"
+        );
+    }
+
+    #[tokio::test]
     async fn provider_env_revision_changes_when_custom_profile_token_grant_changes() {
         use crate::grpc::provider::handle_update_provider_profiles;
         use openshell_core::proto::{
