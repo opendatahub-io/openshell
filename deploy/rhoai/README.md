@@ -1,127 +1,44 @@
-# Install OpenShell and the OpenShell Dashboard admin UI on OpenShift
+# Install OpenShell on OpenShift
 
-This guide walks you through installing [OpenShell](https://github.com/NVIDIA/openshell) and the [OpenShell Dashboard](https://github.com/ai-openshell/console)
-web admin UI on an existing OpenShift cluster. OpenShell provides safe, sandboxed runtimes for autonomous AI agents; the admin UI is its browser console.
+OpenShell provides sandboxed runtimes for AI agents, and the Dashboard is its
+web UI for managing workspaces and sandboxes.
 
-The installer deploys two Helm releases, `openshell` for the gateway and
-`openshell-dashboard` for the admin UI, as one pair per namespace. The
-deployment uses OIDC only: users sign in through an external identity provider,
-and the gateway serves its own TLS with a private CA. The gateway uses an
-external PostgreSQL database by default; SQLite remains available as an opt-in.
-After the install you register the gateway with the OpenShell CLI. You can then
-sign in through OIDC and create sandboxes and open terminals from the admin UI.
-
-This guide is for development and evaluation, not a qualified RHOAI deployment.
-It does not cover FIPS compliance, certificate renewal, or isolation guarantees
-beyond the workspace access checks described here. Use PostgreSQL for the
-gateway database in production. SQLite keeps the data on a single persistent
-volume tied to one gateway pod, which suits development but not production
-retention or shared workloads. PostgreSQL improves durability and operability,
-but the installer still deploys one gateway replica, so it does not make the
-gateway highly available on its own.
-
-The main flow assumes the cluster and the administrator's workstation can reach
-the public registries. On a disconnected cluster, follow [Install on a
-disconnected cluster](#install-on-a-disconnected-cluster) before installing.
-
-## Table of contents
-
-- [Install OpenShell and the OpenShell Dashboard admin UI on OpenShift](#install-openshell-and-the-openshell-dashboard-admin-ui-on-openshift)
-  - [Table of contents](#table-of-contents)
-  - [Prerequisites](#prerequisites)
-  - [Choose a configuration](#choose-a-configuration)
-  - [Copy the configuration](#copy-the-configuration)
-  - [Edit the configuration](#edit-the-configuration)
-    - [Required](#required)
-    - [Optional](#optional)
-    - [OIDC issuer certificate](#oidc-issuer-certificate)
-    - [Chart and image pins](#chart-and-image-pins)
-    - [Operational values overrides](#operational-values-overrides)
-    - [Database backend](#database-backend)
-  - [Save the client secret](#save-the-client-secret)
-  - [Save the database URI](#save-the-database-uri)
-  - [Development PostgreSQL](#development-postgresql)
-  - [Validate, preflight, and install](#validate-preflight-and-install)
-  - [Register the gateway and log in](#register-the-gateway-and-log-in)
-  - [Create and use a sandbox](#create-and-use-a-sandbox)
-  - [Using the OpenShell Dashboard UI](#using-the-openshell-dashboard-ui)
-  - [Verify workspace authorization](#verify-workspace-authorization)
-  - [Rerun and upgrade](#rerun-and-upgrade)
-  - [Remove an installation](#remove-an-installation)
-  - [Install on a disconnected cluster](#install-on-a-disconnected-cluster)
-  - [Troubleshoot common failures](#troubleshoot-common-failures)
-  - [Contributor checks](#contributor-checks)
-  - [Related documentation](#related-documentation)
+`install.py` installs the OpenShell gateway and Dashboard into an OpenShift
+namespace using Helm. This guide uses the RHOAI 3.6 image pins and PostgreSQL
+configuration in `config-examples/config.example-rhoai-3.6-postgresql-keycloak.json`.
 
 ## Prerequisites
 
-- `uv`, Helm 3.17.3 or later, and `kubectl` for installation and preflight on
-  the administrator's workstation. `--check` needs only Helm.
-- OpenShift 4.20 or newer.
-- amd64 nodes only. Mixed amd64/arm64 clusters are not supported because the
-  Red Hat Build of Agent Sandbox Operator is not available on arm64.
-- [Red Hat Build of Agent Sandbox
-  Operator](https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.13/html/deploying_red_hat_build_of_agent_sandbox/index)
-  deployed in the cluster.
-- OpenShift's default OVN-Kubernetes network plugin (NetworkPolicy support).
-- A PostgreSQL database reachable from the cluster and a connection URI with
-  the credentials the gateway uses. The installer creates the gateway Secret
-  but does not provision PostgreSQL, validate connectivity, or check schema
-  compatibility. Only the SQLite opt-in avoids this requirement. For
-  development, [Development PostgreSQL](#development-postgresql) deploys one
-  in the OpenShell namespace.
-- A default StorageClass for sandbox workspace volumes. Without one, the
-  sandbox's 2Gi workspace PersistentVolumeClaim stays Pending and the sandbox
-  never starts. Clusters with only static, class-less PersistentVolumes need
-  the workaround described in [Install on a disconnected
-  cluster](#install-on-a-disconnected-cluster).
-- An OIDC provider with a confidential browser client that uses PKCE S256. For
-  development, set one up with the
-  [Keycloak development guide](keycloak-dev-guide.md); on a disconnected
-  cluster, that guide's mirroring section applies too.
-- Registry access: `ghcr.io` from the workstation or server where the
-  installer is being run for both Helm charts, and from the cluster nodes the
-  registries your images come from: `quay.io` for ODH builds and
-  `registry.redhat.io` for RHOAI builds (requires a pull secret).
-  `registry.access.redhat.com` is only needed when you use a Red Hat base
-  image, the development PostgreSQL, or the pinned oauth2-proxy image. On a
-  cluster whose nodes cannot reach these registries, replace direct access
-  with a private mirror as described in [Install on a disconnected
-  cluster](#install-on-a-disconnected-cluster).
+- OpenShift 4.20 or newer on amd64 nodes, with the Red Hat Build of Agent
+  Sandbox Operator installed and the default OVN-Kubernetes network plugin.
+- A default StorageClass for sandbox workspace volumes.
+- `uv`, Helm 3.17.3 or newer, and `kubectl` on the machine running
+  the installer. That machine needs access to the OpenShift API and to the
+  gateway and Dashboard chart registries, `ghcr.io` and `quay.io`.
+- Cluster nodes must be able to pull the configured images. RHOAI images from
+  `registry.redhat.io` require cluster pull credentials. For disconnected
+  clusters, see [Disconnected clusters](#disconnected-clusters) for image
+  mirroring guidance.
+- A PostgreSQL database reachable from the OpenShell namespace, and an OIDC
+  provider reachable from the workloads and users, with a confidential browser
+  client using PKCE S256. The example uses Keycloak and PostgreSQL. For a
+  development Keycloak deployment, follow the
+  [Keycloak development guide](keycloak-dev-guide.md).
+- Permission to create resources in the target namespace and read the cluster
+  ingress domain, unless you set both hosts explicitly in the config.
 
-The installer does not install an identity provider, Agent Sandbox, RHOAI, or
-console integration. It targets the current kubeconfig context unless you pass
-`--context`, and never changes it. Configurations do not select a context.
-`--check` reads neither the context nor the cluster.
+The installer does not install the Agent Sandbox Operator, provision a database,
+or deploy an identity provider.
 
-## Choose a configuration
+Choose one installation method below: `install.py` automates chart values,
+Secrets, and preflight; the direct Helm path requires you to prepare them.
 
-Start with `config-examples/config.example-rhoai-3.6-postgresql-keycloak.json`.
-It pins the RHOAI 3.6 builds by digest, selects PostgreSQL, and pairs them with the
-Keycloak realm from [keycloak-dev-guide.md](keycloak-dev-guide.md). It also
-needs a `gateway-db-uri.txt` beside the configuration; see
-[Save the database URI](#save-the-database-uri).
+## Install with `install.py`
 
-For the latest OpenShell builds with SQLite, use
-`config-examples/config.example-odh-sqlite-keycloak.json`. It pins gateway
-chart `0.1.7`, the `v0.1.7-rhaiv.0` images, and the SQLite backend, and uses
-only `quay.io` images. With no database to provide, it is the simplest path
-for testing Open Data Hub community builds without `registry.redhat.io`
-access, a pull secret, or PostgreSQL.
+### Configure
 
-Example filenames name the backend: `-sqlite` selects the chart's StatefulSet
-and PVC, and `-postgresql` selects an external database. The generic
-`config.example-sqlite.json` carries placeholders for custom registries and
-versions.
-
-[config-examples/README.md](config-examples/README.md) describes all five examples, including the
- generic and non-Keycloak variants.
-
-## Copy the configuration
-
-Copy the example outside the checkout so local credentials cannot be committed.
-The commands below keep the configuration and its files in `CONFIG_DIR`; set it
-to the directory that contains `config.json` if you keep it elsewhere:
+From the repository root, copy the example and its credential files outside
+the checkout:
 
 ```shell
 export CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"
@@ -132,303 +49,112 @@ cp deploy/rhoai/config-examples/config.example-rhoai-3.6-postgresql-keycloak.jso
 chmod 600 "$CONFIG_DIR/config.json"
 ```
 
-Users who want operational overrides also copy `config-examples/gateway-values.example.yaml` and/or `config-examples/dashboard-values.example.yaml` beside the configuration. The [Operational values overrides](#operational-values-overrides) section explains how to wire them.
+Edit `config.json` before installing:
 
-## Edit the configuration
+- Set `namespace` to the OpenShell namespace you will use.
+- Set `oidc.issuer` to your provider's issuer URL. The example uses
+  `https://keycloak.apps.example.com/realms/openshell`.
+- Register `https://dashboard-<namespace>.<apps-domain>/oauth2/callback` as
+  the browser client's callback URL. The example's client ID, audience, role
+  claim, and role names match the Keycloak development guide; keep them aligned
+  with your provider.
+- The example pins RHOAI 3.6 images by digest. For another RHOAI build, use the
+  image digests for that build.
 
-Review the required fields first. They describe the deployment target and the
-identity provider registration. The examples already pin published charts and
-images; check them against [Chart and image pins](#chart-and-image-pins).
-
-### Required
-
-- `namespace` is the application namespace, for example `openshell-team`. The
-  installer rejects `default`, `kube-*`, and `openshift-*`. It deploys one
-  gateway and dashboard pair per namespace, and each pair needs distinct hosts
-  and OIDC identifiers: the OpenShift router does not admit the same host from
-  two namespaces.
-- `gateway.chart`, `gateway.version`, `dashboard.chart`, and `dashboard.version`
-  are required. The examples pin published versions; replace the
-  `REPLACE_WITH_*` placeholders when you copy `config.example-sqlite.json`.
-- `oidc.issuer` is the provider's issuer URL.
-- `oidc.client_id` is the dashboard browser client, conventionally
-  `openshell-dashboard-<namespace>`. The Keycloak examples use
-  `openshell-dashboard-openshell-team`.
-- `oidc.audience` is the gateway API audience, conventionally
-  `openshell-api-<namespace>`, for example `openshell-api-openshell-team`. It
-  must differ from the client ID.
-- `oidc.roles_claim` names the claim path the provider emits. Use
-  `realm_access.roles` for the Keycloak walkthrough; the generic examples use
-  `roles`.
-- `oidc.admin_role` and `oidc.user_role` are the role names the gateway and
-  dashboard recognize.
-- `oidc.client_secret_file` names the browser client secret file. It is required
-  for the first install, and paths in this field and `oidc.ca_file` resolve
-  relative to the configuration file.
-
-### Optional
-
-- `gateway.database` selects the gateway database backend. When the section is
-  absent, the installer uses external PostgreSQL and reads `uri_file`, which
-  defaults to `gateway-db-uri.txt` and resolves relative to the configuration.
-  Set `"database": { "mode": "sqlite" }` to keep the chart's StatefulSet and
-  SQLite PVC. Inline `uri`, `username`, or `password` fields are rejected.
-- `gateway.host` and `dashboard.host` are optional. When omitted, the installer
-  derives `gateway-<namespace>.<apps-domain>` and
-  `dashboard-<namespace>.<apps-domain>` from the cluster ingress domain
-  (`ingresses.config.openshift.io/cluster` `.spec.domain`), using the effective
-  namespace including `--namespace`. Set them explicitly to use a different
-  router domain; explicit hosts do not follow `--namespace`. Both hosts must be
-  distinct and sit under the router's `*.apps.<domain>` wildcard so DNS
-  resolves. The dashboard's edge Route uses the router certificate; the gateway
-  serves its own certificate through a passthrough Route.
-- `context` is not a configuration field. Pass `--context` to select a kube
-  context; otherwise the installer uses the current kubeconfig context.
-- `oidc.allowed_roles` is a dashboard login filter. The installer accepts it only
-  when `oidc.provider` is `keycloak-oidc`; for generic `oidc`, use
-  `oidc.allowed_groups`. The Keycloak examples list both roles that
-  [keycloak-dev-guide.md](keycloak-dev-guide.md) creates, as an example choice,
-  not a requirement; with `keycloak-oidc`, any role list the provider emits works.
-- `oidc.scope` is the space-separated OAuth scope request, for example
-  `openid email profile`. Omit it to keep the provider defaults.
-- `oidc.cli_client_id` is the public client the `openshell` CLI registers as.
-  It defaults to `openshell-cli-<namespace>`; keep that default so each
-  gateway's CLI client carries only its own audience.
-
-Register `https://<dashboard-host>/oauth2/callback` with the identity provider.
-With the default configuration, `<dashboard-host>` is
-`dashboard-<namespace>.<apps-domain>`.
-
-### OIDC issuer certificate
-
-Set `ca_file` in the config file only when the OIDC issuer's certificate is not publicly trusted,
-for example a self-signed certificate or a private CA. The Keycloak examples
-set `"ca_file": "ingress-ca.crt"` because the development Keycloak serves
-through an OpenShift Route that uses the cluster's default ingress certificate,
-which is self-signed.
-
-Create that file before `--check`:
-
-```shell
-oc -n openshift-config-managed get configmap default-ingress-cert \
-  -o jsonpath='{.data.ca-bundle\.crt}' \
-  > "$CONFIG_DIR/ingress-ca.crt"
-```
-
-When `ca_file` is set, the installer creates the `openshell-oidc-ca` ConfigMap
-and mounts it in both releases so the gateway and dashboard trust the issuer.
-Leave the field unset for publicly trusted issuers, such as an external
-identity provider or a cluster with custom router certificates; the installer
-then creates no ConfigMap and both workloads use the system trust roots.
-
-### Chart and image pins
-
-- `version` in each section is the OpenShell Helm chart version, not the image tag.
-- RHOAI image digests come from the rhods-operator.3.6.0 CSV. Refresh them with the command
-  in [config-examples/README.md](config-examples/README.md), or use the
-  `rhoai-3.6` tag instead.
-- The ODH examples use `v0.1.7-rhaiv.0` images.
-- When both are present, `digest` takes precedence over `tag`.
-- `gateway.images.sandbox` uses a full repository path and has no separate
-  registry key. The image must provide a shell at `/bin/bash`, `/usr/bin/bash`,
-  or `/bin/sh`.
-- `dashboard.images.authProxy` overrides the dashboard chart's oauth2-proxy
-  image with `registry`, `repository`, and `digest` or `tag`. The RHOAI
-  examples pin the public `registry.access.redhat.com/hi/oauth2-proxy` image by
-  digest, which works on connected and disconnected clusters; see
-  [oauth2-proxy](#oauth2-proxy) under
-  [Install on a disconnected cluster](#install-on-a-disconnected-cluster).
-- Supported architectures: the installer runs on amd64-only clusters. Mixed
-  amd64/arm64 clusters are not supported because the Red Hat Build of Agent
-  Sandbox Operator is not available on arm64. The RHOAI 3.6 images and the ODH
-  gateway, supervisor, and sandbox images are already multi-arch, but the ODH
-  dashboard image is amd64-only and pairs with dashboard chart `0.1.5`.
-- Use the `vX.Y.Z-rhaiv.N` tagged images for ODH, not the moving `odh-stable`
-  tag.
-
-### Operational values overrides
-
-`gateway.values_files` and `dashboard.values_files` list YAML or JSON files
-whose paths resolve relative to the configuration. The installer merges the
-files in order and re-applies the result on every install and rerun. See
-[Chart values](config-examples/README.md#chart-values) for the allowed
-override set.
-
-`config-examples/gateway-values.example.yaml` and
-`config-examples/dashboard-values.example.yaml` are optional, ready-to-edit
-values overrides for the operational knobs the installer allows: resource
-requests and limits, `imagePullSecrets`, gateway
-`server.workspaceStorageClass`, dashboard `authProxy` settings, and router
-NetworkPolicy peers. Copy a file beside the private configuration, edit the
-sizes and fields for the workload, and add its filename to the matching chart's
-`values_files` list, for example:
-
-```json
-"values_files": ["gateway-values.yaml"]
-```
-
-Skipping them installs the chart defaults. Keep the same files on reruns so the
-upgrade applies the intended values. The allowlist rejects
-`server.externalDbSecret`, `server.dbUrl`, and `workload.*`; select the database
-backend with `gateway.database` instead.
-
-### Database backend
-
-PostgreSQL is the default and the recommended backend for production. SQLite
-is for development and evaluation only.
-
-In PostgreSQL mode the installer sets `workload.kind=deployment` and
-`server.externalDbSecret=openshell-gateway-db` in the gateway values. It
-creates that Secret with the `uri` key from `gateway.database.uri_file`, and
-the gateway consumes it as `OPENSHELL_DB_URL`. No gateway PVC is created;
-sandbox workspace volumes still need a StorageClass. The installer does not
-provision PostgreSQL or check that the gateway can reach it, that the
-credentials work, or that the schema is compatible. Those failures surface as
-gateway readiness or log errors.
-
-To keep SQLite instead, set `"database": { "mode": "sqlite" }`. The gateway
-then runs as a StatefulSet with its database on the `openshell-data` PVC, and
-preflight requires a default StorageClass that provisions block volumes.
-SQLite data is tied to that single volume and to the gateway pod's lifecycle.
-
-The installer records the backend in its state and rejects a change in either
-direction. Migrate the data explicitly before switching. The values allowlist
-still rejects direct `server.externalDbSecret`, `server.dbUrl`, and
-`workload.*` overrides; the installer owns those keys.
-
-## Save the client secret
-
-Save the secret of the dashboard browser client from Keycloak or your OIDC
-provider beside the configuration:
+Save the browser client secret in the file named by `oidc.client_secret_file`
+(`dashboard-client-secret.txt` in the example):
 
 ```shell
 umask 077
-mkdir -p "$CONFIG_DIR"
-printf 'Dashboard client secret: '
-IFS= read -rs SECRET
-echo
-printf '%s' "$SECRET" > "$CONFIG_DIR/dashboard-client-secret.txt"
-unset SECRET
+read -rsp 'OIDC client secret: ' OIDC_SECRET
+printf '\n'
+printf '%s' "$OIDC_SECRET" > "$CONFIG_DIR/dashboard-client-secret.txt"
+unset OIDC_SECRET
 chmod 600 "$CONFIG_DIR/dashboard-client-secret.txt"
 ```
 
-The `printf` prompt and `read -rs` keep the secret off the screen and out of the
-shell history. When the
-[Keycloak client helper](keycloak-dev-guide-create-openshell-clients.sh) created
-the client, it already wrote this file; skip this step in that case. Do not put
-the secret in the JSON, Helm values, or command arguments.
-
-## Save the database URI
-
-In PostgreSQL mode, save the gateway database connection URI in
-`gateway.database.uri_file`, by default `gateway-db-uri.txt`, beside the
-configuration:
+For an existing PostgreSQL database, save its URI in the file named by
+`gateway.database.uri_file` (`gateway-db-uri.txt`). If you want to run a
+development database in the OpenShell namespace, skip this and use the next
+section, which creates the file for you.
 
 ```shell
 umask 077
-printf 'Database URI: '
-IFS= read -rs DB_URI
-echo
+read -rsp 'PostgreSQL URI: ' DB_URI
+printf '\n'
 printf '%s' "$DB_URI" > "$CONFIG_DIR/gateway-db-uri.txt"
 unset DB_URI
 chmod 600 "$CONFIG_DIR/gateway-db-uri.txt"
 ```
 
-The URI uses the form
-`postgresql://user:password@host:5432/database`. The installer requires ASCII,
-a `postgres://` or `postgresql://` scheme, a host, and no fragment. It never
-prints the URI and stores it only in the `openshell-gateway-db` Secret. Do not
-put credentials in the JSON, Helm values, or command arguments. Skip this step
-in SQLite mode.
+Use a URI such as `postgresql://user:password@host:5432/database`. Keep the
+database password out of `config.json`.
 
-To deploy a development database in the OpenShell namespace and build this file
-from it, see [Development PostgreSQL](#development-postgresql).
+The Keycloak development guide uses the cluster's default ingress certificate.
+For that setup, create the CA file referenced by `oidc.ca_file` in the example:
 
-## Development PostgreSQL
+```shell
+oc -n openshift-config-managed get configmap default-ingress-cert \
+  -o jsonpath='{.data.ca-bundle\.crt}' > "$CONFIG_DIR/ingress-ca.crt"
+```
 
-For development and evaluation, you can run PostgreSQL in the OpenShell
-namespace and build `gateway-db-uri.txt` from it. Use this instead of an
-external database. Substitute your namespace for `openshell-team` and your
-configuration directory for `$CONFIG_DIR`.
+For an issuer with a publicly trusted certificate, remove `ca_file` from the
+config instead.
 
-The database must be running before the gateway starts. Create the namespace if
-it does not exist yet:
+### Set up PostgreSQL for development
+
+For development, you can run PostgreSQL in the OpenShell namespace. This
+single-instance database is not a production setup. Set `NS` to the namespace
+in `config.json` and use the `CONFIG_DIR` from above:
 
 ```shell
 export NS=openshell-team
-export CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"
 oc get namespace "$NS" >/dev/null 2>&1 || oc create namespace "$NS"
 ```
 
-Generate a hex password and store it in a Secret. A hex password needs no
-percent-encoding in the URI:
+Create a password Secret and a persistent volume claim:
 
 ```shell
 openssl rand -hex 16 | tr -d '\n' | \
   oc -n "$NS" create secret generic openshell-db-secret \
     --from-literal=username=openshell --from-file=password=/dev/stdin
-```
 
-Create the claim:
-
-```shell
 oc -n "$NS" apply -f - <<'EOF'
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: openshell-db-data
 spec:
-  accessModes:
-    - ReadWriteOnce
+  accessModes: [ReadWriteOnce]
   resources:
     requests:
       storage: 5Gi
 EOF
 ```
 
-Deploy PostgreSQL from the Red Hat hardened image, pinned by digest. The
-image is public, so this also works on a connected cluster; refresh the digest
-from the `18.4` tag when you want a newer build:
+Create the database Deployment and Service from the Red Hat PostgreSQL image,
+then add the password Secret and persistent storage:
 
 ```shell
-skopeo inspect --format '{{.Digest}}' \
-  docker://registry.access.redhat.com/hi/postgresql:18.4
-oc -n "$NS" new-app registry.access.redhat.com/hi/postgresql@sha256:67599d73c3dae0e8685c2f9ba31c11028477816bbc254cf862543cfb11c2dc3f \
+oc -n "$NS" new-app \
+  registry.access.redhat.com/hi/postgresql@sha256:67599d73c3dae0e8685c2f9ba31c11028477816bbc254cf862543cfb11c2dc3f \
   -e POSTGRES_USER=openshell \
   -e POSTGRES_DATABASE=openshell \
   -e PGDATA=/var/lib/postgresql/data/pgdata \
   --name=openshell-db
-```
 
-On a disconnected cluster, the digest form is required: an
-`ImageDigestMirrorSet` rewrites digest pulls to the mirror registry but leaves
-tag pulls pointed at the original registry. Mirror the image first; see
-[Install on a disconnected cluster](#install-on-a-disconnected-cluster).
-
-Do not pass the password through `oc new-app`; it would appear in the process
-table and in the Deployment. Add the reference from
-`openshell-db-secret` instead:
-
-```shell
 oc -n "$NS" patch deployment/openshell-db --type=json -p \
   '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"POSTGRES_PASSWORD","valueFrom":{"secretKeyRef":{"name":"openshell-db-secret","key":"password"}}}}]'
-```
-
-Replace the image's emptyDir volume with the claim. The image names its volume
-`openshell-db-volume-1` at `/var/lib/postgresql`; inspect the Deployment if the
-name differs in your image version:
-
-```shell
 oc -n "$NS" set volume deployment/openshell-db \
   --add --overwrite --name=openshell-db-volume-1 \
-  --type=persistentVolumeClaim \
-  --claim-name=openshell-db-data \
+  --type=persistentVolumeClaim --claim-name=openshell-db-data \
   --mount-path=/var/lib/postgresql
 oc -n "$NS" rollout status deployment/openshell-db
 ```
 
-Build the URI file from the Secret so the password appears neither on screen nor
-in the shell history:
+If the image version uses a different volume name, inspect the Deployment and
+use its volume name with `oc set volume`. Once PostgreSQL is ready, create the
+URI file used by the installer without printing the password:
 
 ```shell
 umask 077
@@ -440,196 +166,235 @@ unset DB_PASSWORD
 chmod 600 "$CONFIG_DIR/gateway-db-uri.txt"
 ```
 
-During the install, the installer copies the URI into the
-`openshell-gateway-db` Secret. It does not create the database or check that the
-gateway can reach it. Because both run in the same namespace, the Service name
-resolves without cross-namespace policy. A default-deny egress policy still
-needs a rule that allows port 5432 to the database Service.
+The installer copies this URI into its gateway Secret; it does not create or
+validate the database. If the namespace has default-deny egress policies, allow
+the gateway to reach the database Service on port 5432.
 
-The database is not part of a Helm release or the installer state. Remove it
-separately when you remove the installation:
+### Run the installer
 
-```shell
-oc -n "$NS" delete all -l app=openshell-db
-oc -n "$NS" delete pvc openshell-db-data secret openshell-db-secret
-```
-
-## Validate, preflight, and install
-
-The script's shebang runs it through `uv`, which installs its pinned PyYAML
-dependency, so `uv` must be on your `PATH`.
-
-Validate both charts without touching the cluster:
+Validate the chart templates, then check cluster prerequisites:
 
 ```shell
-./deploy/rhoai/install.py \
-  --config "$CONFIG_DIR/config.json" --check
+./deploy/rhoai/install.py --config "$CONFIG_DIR/config.json" --check
+./deploy/rhoai/install.py --config "$CONFIG_DIR/config.json" --preflight
 ```
-
-Expect `Both charts rendered successfully. This does not verify cluster or API
-compatibility.` The check downloads the pinned charts but does not access the
-cluster.
-
-When a configuration omits the hosts, `--check` renders them as
-`gateway-<namespace>.apps.example.com` and
-`dashboard-<namespace>.apps.example.com`; the install derives the real hosts
-from the cluster. Pass `--apps-domain <domain>` to render the real derived hosts
-offline.
-
-Run cluster preflight without installing:
-
-```shell
-./deploy/rhoai/install.py \
-  --config "$CONFIG_DIR/config.json" --preflight
-```
-
-Expect `Cluster preflight passed; no installation resources were changed.`
-Preflight prints the target context and namespace. When a host is omitted, it
-also resolves the ingress apps domain and uses the derived hosts for the
-installer's identity checks.
 
 Install:
 
 ```shell
-./deploy/rhoai/install.py \
-  --config "$CONFIG_DIR/config.json"
+./deploy/rhoai/install.py --config "$CONFIG_DIR/config.json"
 ```
 
-The installer prints the dashboard and gateway URLs. `--namespace` overrides the
-namespace; when hosts are omitted, the derived hosts follow it. Explicit hosts
-and OIDC identifiers do not change, so keep the provider registrations in sync.
-`--context` overrides the kube context. Set `--timeout 15m` for a slower
-cluster. On failure, the installer leaves the created resources for diagnosis;
-correct the cause and rerun the same command.
+Pass `--context CONTEXT` to target a kubeconfig context other than the current
+one, or `--namespace NAME` to override the configured namespace. The installer
+prints the gateway and Dashboard URLs and the next steps for registering the
+gateway with the OpenShell CLI.
 
-When the install finishes, the installer also prints the next steps with your
-configuration values: install the matching OpenShell CLI, register the gateway
-with its CA, check the connection with `openshell status`, and create a sandbox
-with `openshell sandbox create`. The printed `kubectl` command includes the kube
-context the install targeted, so it reads the CA Secret from the same cluster.
-The following sections describe the same steps in more detail, including the
-trust setup for custom identity providers.
+## Install directly with Helm
 
-## Register the gateway and log in
+Use this alternative when you want to manage the gateway and Dashboard Helm
+releases yourself. The configuration and PostgreSQL sections above still
+apply, but Helm does not create the database, credentials, issuer CA ConfigMap,
+or validate the cluster prerequisites for you.
 
-The installer prints these commands with the values from your configuration; use
-its output when it differs from the examples below.
+Set `NS` to the target namespace. Use the same namespace and Route hosts in the
+values files below, and register the Dashboard callback URL with your OIDC
+provider:
 
-Install the OpenShell CLI. Install the version that matches the gateway release
-you deployed; the RHOAI 3.6 examples use `v0.1.3`:
+```shell
+export NS=openshell-team
+oc get namespace "$NS" >/dev/null 2>&1 || oc create namespace "$NS"
+```
+
+Create the Secrets consumed by the charts. The gateway Secret needs a `uri`
+key; the Dashboard Secret needs `client-secret` and `cookie-secret` keys:
+
+```shell
+oc -n "$NS" create secret generic openshell-gateway-db \
+  --from-file=uri="$CONFIG_DIR/gateway-db-uri.txt"
+
+openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n' \
+  > "$CONFIG_DIR/dashboard-cookie-secret.txt"
+chmod 600 "$CONFIG_DIR/dashboard-cookie-secret.txt"
+oc -n "$NS" create secret generic openshell-dashboard-oidc \
+  --from-file=client-secret="$CONFIG_DIR/dashboard-client-secret.txt" \
+  --from-file=cookie-secret="$CONFIG_DIR/dashboard-cookie-secret.txt"
+```
+
+If the OIDC issuer uses a private CA, create the ConfigMap referenced by both
+charts. Omit `caConfigMapName` from both values files below when the issuer is
+publicly trusted:
+
+```shell
+oc -n "$NS" create configmap openshell-oidc-ca \
+  --from-file=ca.crt="$CONFIG_DIR/ingress-ca.crt"
+```
+
+Create `gateway-values.yaml` and `dashboard-values.yaml` in `$CONFIG_DIR`. Set
+the OIDC fields and hosts to match your provider and Routes. These values show
+the Keycloak development guide defaults:
+
+```yaml
+# gateway-values.yaml
+fullnameOverride: openshell
+podSecurityContext: null
+securityContext:
+  runAsUser: null
+  seccompProfile:
+    type: RuntimeDefault
+workload:
+  kind: deployment
+server:
+  disableTls: false
+  sandboxNamespace: openshell-team
+  auth:
+    allowUnauthenticatedUsers: false
+  tls:
+    enableMtls: false
+    clientCaSecretName: ""
+    certSecretName: openshell-server-tls
+    clientTlsSecretName: openshell-client-tls
+  externalDbSecret: openshell-gateway-db
+  oidc:
+    issuer: https://keycloak.apps.example.com/realms/openshell
+    audience: openshell-api-openshell-team
+    rolesClaim: realm_access.roles
+    adminRole: openshell-admin
+    userRole: openshell-user
+    caConfigMapName: openshell-oidc-ca
+pkiInitJob:
+  enabled: true
+  serverDnsNames:
+    - gateway-openshell-team.apps.example.com
+    - openshell.openshell-team.svc
+    - openshell.openshell-team.svc.cluster.local
+openshiftRoute:
+  enabled: true
+  host: gateway-openshell-team.apps.example.com
+```
+
+```yaml
+# dashboard-values.yaml
+fullnameOverride: openshell-dashboard
+podSecurityContext: null
+securityContext:
+  runAsUser: null
+  seccompProfile:
+    type: RuntimeDefault
+gateway:
+  url: grpcs://openshell.openshell-team.svc.cluster.local:8080
+  caSecretName: openshell-client-tls
+oidc:
+  provider: keycloak-oidc
+  issuer: https://keycloak.apps.example.com/realms/openshell
+  clientId: openshell-dashboard-openshell-team
+  existingSecret: openshell-dashboard-oidc
+  audience: openshell-api-openshell-team
+  rolesClaim: realm_access.roles
+  adminRole: openshell-admin
+  userRole: openshell-user
+  codeChallengeMethod: S256
+  allowedRoles: [openshell-admin, openshell-user]
+  caConfigMapName: openshell-oidc-ca
+  scope: openid email profile
+openshiftRoute:
+  enabled: true
+  host: dashboard-openshell-team.apps.example.com
+  termination: edge
+networkPolicy:
+  ingressNamespace: openshift-ingress
+```
+
+For a publicly trusted issuer, remove `caConfigMapName` from both values
+files. For the RHOAI images in the example config, copy each `registry`,
+`repository`, and `digest` into the corresponding chart image values:
+
+| Installer config field          | Helm values path                                    |
+| ------------------------------- | --------------------------------------------------- |
+| `gateway.images.gateway`        | `gateway.image`                                     |
+| `gateway.images.supervisor`     | `supervisor.image`                                  |
+| `gateway.images.sandboxRuntime` | `sandboxRuntime.image`                              |
+| `gateway.images.sandbox`        | `sandbox.image` (`repository` is a full image path) |
+| `dashboard.images.dashboard`    | `dashboard.image`                                   |
+| `dashboard.images.authProxy`    | `authProxy.image`                                   |
+
+Install the gateway first so it creates the TLS Secrets used by the Dashboard,
+then install the Dashboard:
+
+```shell
+helm upgrade --install openshell \
+  oci://ghcr.io/nvidia/openshell/helm-chart --version 0.1.3 \
+  --namespace "$NS" --values "$CONFIG_DIR/gateway-values.yaml" \
+  --wait --wait-for-jobs --timeout 15m
+
+helm upgrade --install openshell-dashboard \
+  oci://quay.io/ai-openshell/charts/console --version 0.1.5 \
+  --namespace "$NS" --values "$CONFIG_DIR/dashboard-values.yaml" \
+  --wait --timeout 15m
+```
+
+The values shown target the example's chart versions and namespace. If you
+change either version or the namespace, update the chart versions, image pins,
+OIDC identifiers, Service URL, and certificate DNS names together. For other
+chart options, see the [gateway chart values](../helm/openshell/values.yaml)
+and inspect the Dashboard chart values with
+`helm show values oci://quay.io/ai-openshell/charts/console --version 0.1.5`.
+
+## After installation: install the CLI and create a sandbox
+
+Install the CLI version that matches the gateway chart version. This example
+uses `0.1.3`:
 
 ```shell
 curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh \
   | OPENSHELL_VERSION=v0.1.3 sh
 ```
 
-The upstream installer also deploys and starts a local gateway on the
-workstation that runs it: a user service on Linux and a Homebrew service on
-macOS. This is a limitation of the upstream installer. The local gateway is
-separate from the cluster gateway deployed above and is not used by this
-guide's remote-cluster workflow. If it conflicts with an existing local
-installation, remove its registration with `openshell gateway remove openshell`.
+The upstream installer also starts a separate local gateway on this machine;
+the commands below use the gateway deployed in OpenShift. On a disconnected
+workstation, bring over the matching CLI binary instead.
 
-The gateway Route is TLS passthrough serving a private CA, and OIDC discovery
-uses the ingress CA. Trust both paths before adding the gateway.
-
-Set `CTX` to the context you installed with (the `--context` value, or the
-current kubeconfig context when `--context` was not passed), so the
-certificate commands below read from the same cluster:
+Set `NS` to the installed namespace and `CTX` to the kubeconfig context used
+during installation (`--context`, or the current context if omitted). Copy the
+gateway CA into the CLI's per-gateway trust directory:
 
 ```shell
-CTX=YOUR_INSTALL_CONTEXT
+export NS=openshell-team
+export CTX=YOUR_INSTALL_CONTEXT
+GATEWAY_MTLS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/$NS/mtls"
+mkdir -p "$GATEWAY_MTLS_DIR"
+oc --context "$CTX" -n "$NS" get secret openshell-client-tls \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > "$GATEWAY_MTLS_DIR/ca.crt"
 ```
 
-Copy the gateway server CA into the CLI's per-gateway TLS directory. The
-directory name must match the `--name` value you use below:
-
-```shell
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/openshell-team/mtls"
-oc --context "$CTX" -n openshell-team get secret openshell-client-tls \
-  -o jsonpath='{.data.ca\.crt}' | base64 -d \
-  > "${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/openshell-team/mtls/ca.crt"
-```
-
-The CLI stores gateway metadata under `${XDG_CONFIG_HOME:-$HOME/.config}/openshell`.
-
-OIDC bearer authentication needs only `ca.crt` in this directory.
-
-Build an `SSL_CERT_FILE` bundle from the system roots plus the ingress CA.
-Skip this and the ConfigMap command below when your OIDC issuer's certificate
-is publicly trusted (`oidc.ca_file` unset): the installer creates no
-`openshell-oidc-ca` ConfigMap, no ingress CA file exists, and the CLI uses the
-system trust roots unchanged. Setting `SSL_CERT_FILE` replaces the default
-bundle, so never point it at the ingress CA alone:
+If `oidc.ca_file` is set for a private or self-signed identity provider,
+combine that CA with the workstation's system CA bundle and set
+`SSL_CERT_FILE`. This example uses the Fedora/RHEL bundle path; use the path
+reported by the installer on other systems:
 
 ```shell
 cat /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
-  "$CONFIG_DIR/ingress-ca.crt" \
-  > "$CONFIG_DIR/ca-bundle.pem"
+  "$CONFIG_DIR/ingress-ca.crt" > "$CONFIG_DIR/ca-bundle.pem"
 export SSL_CERT_FILE="$CONFIG_DIR/ca-bundle.pem"
 ```
 
-The installer prints the system bundle path it detects for the host it runs
-on. If you run these commands on another host, substitute the matching path:
-`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` on Fedora and RHEL,
-`/etc/ssl/certs/ca-certificates.crt` on Debian and Ubuntu, and
-`/etc/ssl/cert.pem` on macOS. You may also source the ingress CA from the
-installer-created ConfigMap:
-
-```shell
-oc --context "$CTX" -n openshell-team get configmap openshell-oidc-ca \
-  -o jsonpath='{.data.ca\.crt}' > "$CONFIG_DIR/ingress-ca.crt"
-```
-
-Register the gateway:
+Register the gateway, replacing the example OIDC values and URL with those in
+`config.json` and the URL printed by the installer. The CLI client ID defaults
+to `openshell-cli-<namespace>` if `oidc.cli_client_id` is not set:
 
 ```shell
 openshell gateway add \
-  --name openshell-team \
+  --name "$NS" \
   --oidc-issuer "https://keycloak.apps.example.com/realms/openshell" \
-  --oidc-client-id openshell-cli-openshell-team \
-  --oidc-audience openshell-api-openshell-team \
+  --oidc-client-id "openshell-cli-$NS" \
+  --oidc-audience "openshell-api-$NS" \
   "https://gateway-openshell-team.apps.example.com:443"
-```
-
-Replace the issuer with your configuration value. The gateway URL is the derived
-default `gateway-<namespace>.<apps-domain>`; use the URL the installer printed.
-The command opens a browser for the Authorization Code + PKCE login.
-
-Sign in as a user that holds the gateway's admin role or user role. The admin
-role is configured in `oidc.admin_role` (`openshell-admin` in the Keycloak
-examples), and the user role in `oidc.user_role` (`openshell-user`). A user who
-holds neither role can complete the login, but the gateway rejects their API
-calls. A user with the admin role creates workspaces and must add users as
-members before those users can work there; a user with the user role works only
-in workspaces where they are a member.
-
-The CLI targets the `default` workspace unless you select another one. If an
-administrator assigned you to a different workspace, pass `--workspace <name>`
-to each command or export `OPENSHELL_WORKSPACE=<name>`; your account may not be
-authorized for the `default` workspace. See
-[Workspaces](https://docs.nvidia.com/openshell/latest/how-it-works/workspaces)
-for workspace creation and membership.
-
-Verify the registration and login:
-
-```shell
 openshell status
 ```
 
-Expect `Status: Connected` and `Authentication: Authenticated (OIDC)`.
-
-`--gateway-insecure` skips gateway certificate verification for local testing
-only; do not use it beyond development. For the identity-provider side, see
-[keycloak-dev-guide.md](keycloak-dev-guide.md).
-
-## Create and use a sandbox
-
-List the sandbox subcommands:
-
-```shell
-openshell sandbox --help
-```
+Sign in with an identity that has the configured admin or user role and access
+to a workspace. The CLI uses the `default` workspace unless you select another
+one with `--workspace` or `OPENSHELL_WORKSPACE`.
 
 Create a sandbox:
 
@@ -637,451 +402,77 @@ Create a sandbox:
 openshell sandbox create
 ```
 
-The gateway assigns the sandbox an auto-generated name, for example
-`juicy-lacewing`. Exit the initial shell with Control+D to keep the sandbox
-running; pass `--no-keep` to delete it when the shell exits instead.
+The gateway assigns the sandbox a name and opens a shell. Exit with Control+D
+to leave it running; use `openshell sandbox list` and
+`openshell sandbox connect <name>` to return to it.
 
-List the sandboxes in the workspace:
+## Disconnected clusters
 
-```shell
-openshell sandbox list
-```
+The machine running `install.py` or Helm pulls the charts; cluster nodes pull
+the container images. When that machine can reach `ghcr.io` and `quay.io`, the
+charts do not need to be mirrored. Mirror the images to a registry reachable by
+the cluster, then point the installer config or direct Helm image values at
+that mirror while retaining each image digest. The example includes the
+gateway, supervisor, sandbox runtime, Dashboard, and oauth2-proxy images.
 
-Stop, start, and reconnect to a sandbox by name:
-
-```shell
-openshell sandbox stop juicy-lacewing
-openshell sandbox start juicy-lacewing
-openshell sandbox connect juicy-lacewing
-```
-
-For more sandbox and agent examples, see
-[Run Your First Agent](https://docs.nvidia.com/openshell/latest/about/run-your-first-agent)
-and [How it works](https://docs.nvidia.com/openshell/how-it-works).
-
-## Using the OpenShell Dashboard UI
-
-The installer deploys the dashboard beside the gateway and prints its URL. With
-omitted hosts, the URL is `https://dashboard-<namespace>.<apps-domain>`; when
-hosts are set explicitly, use the value the installer printed. Open the URL and
-sign in through the configured OIDC provider.
-
-The dashboard shows different features depending on the signed-in user's role.
-With `oidc.provider: "keycloak-oidc"`, the account must hold a role listed in
-`oidc.allowed_roles`; the Keycloak examples list `openshell-admin` and
-`openshell-user`. With generic `oidc`, list the provider's group in
-`oidc.allowed_groups` instead. When neither filter is set, any authenticated
-identity-provider user can reach the UI, but the gateway still enforces its
-roles and workspace access. A user with the admin role
-(`oidc.admin_role`) can create workspaces and add users to them. A user with the
-user role (`oidc.user_role`) sees the workspaces they were added to and manages
-them, including creating sandboxes.
-
-Use the dashboard to:
-
-- Create and delete workspaces and manage their members (admin role).
-- Create sandboxes with a policy or from a workspace template, then stop, start,
-  and delete them.
-- Open a sandbox to view its logs, use an interactive terminal, upload and
-  download files, inspect exposed services and attached providers, and review
-  its settings.
-- Manage network policy with revision history, a network-rule editor, and
-  proposed policy changes per sandbox.
-- Register provider credentials and manage provider profiles.
-- View gateway status, version, compute drivers, settings, and resources across
-  all workspaces.
-
-For more information about the dashboard, see
-[ai-openshell/console](https://github.com/ai-openshell/console).
-
-## Verify workspace authorization
-
-Use the read-only verifier after provisioning two distinct identities and two
-existing workspaces. The administrator must access both workspaces; the
-ordinary user must belong only to the allowed workspace. Save fresh access
-tokens in files with mode `0600` outside the checkout, using your identity
-provider's supported login flow:
+For example, copy each source image by digest to a tag in your mirror:
 
 ```shell
-uv run --script --python 3.12 deploy/rhoai/verify.py \
-  --namespace research-team \
-  --dashboard-url https://dashboard-research-team.apps.example.com \
-  --admin-role openshell-admin \
-  --admin-token-file /secure/admin-token.txt \
-  --user-token-file /secure/user-token.txt \
-  --allowed-workspace team-a --denied-workspace team-b
+oc image mirror \
+  registry.redhat.io/rhoai/odh-openshell-gateway-rhel9@sha256:<digest> \
+  registry.example.com/rhoai/odh-openshell-gateway-rhel9:rhoai-3.6
 ```
 
-`--context` defaults to the current kubeconfig context; pass it to check
-another context. The verifier checks unauthenticated rejection, gateway
-identity and roles, administrator access to both workspaces, and ordinary-user
-access to one workspace and denial in the other. It opens a temporary
-loopback-only port-forward to the dashboard BFF, so it requires
-`pods/portforward` permission. It performs GET requests only and does not
-change users, memberships, or workloads.
-
-Optional `--other-gateway-token-file` checks rejection of a token for another
-gateway. Confirm that token works on its intended gateway first: an expired or
-otherwise invalid token cannot prove audience isolation. Optional
-`--session-cookie-file` checks the public session endpoint with the Cookie
-header value from an already logged-in browser. `--ca-file` adds a private
-Route CA to system trust. The verifier closes its port-forward on success or
-failure and never follows redirects with credentials or prints tokens.
-Confirm denied cross-workspace access before sharing the deployment; readiness
-and Route admission alone do not prove workspace isolation.
-
-## Rerun and upgrade
-
-Rerun the same command after correcting a failure. Both releases receive the
-generated values with `--reset-values`, including the configured values files,
-so out-of-band Helm value edits are not preserved.
-
-Changing the gateway host, issuer, audience, or client ID is rejected by the
-`openshell-installer` state and needs an explicit identity migration. When hosts
-are omitted, changing the namespace or the cluster apps domain changes the
-derived gateway host and triggers the same check.
-
-The backend is also recorded as `database-mode`. Changing `gateway.database.mode`
-is rejected in either direction; migrate the data explicitly instead. A legacy
-installation whose state has no `database-mode` is treated as SQLite, so set
-`"database": { "mode": "sqlite" }` before rerunning its configuration. Otherwise
-the new PostgreSQL default is rejected with a migration message.
-
-A changed client secret or OIDC CA requires explicit rotation. Set `CTX` to the
-context used for the installation (the `--context` value, or the current
-kubeconfig context when `--context` was not passed), then update the Secret
-while preserving `cookie-secret` and restart the dashboard:
-
-```shell
-CTX=YOUR_INSTALL_CONTEXT
-COOKIE_FILE=$(mktemp)
-oc --context "$CTX" -n openshell-team get secret openshell-dashboard-oidc \
-  -o jsonpath='{.data.cookie-secret}' | base64 -d > "$COOKIE_FILE"
-oc --context "$CTX" -n openshell-team create secret generic openshell-dashboard-oidc \
-  --from-file=client-secret="$CONFIG_DIR/dashboard-client-secret.txt" \
-  --from-file=cookie-secret="$COOKIE_FILE" \
-  --dry-run=client -o yaml | oc --context "$CTX" apply -f -
-rm -f "$COOKIE_FILE"
-oc --context "$CTX" -n openshell-team rollout restart deployment openshell-dashboard
-```
-
-A changed database URI requires the same explicit rotation. The installer
-rejects a `gateway-db-uri.txt` that differs from `openshell-gateway-db`; update
-the Secret and restart the gateway:
-
-```shell
-oc --context "$CTX" -n openshell-team create secret generic openshell-gateway-db \
-  --from-file=uri="$CONFIG_DIR/gateway-db-uri.txt" \
-  --dry-run=client -o yaml | oc --context "$CTX" apply -f -
-oc --context "$CTX" -n openshell-team rollout restart deployment openshell
-```
-
-When the OIDC issuer's CA changes and `oidc.ca_file` is set, also rotate the
-`openshell-oidc-ca` ConfigMap that both releases mount. The Secret commands
-above do not update it, so the gateway and dashboard keep trusting the old CA
-and fail issuer TLS verification; the installer also rejects a rerun until the
-ConfigMap matches the new `ca_file`. Update the ConfigMap and restart both
-workloads:
-
-```shell
-oc --context "$CTX" -n openshell-team create configmap openshell-oidc-ca \
-  --from-file=ca.crt="$CONFIG_DIR/ingress-ca.crt" \
-  --dry-run=client -o yaml | oc --context "$CTX" apply -f -
-oc --context "$CTX" -n openshell-team rollout restart \
-  "$(oc --context "$CTX" -n openshell-team get statefulset,deployment \
-    -l app.kubernetes.io/name=openshell,app.kubernetes.io/instance=openshell -o name)"
-oc --context "$CTX" -n openshell-team rollout restart deployment openshell-dashboard
-```
-
-The gateway runs as Deployment `openshell` in the default PostgreSQL mode and
-as StatefulSet `openshell` in SQLite mode. The selector restarts whichever
-object the release uses without naming its kind.
-
-There is no cross-release transaction or automatic rollback: a gateway success
-followed by a dashboard failure leaves the upgraded gateway in place.
-
-## Remove an installation
-
-The installer has no uninstall subcommand. Set `CTX` to the context used for the
-installation (the `--context` value, or the current kubeconfig context when
-`--context` was not passed), then remove the dashboard first, then the gateway:
-
-```shell
-CTX=YOUR_INSTALL_CONTEXT
-helm uninstall openshell-dashboard -n openshell-team --kube-context "$CTX"
-helm uninstall openshell -n openshell-team --kube-context "$CTX"
-```
-
-The gateway chart's certificate hook creates three Secrets outside the release
-manifest, so `helm uninstall` does not remove them. Delete them and the
-installer-owned authentication objects:
-
-```shell
-oc --context "$CTX" -n openshell-team delete secret \
-  openshell-server-tls openshell-client-tls openshell-jwt-keys
-oc --context "$CTX" -n openshell-team delete secret \
-  openshell-dashboard-oidc openshell-gateway-db
-oc --context "$CTX" -n openshell-team delete configmap openshell-oidc-ca
-```
-
-Optionally delete the installer state ConfigMap and the namespace:
-
-```shell
-oc --context "$CTX" -n openshell-team delete configmap openshell-installer
-oc --context "$CTX" delete namespace openshell-team
-```
-
-Remaining Secrets block a later reinstall and can be reused by a new gateway if
-you keep the same names. `openshell-gateway-db` exists in PostgreSQL mode and
-holds the database password; it is not part of a Helm release, so
-`helm uninstall` leaves it behind. PostgreSQL mode creates no gateway PVC;
-SQLite installs leave the gateway's `openshell-data` PersistentVolumeClaim.
-PersistentVolumeClaims are not deleted by any of these commands; inspect and
-remove them deliberately. The installer never deletes the namespace for you.
-The development PostgreSQL from
-[Development PostgreSQL](#development-postgresql) is not installer-managed;
-delete its Deployment, Service, claim, and Secret separately.
-
-## Install on a disconnected cluster
-
-This section applies when the cluster nodes cannot pull from `ghcr.io`,
-`quay.io`, `registry.redhat.io`, or `registry.access.redhat.com`. The examples
-below use `registry.example.com:8443` as the private registry; substitute your
-own. Read the network scenarios first to see which parts apply to you, and work
-through this section before running the installer.
-
-### Network scenarios
-
-**A. Cluster egress blocked, ingress allowed.** The administrator's
-workstation has internet access and can reach the cluster API and Routes. Run
-`install.py`, the `openshell` CLI, and `verify.py` from that workstation. Helm
-also runs on the workstation: `install.py` pulls both charts with `helm pull`
-and installs them with `helm upgrade`, so the chart artifacts come straight
-from `ghcr.io` and `quay.io` and are never pulled by the cluster. What the
-cluster must pull is every image the charts deploy: the gateway (the certgen
-hook Job reuses the gateway image, so it adds no extra image), the supervisor,
-the sandbox runtime, the dashboard, and oauth2-proxy. Only the images need
-mirroring.
-
-**B. Ingress also blocked (fully air-gapped).** Run `install.py`, the CLI,
-`verify.py`, and the browser from a host inside the network, such as a bastion
-or jump host. That host has no internet, so in addition to the image mirroring
-from scenario A:
-
-- Mirror both Helm charts to the private registry and point the configuration
-  at the mirrors. Pull each chart on a connected host, push it to the registry,
-  and log the installing host in:
-
-  ```shell
-  helm pull oci://ghcr.io/nvidia/openshell/helm-chart --version 0.1.3
-  helm push openshell-0.1.3.tgz oci://registry.example.com:8443/charts
-  helm pull oci://quay.io/ai-openshell/charts/console --version 0.1.5
-  helm push console-0.1.5.tgz oci://registry.example.com:8443/charts
-  helm registry login registry.example.com:8443
-  ```
-
-  Then set `gateway.chart` to `oci://registry.example.com:8443/charts/openshell`
-  and `dashboard.chart` to `oci://registry.example.com:8443/charts/console` in
-  the configuration. Charts are pulled by the host that runs the installer, so
-  no `ImageDigestMirrorSet` entry is involved.
-
-- Bring the `uv`, `helm`, and `kubectl`/`oc` binaries, the `openshell` CLI, and
-  the installer's pinned PyYAML dependency to that host by an approved route.
-  The `curl … install.sh` CLI install command in [Register the gateway and log
-  in](#register-the-gateway-and-log-in) needs GitHub access; install the CLI on
-  a connected host and copy the binary instead.
-
-- The dashboard and gateway Routes are reachable only from inside the network.
-
-### What to mirror
-
-| Artifact | Source | Needed by |
-|---|---|---|
-| Gateway image | `registry.redhat.io/rhoai/odh-openshell-gateway-rhel9` (RHOAI) or `quay.io` (ODH) | gateway Deployment and certgen hook |
-| Supervisor image | `registry.redhat.io/rhoai/odh-openshell-supervisor-rhel9` or `quay.io` | sandbox pods |
-| Sandbox runtime image | `registry.redhat.io/rhoai/odh-openshell-sandbox-rhel9` or `quay.io` | sandbox pods |
-| Dashboard image | `registry.redhat.io/rhoai/odh-openshell-dashboard-rhel9` or `quay.io` | dashboard Deployment |
-| oauth2-proxy image | `registry.access.redhat.com/hi/oauth2-proxy` | dashboard auth proxy |
-| Development PostgreSQL | `registry.access.redhat.com/hi/postgresql` | [Development PostgreSQL](#development-postgresql) |
-| Agent Sandbox operator images | `registry.redhat.io/agent-sandbox` | Agent Sandbox operator |
-| Both Helm charts | `ghcr.io/nvidia/openshell/helm-chart`, `quay.io/ai-openshell/charts/console` | installer (scenario B only) |
-| Custom sandbox base images | your registry | `openshell sandbox create --from` |
-
-The CLI image also appears in the RHOAI CSV but is not used by the installer;
-mirror it only when you deploy it separately.
-
-### RHOAI images
-
-The RHOAI gateway, supervisor, sandbox, and dashboard images are mirrored by
-the RHOAI disconnected-installation procedure; see [Mirroring images to a
-private registry for a disconnected
-installation](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/installing_and_uninstalling_openshift_ai_self-managed_in_a_disconnected_environment/deploying-openshift-ai-in-a-disconnected-environment_install#mirroring-images-to-a-private-registry-for-a-disconnected-installation_install)
-in the RHOAI self-managed documentation.
-After RHOAI is installed, print the exact digests of your build:
+Repeat for the image repositories and digests in the config. Set the matching
+`registry` and `repository` fields to `registry.example.com` and the mirrored
+repository; `gateway.images.sandbox.repository` is a full image path and should
+also point to the mirror. Keep the digest in the config. Ensure the cluster can
+authenticate to the mirror. Use the RHOAI operator CSV to get the image digests
+for the build installed in your cluster:
 
 ```shell
 oc get csv rhods-operator.3.6.0 -n redhat-ods-operator -o yaml | grep -A1 OPENSHELL
 ```
 
-Copy those `registry.redhat.io/rhoai/...@sha256:...` values into the
-configuration's image digests; they must match what was mirrored. The digests
-in the example configurations belong to one RHOAI build and must be replaced
-with your cluster's CSV values. Do not switch to `"tag": "rhoai-3.6"` on a
-disconnected cluster: an `ImageDigestMirrorSet` rewrites only digest pulls, so
-a tag reference still goes to `registry.redhat.io` and fails.
+The Red Hat build of Agent Sandbox installation guide covers OperatorHub
+installation, but does not document disconnected installation. For a
+disconnected cluster, use OpenShift's [Operator Lifecycle Manager guide for
+disconnected environments](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/disconnected_environments/olm-restricted-networks) and [`oc-mirror` v2 ImageSetConfiguration reference](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/disconnected_environments/about-installing-oc-mirror-v2)
+to mirror the Agent Sandbox Operator package and channel from the Red Hat
+Operator catalog matching the cluster's OpenShift version, including its
+bundle and related images. Install the Operator from the generated mirrored
+catalog using **All namespaces on the cluster** and `agent-sandbox-system` as
+the installed namespace, as described in the [Agent Sandbox Operator
+installation procedure](https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.13/html/deploying_red_hat_build_of_agent_sandbox/install-agent-sandbox-overview_agent-sandbox).
 
-Check that `registry.redhat.io/rhoai` is covered by an
-`ImageDigestMirrorSet`, and which sources the cluster already rewrites:
-
-```shell
-oc get imagedigestmirrorset \
-  -o jsonpath='{range .items[*].spec.imageDigestMirrors[*]}{.source}{"\n"}{end}' | sort -u
-```
-
-If `registry.redhat.io/rhoai` is missing, add an entry that maps it to your
-registry with `mirrorSourcePolicy: NeverContactSource`:
+If the machine installing the charts cannot reach the chart registries either,
+mirror both charts and point the installer config or direct Helm commands at
+their mirrored OCI URLs. The host running `install.py` also needs the
+installer's pinned PyYAML dependency available to `uv`. For example:
 
 ```shell
-oc apply -f - <<'EOF'
-apiVersion: config.openshift.io/v1
-kind: ImageDigestMirrorSet
-metadata:
-  name: rhoai-mirror
-spec:
-  imageDigestMirrors:
-    - source: registry.redhat.io/rhoai
-      mirrors:
-        - registry.example.com:8443/rhoai
-      mirrorSourcePolicy: NeverContactSource
-EOF
+helm pull oci://ghcr.io/nvidia/openshell/helm-chart --version 0.1.3
+helm push openshell-0.1.3.tgz oci://registry.example.com/charts
+helm pull oci://quay.io/ai-openshell/charts/console --version 0.1.5
+helm push console-0.1.5.tgz oci://registry.example.com/charts
 ```
 
-Applying an IDMS change rolls out a Machine Config Pool update, which may
-reboot the nodes depending on the OpenShift version. Reuse an existing set
-(for example one generated by
-[oc-mirror](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/disconnected_environments/about-installing-oc-mirror-v2))
-when it already covers a source instead of creating a duplicate.
+Log the installer machine in to the mirror with
+`helm registry login registry.example.com`. Use the chart versions set in your
+config when pulling the charts.
 
-### oauth2-proxy
+## Troubleshooting
 
-The dashboard chart's default auth proxy image
-(`quay.io/oauth2-proxy/oauth2-proxy:v7.15.2`) is pinned by tag, which an IDMS
-cannot rewrite. The RHOAI example configurations therefore override it with
-`dashboard.images.authProxy`, pinned by digest to the public Red Hat
-`hi/oauth2-proxy` image (oauth2-proxy 7.15.6, multi-arch):
+| Symptom                                                              | What to check                                                                                                                                                               |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--check` reports a missing client secret or database URI            | Create the files named by `oidc.client_secret_file` and `gateway.database.uri_file`. Their paths are relative to `config.json`.                                             |
+| Preflight cannot find the Agent Sandbox controller or a StorageClass | Install the operator and confirm a default class is available for workspace volumes.                                                                                        |
+| The gateway is not ready                                             | Inspect `oc -n <namespace> logs deployment/openshell` and check the PostgreSQL URI, credentials, network access, and any egress policy.                                     |
+| OIDC login fails or reports an `x509` error                          | Confirm `oidc.issuer`, the browser callback URL, and the client settings. For a private or self-signed issuer certificate, configure `oidc.ca_file` as described above.     |
+| Pods show `ImagePullBackOff`                                         | Confirm each image is present in the mirror, the config points to the mirror with the correct digest, and the cluster can authenticate to it.                               |
+| Helm cannot pull a chart                                             | The machine running `install.py` or Helm must reach `ghcr.io` and `quay.io`, or the charts must be mirrored and their URLs updated in the installer config or Helm command. |
 
-```json
-"authProxy": {
-  "registry": "registry.access.redhat.com",
-  "repository": "hi/oauth2-proxy",
-  "digest": "sha256:fa4516e1c5bf6be0a7fc5291adc536e867951deee3449422a8bcfdef173c8edf"
-}
-```
+## Related guide
 
-On a disconnected cluster, mirror this image like the others and add
-`registry.access.redhat.com/hi` to an IDMS entry; one entry covers both this
-image and the development PostgreSQL, which come from the same repository. On
-a connected cluster, nothing changes: the image is public and the digest pin
-also works without a mirror. A custom proxy image goes in the same
-`dashboard.images.authProxy` block with `registry`, `repository`, and `digest`
-or `tag`; the installer maps it to the chart's `authProxy.image` value.
-
-### Agent Sandbox operator
-
-The Agent Sandbox Operator is a prerequisite on any cluster. On a disconnected
-cluster, follow [its disconnected
-documentation](https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.13/html/deploying_red_hat_build_of_agent_sandbox/index).
-Its images live under `registry.redhat.io/agent-sandbox`; an unmapped source
-shows up as `BundleUnpackFailed` when the operator catalog is unpacked.
-
-### Sandbox images
-
-Only digest references from mirrored sources can be pulled. `openshell
-sandbox create --from <image>` therefore needs an image that exists in the
-mirror. The default `nvcr.io` sandbox base image is not part of these mirrors;
-mirror it separately or point `--from` at a mirrored image.
-
-### StorageClass on clusters with static PersistentVolumes
-
-A disconnected cluster provisioned with static, class-less PersistentVolumes
-has no default StorageClass, and preflight rejects the install in PostgreSQL
-mode until one exists. Create a StorageClass with no provisioner, label the
-existing static PVs with it, and select it for sandbox workspace volumes:
-
-```shell
-oc apply -f - <<'EOF'
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: static-pv
-provisioner: kubernetes.io/no-provisioner
-volumeBindingMode: WaitForFirstConsumer
-EOF
-oc get pv -o go-template='{{range .items}}{{if not .spec.claimRef}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' |
-  xargs -I{} oc patch pv {} -p '{"spec":{"storageClassName":"static-pv"}}'
-```
-
-Then set `server.workspaceStorageClass: static-pv` in a
-[gateway values override](#operational-values-overrides) so workspace PVCs
-bind to the static PVs. Without the override, the chart omits
-`storageClassName` and the PVCs wait for a default class that does not exist.
-
-### Development PostgreSQL
-
-The development database deploys by digest; see [Development
-PostgreSQL](#development-postgresql) and the mirroring steps in [Disconnected
-clusters: mirror the
-images](keycloak-dev-guide.md#disconnected-clusters-mirror-the-images) in the
-Keycloak guide, which use the same `hi` repository and IDMS entry as
-oauth2-proxy.
-
-## Troubleshoot common failures
-
-| Symptom                                                            | Cause and fix                                                                                                                                                                                                                                                                                                                                               |
-| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `oidc.client_secret_file is required for the first install`        | Create the client secret file before `--check`, or reuse installer state from an earlier successful install.                                                                                                                                                                                                                                                |
-| `Missing or empty gateway.database.uri_file`                       | Create `gateway-db-uri.txt` beside the configuration (see [Save the database URI](#save-the-database-uri)), or set `gateway.database.mode` to `sqlite`.                                                                                                                                                                                                     |
-| `Database URI differs from Secret openshell-gateway-db`            | Rotate the Secret explicitly and restart the gateway; the installer does not rewrite an existing database credential.                                                                                                                                                                                                                                       |
-| Gateway is not ready and logs show database connection errors      | The installer does not preflight connectivity. Check that the namespace can reach the database host and port, that the URI credentials work, and that any TLS parameters in the URI match the server.                                                                                                                                                       |
-| `Database backend differs from the installer state`                | The recorded backend and the configured mode differ. Existing SQLite installs must set `"database": { "mode": "sqlite" }`; migrate the data explicitly before switching either way.                                                                                                                                                                         |
-| No default StorageClass                                            | Preflight fails, or a created sandbox never starts. The sandbox's workspace PVC stays Pending when no class can bind it. In PostgreSQL mode, mark a class default or set `server.workspaceStorageClass` in a [gateway values override](#operational-values-overrides) to an existing class. SQLite mode additionally needs a default block-backed class for the gateway's database PVC; the installer does not accept an override for that claim. Check `oc get storageclass` and `oc -n <namespace> get pvc`. |
-| Preflight fails with `This installer supports amd64 clusters only` | The cluster has non-amd64 nodes, including a mixed amd64/arm64 cluster. Mixed clusters are not supported because the Red Hat Build of Agent Sandbox Operator is not available on arm64; run the installer against an amd64-only cluster.                                                                                                                    |
-| Agent Sandbox readiness fails                                      | Install or start the Agent Sandbox controller, or override `agent_sandbox_namespace` and `agent_sandbox_deployment`.                                                                                                                                                                                                                                        |
-| `x509` error during `openshell gateway add`                        | Distinguish the two trust paths: copy the gateway CA into the CLI mtls directory, and build the `SSL_CERT_FILE` bundle for OIDC discovery.                                                                                                                                                                                                                  |
-| `dns error` from `openshell status` after `gateway add` succeeds   | The gateway host is outside the router's `*.apps.<domain>` wildcard, so it has no DNS record. Registration only contacts the OIDC issuer; `status` is the first gateway connection. Correct `gateway.host`, or remove it to derive `gateway-<namespace>.<apps-domain>` from the ingress domain. Reinstall when the installer already recorded the old host. |
-| `Could not resolve the OpenShift apps domain`                      | Grant read access to `ingresses.config.openshift.io/cluster`, or set `gateway.host` and `dashboard.host` explicitly.                                                                                                                                                                                                                                        |
-| HTTP 403 after login                                               | The user holds no role in `allowed_roles`, or no group in `allowed_groups` for generic OIDC. Add a listed role or group to the user, then rerun the install command.                                                                                                                                                                                        |
-| Gateway host or issuer change is rejected                          | The installer state records the original identity. With omitted hosts, a namespace or ingress-domain change also changes the gateway host. Migrate the certificate and endpoint explicitly instead of editing state.                                                                                                                                        |
-| `ImagePullBackOff` on `registry.redhat.io`, `registry.access.redhat.com`, or `quay.io` images | On a disconnected cluster, the image is missing from the mirror or no `ImageDigestMirrorSet` entry rewrites its registry; a tag reference where a digest is needed fails the same way. See [Install on a disconnected cluster](#install-on-a-disconnected-cluster).                                                                                          |
-| Installer cannot download the Helm charts                           | The workstation running `install.py` cannot reach `ghcr.io` or `quay.io`. Run it from a host with internet access (scenario A), or mirror the charts and point `gateway.chart` and `dashboard.chart` at the mirror (scenario B); see [Install on a disconnected cluster](#install-on-a-disconnected-cluster).                                                |
-
-For Keycloak-specific failures, see
-[Troubleshooting](keycloak-dev-guide.md#troubleshooting) in the Keycloak
-development guide.
-
-## Contributor checks
-
-The `RHOAI Installer` workflow runs both suites for changes under
-`deploy/rhoai/`. Run the same checks locally:
-
-```shell
-uv run --script --python 3.12 deploy/rhoai/test_install.py
-uv run --no-project --python 3.12 deploy/rhoai/test_verify.py
-uvx ruff==0.14.14 check deploy/rhoai
-uvx ruff==0.14.14 format --check deploy/rhoai
-mise run markdown:lint
-```
-
-The installer and verifier tests need no cluster credentials or identity
-provider. For source-chart rendering, use `--check` with
-`--gateway-chart-directory` and `--dashboard-chart-directory`; the installer
-rejects those overrides for installation.
-
-## Related documentation
-
-- [config-examples/README.md](config-examples/README.md): example
-  configurations and values files.
-- [keycloak-dev-guide.md](keycloak-dev-guide.md): development Keycloak
-  deployment for OpenShell.
-- [verify.py](verify.py): read-only authorization verification with
-  administrator and ordinary-user tokens.
+- [Keycloak development guide](keycloak-dev-guide.md): deploy Keycloak for
+  development and configure its OpenShell clients.
