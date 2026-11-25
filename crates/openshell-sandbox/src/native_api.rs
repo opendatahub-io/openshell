@@ -19,7 +19,10 @@ pub trait BoundaryProcess: Send + Sync {
             "process attachment is not supported".to_string(),
         ))
     }
-    /// Await terminal status (stable across repeated calls).
+    /// Await terminal status (stable across repeated calls). Implementations
+    /// must deliver end-of-file on output streams they retain before the
+    /// status resolves; descriptors a descendant still holds are the
+    /// consumer's drain-timeout concern, not this contract's.
     async fn wait(&self) -> Result<BoundaryExitStatus, BackendError>;
     /// Deliver a signal to the process or its group.
     async fn signal(&self, signal: BoundarySignal) -> Result<(), BackendError>;

@@ -18,7 +18,8 @@ use crate::auth::workspace_authz::{
 use crate::compute::{MutationScope, SandboxDeletePreconditions};
 use crate::pagination::Pagination;
 use crate::persistence::{
-    ObjectLabels, ObjectListQuery, ObjectType, WriteCondition, generate_name,
+    ObjectLabels, ObjectListQuery, ObjectType, PersistenceResult, Store, WriteCondition,
+    generate_name,
 };
 use crate::tracing_bus::CursoredEvent;
 use crate::watch_cursor::WatchCursor;
@@ -2125,7 +2126,7 @@ async fn update_sandbox_cas<F>(
     sandbox_id: &str,
     expected_resource_version: u64,
     mut mutate: F,
-) -> crate::persistence::PersistenceResult<Sandbox>
+) -> PersistenceResult<Sandbox>
 where
     F: FnMut(&mut Sandbox),
 {
@@ -3482,6 +3483,57 @@ async fn sandbox_relay_reachable(
     }
 }
 
+/// Maximum number of random-name attempts when persisting a new SSH session.
+const SSH_SESSION_NAME_ATTEMPTS: usize = 3;
+const _: () = assert!(SSH_SESSION_NAME_ATTEMPTS >= 1);
+
+/// Persist a new SSH session record, retrying with a fresh random name when
+/// the insert collides with an existing object name in the workspace.
+///
+/// Session names are 6 random lowercase letters and records linger for up to
+/// the configured TTL (about two hours with the defaults), so a busy
+/// workspace can make a freshly drawn name collide on `objects_name_uq`. A
+/// redraw is effectively certain to succeed, so the insert is retried with a
+/// regenerated name instead of failing the connection. Any other error,
+/// including a primary-key collision on the token, is returned to the caller.
+async fn persist_ssh_session(
+    store: &Store,
+    session: &mut SshSession,
+    labels_json: Option<&str>,
+) -> PersistenceResult<()> {
+    // Every caller validates metadata before persisting; the redraw below
+    // relies on it being present.
+    debug_assert!(session.metadata.is_some());
+    for attempt in 1..=SSH_SESSION_NAME_ATTEMPTS {
+        let result = store
+            .create_relaxed(
+                SshSession::object_type(),
+                &session.token,
+                session.object_name(),
+                session.object_workspace(),
+                &session.encode_to_vec(),
+                labels_json,
+            )
+            .await;
+        match result {
+            Ok(_) => return Ok(()),
+            Err(error)
+                if attempt < SSH_SESSION_NAME_ATTEMPTS
+                    && error.is_unique_violation_on("objects_name_uq") =>
+            {
+                // A session without metadata cannot be redrawn; surface the
+                // collision instead of retrying an identical insert.
+                let Some(metadata) = session.metadata.as_mut() else {
+                    return Err(error);
+                };
+                metadata.name = generate_name();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final attempt returns its error instead of retrying")
+}
+
 pub(super) async fn handle_create_ssh_session(
     state: &Arc<ServerState>,
     request: Request<CreateSshSessionRequest>,
@@ -3509,7 +3561,7 @@ pub(super) async fn handle_create_ssh_session(
     } else {
         0
     };
-    let session = SshSession {
+    let mut session = SshSession {
         metadata: Some(ObjectMeta {
             id: token.clone(),
             name: generate_name(),
@@ -3542,16 +3594,7 @@ pub(super) async fn handle_create_ssh_session(
                 .map_err(|e| Status::internal(format!("failed to serialize labels: {e}")))?,
         )
     };
-    state
-        .store
-        .create_relaxed(
-            SshSession::object_type(),
-            &token,
-            session.object_name(),
-            session.object_workspace(),
-            &session.encode_to_vec(),
-            session_labels_json.as_deref(),
-        )
+    persist_ssh_session(&state.store, &mut session, session_labels_json.as_deref())
         .await
         .map_err(|e| Status::internal(format!("persist ssh session failed: {e}")))?;
     super::mutation_audit::record_ssh_session(session.object_name());
@@ -9817,6 +9860,94 @@ mod tests {
             .unwrap();
         assert!(session1.is_some());
         assert!(session2.is_some());
+    }
+
+    fn collision_test_session(id: &str, name: &str) -> SshSession {
+        SshSession {
+            metadata: Some(ObjectMeta {
+                id: id.to_string(),
+                name: name.to_string(),
+                created_time: None,
+                labels: HashMap::new(),
+                resource_version: 0,
+                annotations: HashMap::new(),
+                workspace: "default".to_string(),
+                deletion_time: None,
+            }),
+            sandbox_id: "sandbox-work".to_string(),
+            token: id.to_string(),
+            revoked: false,
+            expiration_time: openshell_core::time::optional_timestamp_from_legacy_millis(0)
+                .unwrap(),
+        }
+    }
+
+    async fn assert_ssh_session_name_collision_is_retried(store: &Store) {
+        // Occupy the name the new session draws first.
+        store
+            .put_message(&collision_test_session("existing-token", "collided"))
+            .await
+            .unwrap();
+
+        let mut session = collision_test_session("fresh-token", "collided");
+        persist_ssh_session(store, &mut session, None)
+            .await
+            .expect("a name collision should be retried with a fresh name");
+
+        let stored = store
+            .get_message::<SshSession>("fresh-token")
+            .await
+            .unwrap()
+            .expect("session should be stored");
+        assert_ne!(stored.object_name(), "collided");
+        assert_eq!(stored.object_name(), session.object_name());
+        assert_eq!(stored.token, "fresh-token");
+    }
+
+    #[tokio::test]
+    async fn create_ssh_session_retries_on_name_collision() {
+        let state = test_server_state().await;
+        assert_ssh_session_name_collision_is_retried(&state.store).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database in OPENSHELL_TEST_POSTGRES_URL; run mise run test:rust:postgres"]
+    async fn postgres_create_ssh_session_retries_on_name_collision() {
+        let schema =
+            crate::persistence::test_postgres::TestSchema::create("ssh_name_collision").await;
+        let store = schema.connect_store().await;
+        assert_ssh_session_name_collision_is_retried(&store).await;
+        drop(store);
+        schema.drop_schema().await;
+    }
+
+    #[tokio::test]
+    async fn persist_ssh_session_returns_token_collision_without_redraw() {
+        let state = test_server_state().await;
+        // A record already owns the token, so the insert trips the primary
+        // key, not the workspace name constraint.
+        state
+            .store
+            .put_message(&collision_test_session("dup-token", "occupied-name"))
+            .await
+            .unwrap();
+
+        let mut session = collision_test_session("dup-token", "unrelated-name");
+        let error = persist_ssh_session(&state.store, &mut session, None)
+            .await
+            .expect_err("a primary-key collision must surface to the caller");
+        assert!(
+            matches!(
+                error,
+                crate::persistence::PersistenceError::UniqueViolation { .. }
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            session.object_name(),
+            "unrelated-name",
+            "the name must not be redrawn for a non-name violation"
+        );
     }
 
     #[tokio::test]

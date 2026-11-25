@@ -103,6 +103,18 @@ impl LocalBoundaryExec {
                 BackendError::Process(format!("clone runtime helper output: {error}"))
             })?,
         ];
+        // Cloned before the worker spawns so a failure fails the exec without
+        // leaving a detached worker task behind. The waiter releases these
+        // copies once the worker finishes; the copies the process retains for
+        // `signal` would otherwise keep the output socket open after a normal
+        // exit, and the supervisor-side reader would never observe end-of-file.
+        let release_sockets = cancel_sockets
+            .iter()
+            .map(std::os::unix::net::UnixStream::try_clone)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                BackendError::Process(format!("clone runtime helper sockets: {error}"))
+            })?;
         let stdin = async_socket(stdin_client)?.into_split().1;
         let stdout = async_socket(stdout_client)?.into_split().0;
         let stderr = async_socket(stderr_client)?.into_split().0;
@@ -117,7 +129,7 @@ impl LocalBoundaryExec {
                     message
                 })
         });
-        let process = RuntimeHelperProcess::new(worker, cancel_sockets);
+        let process = RuntimeHelperProcess::new(worker, cancel_sockets, release_sockets);
         Ok(ExecSession {
             process,
             stdin: Some(Box::new(stdin)),
@@ -596,6 +608,7 @@ impl RuntimeHelperProcess {
     fn new(
         worker: tokio::task::JoinHandle<Result<(), String>>,
         cancel_sockets: Vec<StdUnixStream>,
+        release_sockets: Vec<StdUnixStream>,
     ) -> Arc<Self> {
         let result = Arc::new(std::sync::Mutex::new(None));
         let exited = Arc::new(tokio::sync::Notify::new());
@@ -611,6 +624,12 @@ impl RuntimeHelperProcess {
                 Err(error) if error.is_cancelled() => BoundaryExitStatus::Signaled(9),
                 Ok(Err(_)) | Err(_) => BoundaryExitStatus::Exited(1),
             };
+            // Shutdown, not drop: the struct's own copies still reference the
+            // same sockets, so only an explicit shutdown delivers end-of-file
+            // (and a write error on the input side) to the supervisor.
+            for socket in &release_sockets {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
             if let Ok(mut slot) = result.lock() {
                 *slot = Some(status);
             }
@@ -1086,6 +1105,81 @@ mod tests {
         assert_eq!(
             std::fs::read(root.path().join("boundary.txt")).unwrap(),
             b"through boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn sftp_helper_output_reaches_eof_after_normal_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let mut executor = executor();
+        executor.base_workdir = Some(root.path().to_string_lossy().into_owned());
+        let mut session = executor
+            .exec(ExecSpec {
+                program: String::new(),
+                args: Vec::new(),
+                shell: None,
+                runtime_helper: Some(openshell_isolation_interface::contract::RuntimeHelper::Sftp),
+                env: Vec::new(),
+                workdir: None,
+                pty: false,
+            })
+            .await
+            .expect("start SFTP helper");
+        let process = session.process.clone();
+        let stdout = session.stdout;
+        let stdin = session.stdin.take().expect("SFTP input stream");
+        // Mirror the supervisor: a forwarding pump owns the helper's output
+        // and keeps reading it even after the client is gone. The session
+        // drain waits for this end-of-file before publishing the exit
+        // status, so a stalled stream turns a successful transfer into exit
+        // code 74.
+        let (pump_end, client_end) = tokio::io::duplex(64 * 1024);
+        let forwarder = tokio::spawn(async move {
+            let mut stdout = stdout;
+            let mut sink = pump_end;
+            let mut buf = [0u8; 4096];
+            let mut forwarded = 0u64;
+            loop {
+                let read = stdout.read(&mut buf).await.expect("read helper output");
+                if read == 0 {
+                    return forwarded;
+                }
+                forwarded += read as u64;
+                // The client can be gone already; only end-of-file on the
+                // helper's output decides when the drain finishes.
+                let _ = sink.write_all(&buf[..read]).await;
+            }
+        });
+        let stream = tokio::io::join(client_end, stdin);
+        let client = russh_sftp::client::SftpSession::new(stream)
+            .await
+            .expect("start SFTP client");
+        let mut file = client.create("eof.txt").await.expect("create file");
+        file.write_all(b"eof check").await.expect("write file");
+        drop(file);
+        drop(client);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), process.wait())
+                .await
+                .expect("SFTP helper exits")
+                .expect("SFTP helper status"),
+            BoundaryExitStatus::Exited(0)
+        );
+        // End-of-file must arrive with the exit, not eventually: the drain
+        // publishes the status as soon as the output closes, so a deferred
+        // release would stall it. The grace only covers task scheduling.
+        let forwarded_bytes =
+            tokio::time::timeout(std::time::Duration::from_millis(250), forwarder)
+                .await
+                .expect("SFTP helper output reaches end-of-file")
+                .expect("forwarding task joins");
+        assert!(
+            forwarded_bytes > 0,
+            "SFTP handshake and responses flow through the pump"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("eof.txt")).unwrap(),
+            b"eof check"
         );
     }
 
