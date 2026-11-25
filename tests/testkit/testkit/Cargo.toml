@@ -18,6 +18,7 @@ name = "testkit"
 openshell-bootstrap = { path = "../../../crates/openshell-bootstrap" }
 openshell-core = { path = "../../../crates/openshell-core", default-features = false }
 openshell-policy = { path = "../../../crates/openshell-policy" }
+openshell-providers = { path = "../../../crates/openshell-providers" }
 openshell-sdk = { path = "../../../crates/openshell-sdk" }
 openshell-testkit-macros = { path = "../testkit-macros" }
 clap = { version = "4", features = ["derive"] }

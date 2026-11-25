@@ -25,9 +25,10 @@ use openshell_core::proto::{
     ListSandboxesResponse, PlatformEvent, Provider, ProviderResponse, RevokeSshSessionRequest,
     RevokeSshSessionResponse, Sandbox, SandboxCondition, SandboxLogLine, SandboxPhase,
     SandboxResponse, SandboxStatus, SandboxStreamEvent, SandboxTemplateResponse,
-    SandboxWorkloadTemplate, ServiceStatus, SettingValue, TcpForwardFrame, TcpForwardInit,
-    TcpRelayTarget, UpdateProviderRequest, WatchSandboxRequest, sandbox_stream_event,
-    tcp_forward_frame, tcp_forward_init,
+    SandboxWorkloadTemplate, ServiceAuthorizationMode, ServiceBackendHttpVersion, ServiceEndpoint,
+    ServiceStatus, SettingValue, TcpForwardFrame, TcpForwardInit, TcpRelayTarget,
+    UpdateProviderRequest, WatchSandboxRequest, sandbox_stream_event, tcp_forward_frame,
+    tcp_forward_init,
 };
 use openshell_core::rpc_error::StatusExt as _;
 use openshell_server::test_support::grpc::open_shell_server::{OpenShell, OpenShellServer};
@@ -90,6 +91,7 @@ struct SandboxState {
     /// `get_sandbox_phases`.
     get_sandbox_script: Arc<Mutex<VecDeque<GetSandboxOutcome>>>,
     expose_service_requests: Arc<Mutex<Vec<openshell_core::proto::ExposeServiceRequest>>>,
+    expose_service_supports_http2: Arc<AtomicBool>,
     fail_delete_sandbox_message: Arc<Mutex<Option<String>>>,
     stop_response: Arc<Mutex<Option<Sandbox>>>,
     vm_error_after_started: Arc<AtomicBool>,
@@ -541,17 +543,26 @@ impl OpenShell for TestOpenShell {
         &self,
         request: tonic::Request<openshell_core::proto::ExposeServiceRequest>,
     ) -> Result<Response<openshell_core::proto::ServiceEndpointResponse>, Status> {
+        let request = request.into_inner();
+        let mut endpoint = ServiceEndpoint::default();
+        if self
+            .state
+            .expose_service_supports_http2
+            .load(Ordering::SeqCst)
+        {
+            endpoint.backend_http_version = request.backend_http_version;
+        }
         self.state
             .expose_service_requests
             .lock()
             .await
-            .push(request.into_inner());
+            .push(request);
         Ok(Response::new(
             openshell_core::proto::ServiceEndpointResponse {
                 application_url: String::new(),
                 gateway_url: String::new(),
                 url: "https://default--sandbox.openshell.localhost:17670/".to_string(),
-                ..Default::default()
+                endpoint: Some(endpoint),
             },
         ))
     }
@@ -2954,8 +2965,7 @@ async fn sandbox_create_exposes_service_after_ready_and_keeps_sandbox() {
                     name: Some("sandbox"),
                     keep: false,
                     expose: Some(4500),
-                    expose_authorization_mode:
-                        openshell_core::proto::ServiceAuthorizationMode::BearerPassthrough,
+                    expose_authorization_mode: ServiceAuthorizationMode::BearerPassthrough,
                     detach: true,
                     ..test_config()
                 },
@@ -2973,7 +2983,7 @@ async fn sandbox_create_exposes_service_after_ready_and_keeps_sandbox() {
             assert_eq!(create_requests[0].service_exposures[0].target_port, 4500);
             assert_eq!(
                 create_requests[0].service_exposures[0].authorization_mode(),
-                openshell_core::proto::ServiceAuthorizationMode::BearerPassthrough
+                ServiceAuthorizationMode::BearerPassthrough
             );
             assert!(expose_service_requests(&server).await.is_empty());
         })
@@ -2990,7 +3000,8 @@ async fn service_expose_forwards_bearer_passthrough_mode() {
         "sandbox",
         "codex",
         4500,
-        openshell_core::proto::ServiceAuthorizationMode::BearerPassthrough,
+        ServiceAuthorizationMode::BearerPassthrough,
+        ServiceBackendHttpVersion::Http1,
         "default",
         &tls,
     )
@@ -3001,7 +3012,46 @@ async fn service_expose_forwards_bearer_passthrough_mode() {
     assert_eq!(requests.len(), 1);
     assert_eq!(
         requests[0].authorization_mode(),
-        openshell_core::proto::ServiceAuthorizationMode::BearerPassthrough
+        ServiceAuthorizationMode::BearerPassthrough
+    );
+}
+
+#[tokio::test]
+async fn service_expose_requires_gateway_confirmation_for_http2() {
+    let server = run_server().await;
+    let tls = test_tls(&server);
+    let expose = || {
+        run::service_expose(
+            &server.endpoint,
+            "sandbox",
+            "agent",
+            50051,
+            ServiceAuthorizationMode::Strip,
+            ServiceBackendHttpVersion::Http2,
+            "default",
+            &tls,
+        )
+    };
+
+    let error = expose().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("did not confirm the HTTP/2 backend")
+    );
+
+    server
+        .openshell
+        .state
+        .expose_service_supports_http2
+        .store(true, Ordering::SeqCst);
+    expose().await.expect("gateway confirmed HTTP/2");
+
+    let requests = expose_service_requests(&server).await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].backend_http_version(),
+        ServiceBackendHttpVersion::Http2
     );
 }
 

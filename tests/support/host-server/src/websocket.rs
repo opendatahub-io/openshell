@@ -35,8 +35,10 @@ impl WebSocketRecorder {
     pub async fn start() -> Result<Self> {
         let state = Arc::new(WebSocketState::default());
         let task_state = Arc::clone(&state);
-        let server =
-            Server::start(move |stream| accept_websocket(stream, Arc::clone(&task_state))).await?;
+        let server = Server::start(0, move |stream| {
+            accept_websocket(stream, Arc::clone(&task_state))
+        })
+        .await?;
         Ok(Self {
             port: server.port,
             state,
@@ -98,7 +100,8 @@ impl WebSocketRecorder {
 
 async fn accept_websocket(mut stream: TcpStream, state: Arc<WebSocketState>) {
     let _ = stream.set_nodelay(true);
-    let Some(request) = read_request(&mut stream, &mut Vec::new()).await else {
+    let local_addr = stream.local_addr().ok();
+    let Some(request) = read_request(&mut stream, local_addr, &mut Vec::new()).await else {
         return;
     };
     let Some(key) = header(&request.head, "sec-websocket-key") else {

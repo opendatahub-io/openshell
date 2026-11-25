@@ -44,9 +44,10 @@ impl TcpServer {
     async fn start(mode: Mode) -> Result<Self> {
         let received = Arc::new(Mutex::new(Vec::new()));
         let task_received = Arc::clone(&received);
-        let server =
-            Server::start(move |stream| serve(stream, mode.clone(), Arc::clone(&task_received)))
-                .await?;
+        let server = Server::start(0, move |stream| {
+            serve(stream, mode.clone(), Arc::clone(&task_received))
+        })
+        .await?;
         Ok(Self {
             port: server.port,
             received,

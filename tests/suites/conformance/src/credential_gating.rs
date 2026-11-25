@@ -18,7 +18,9 @@ use sandbox_clients_support::{self as clients, http, scripts};
 use serde_json::json;
 use testkit::policy::{self, Access, Endpoint as _};
 use testkit::sdk::raw::proto;
-use testkit::{Context, Error, GrpcCode, PYTHON_BINARIES, Result, ResultExt as _, Sandbox};
+use testkit::{
+    Context, Credential, Error, GrpcCode, PYTHON_BINARIES, Profile, Result, ResultExt as _, Sandbox,
+};
 
 const BASH: &str = "/usr/bin/bash";
 
@@ -194,15 +196,12 @@ async fn policy_binding_updates_provider_environment_live(cx: &mut Context) -> t
 #[testkit::test]
 async fn profile_rest_endpoint_rewrites_header_and_body(cx: &mut Context) -> testkit::Result {
     let server = HttpRecorder::start("ok").await?;
-    let sandbox = profile_endpoint_sandbox(
-        cx,
-        "rwrt",
-        &format!(
-            "{{host: {TEST_HOST}, port: {}, path: /probe, protocol: rest, access: full, \
-             enforcement: enforce, request_body_credential_rewrite: true}}",
-            server.port
-        ),
-    )
+    let sandbox = profile_endpoint_sandbox(cx, "rwrt", server.port, |ep| {
+        ep.rest(Access::Full)
+            .path("/probe")
+            .enforce()
+            .request_body_credential_rewrite(true);
+    })
     .await?;
     let token = provider_token(&sandbox).await?;
     let body = json!({ "credential": token }).to_string();
@@ -245,15 +244,10 @@ async fn profile_rest_endpoint_rewrites_header_and_body(cx: &mut Context) -> tes
 #[testkit::test]
 async fn profile_websocket_endpoint_rewrites_text_frames(cx: &mut Context) -> testkit::Result {
     let server = WebSocketRecorder::start().await?;
-    let sandbox = profile_endpoint_sandbox(
-        cx,
-        "wstxt",
-        &format!(
-            "{{host: {TEST_HOST}, port: {}, path: /ws, protocol: websocket, \
-             enforcement: enforce, access: read-write, websocket_credential_rewrite: true}}",
-            server.port
-        ),
-    )
+    let sandbox = profile_endpoint_sandbox(cx, "wstxt", server.port, |ep| {
+        ep.websocket(Access::ReadWrite).path("/ws").enforce();
+        ep.websocket_credential_rewrite = true;
+    })
     .await?;
     sandbox
         .run_python(
@@ -380,31 +374,30 @@ async fn send_binary_frame(
 /// `endpoints`, its profile declares the REST and WebSocket ports as its
 /// endpoints; without, a policy must bind the provider explicitly.
 async fn install_gating_provider(cx: &Context, endpoints: Option<(u16, u16)>) -> Result<String> {
-    let endpoints = endpoints.map_or_else(Vec::new, |(rest, websocket)| {
-        vec![
-            format!("{{host: {TEST_HOST}, port: {rest}, protocol: rest, access: full}}"),
-            format!(
-                "{{host: {TEST_HOST}, port: {websocket}, protocol: websocket, access: read-write}}"
-            ),
-        ]
-    });
-    install_provider_with_endpoints(cx, &endpoints).await
+    let mut profile = gating_profile(&cx.name("cg"));
+    if let Some((rest, websocket)) = endpoints {
+        profile = profile
+            .endpoint(TEST_HOST, rest, |ep| {
+                ep.rest(Access::Full);
+            })
+            .endpoint(TEST_HOST, websocket, |ep| {
+                ep.websocket(Access::ReadWrite);
+            });
+    }
+    install_gating_profile(cx, &profile).await
 }
 
-/// A long-running sandbox with a provider from
-/// [`install_provider_with_endpoints`] whose profile declares `endpoint`, a
-/// YAML flow mapping, and a policy that allows the same endpoint.
-async fn profile_endpoint_sandbox(cx: &Context, suffix: &str, endpoint: &str) -> Result<Sandbox> {
-    let provider = install_provider_with_endpoints(cx, &[endpoint.to_string()]).await?;
-    let policy = policy::base_with(&format!(
-        "network_policies:
-  credential_gating:
-    name: credential_gating
-    endpoints: [{endpoint}]
-    binaries: {binaries}
-",
-        binaries = policy::binaries_yaml(PYTHON_BINARIES),
-    ))?;
+/// A long-running sandbox with the same endpoint in its provider profile and policy.
+async fn profile_endpoint_sandbox(
+    cx: &Context,
+    suffix: &str,
+    port: u16,
+    configure: impl Fn(&mut proto::NetworkEndpoint),
+) -> Result<Sandbox> {
+    let profile = gating_profile(&cx.name("cg")).endpoint(TEST_HOST, port, &configure);
+    let provider = install_gating_profile(cx, &profile).await?;
+    let mut policy = policy::base();
+    configure(allow_host(&mut policy, "credential_gating", port));
     create_sandbox(cx, suffix, policy, &[&provider]).await
 }
 
@@ -419,55 +412,42 @@ async fn install_bound_provider(
     port: u16,
 ) -> Result<String> {
     let name = cx.name(suffix);
-    let profile = format!(
-        "id: {name}
-display_name: E2E static endpoint binding
-category: other
-credentials:
-  - name: bound_token
-    env_vars: [{env_var}]
-    required: true
-    auth_style: bearer
-    header_name: authorization
-endpoints:
-  - {{host: {TEST_HOST}, port: {port}, path: /allowed/**, protocol: rest, access: full, enforcement: enforce}}
-binaries: [{BASH}]
-"
-    );
+    let profile = Profile::new(&name)
+        .display_name("E2E static endpoint binding")
+        .credential(bearer_credential("bound_token", env_var))
+        .endpoint(TEST_HOST, port, |ep| {
+            ep.rest(Access::Full).path("/allowed/**").enforce();
+        })
+        .binaries([BASH])
+        .to_yaml()?;
     cx.install_provider(&name, &profile, &[(env_var, secret)])
         .await?;
     Ok(name)
 }
 
-/// Install a run-unique provider holding `TEST_SECRET` in `TOKEN_ENV`, whose
-/// profile declares `endpoints`, each a YAML flow mapping.
-async fn install_provider_with_endpoints(cx: &Context, endpoints: &[String]) -> Result<String> {
-    let name = cx.name("cg");
-    let endpoints = if endpoints.is_empty() {
-        String::new()
-    } else {
-        format!("endpoints: [{}]\n", endpoints.join(", "))
-    };
-    let binaries: String = PYTHON_BINARIES
-        .iter()
-        .map(|path| format!("  - path: {path}\n"))
-        .collect();
-    let profile = format!(
-        "id: {name}
-display_name: E2E Credential Gating
-category: other
-credentials:
-  - name: token
-    env_vars: [{TOKEN_ENV}]
-    required: true
-    auth_style: bearer
-    header_name: authorization
-{endpoints}binaries:
-{binaries}"
-    );
-    cx.install_provider(&name, &profile, &[(TOKEN_ENV, TEST_SECRET)])
-        .await?;
-    Ok(name)
+fn bearer_credential(name: &str, env_var: &str) -> Credential {
+    Credential::new(name)
+        .env_var(env_var)
+        .required()
+        .auth_style("bearer")
+        .header_name("authorization")
+}
+
+fn gating_profile(name: &str) -> Profile {
+    Profile::new(name)
+        .display_name("E2E Credential Gating")
+        .credential(bearer_credential("token", TOKEN_ENV))
+        .binaries(PYTHON_BINARIES.iter().copied())
+}
+
+async fn install_gating_profile(cx: &Context, profile: &Profile) -> Result<String> {
+    cx.install_provider(
+        profile.id(),
+        &profile.to_yaml()?,
+        &[(TOKEN_ENV, TEST_SECRET)],
+    )
+    .await?;
+    Ok(profile.id().to_string())
 }
 
 fn sandbox_with(

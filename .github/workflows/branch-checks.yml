@@ -37,6 +37,8 @@ jobs:
 
   compatibility-review:
     name: Compatibility Review (advisory)
+    # Temporarily disabled until the review is fixed.
+    if: ${{ success() && false }}
     permissions:
       contents: read
       pull-requests: read
@@ -55,10 +57,11 @@ jobs:
   compatibility-comment:
     name: Comment on detected breaking changes
     needs: compatibility-review
+    # Temporarily disabled with the compatibility review.
     if: >-
       ${{ !cancelled() && github.event_name == 'pull_request'
           && needs.compatibility-review.outputs.has_findings == 'true'
-          && needs.compatibility-review.outputs.report_artifact != '' }}
+          && needs.compatibility-review.outputs.report_artifact != '' && false }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     continue-on-error: true
@@ -646,9 +649,13 @@ jobs:
       - name: Reject changes to the Python SDK
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # Compare against the PR head, not the checked-out merge commit: the
+          # recorded base SHA can lag main, and diffing the merge commit would
+          # then report main's own changes as the PR's.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          changed=$(git diff --name-only --diff-filter=d "${BASE_SHA}...HEAD" -- \
+          changed=$(git diff --name-only --diff-filter=d "${BASE_SHA}...${HEAD_SHA}" -- \
             python \
             tasks/scripts/generate_python_proto.py)
           if [ -z "$changed" ]; then
@@ -692,11 +699,13 @@ jobs:
       - name: Reject changes to the TypeScript SDK
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # See the Python SDK freeze: diff the PR head, not the merge commit.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           # The package is a stub that re-exports @ai-openshell/sdk. Its files stay
           # editable so the stub and its moved notice can be maintained.
-          changed=$(git diff --no-renames --name-only --diff-filter=d "${BASE_SHA}...HEAD" -- sdk/typescript \
+          changed=$(git diff --no-renames --name-only --diff-filter=d "${BASE_SHA}...${HEAD_SHA}" -- sdk/typescript \
             ':(exclude)sdk/typescript/package.json' \
             ':(exclude)sdk/typescript/README.md' \
             ':(exclude)sdk/typescript/index.js' \

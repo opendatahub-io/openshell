@@ -1317,9 +1317,13 @@ dependencies = [
 name = "host-server-support"
 version = "0.0.0"
 dependencies = [
+ "openshell-crypto",
  "openshell-testkit",
+ "rcgen",
+ "rustls",
  "serde_json",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
 ]
 
@@ -1834,7 +1838,7 @@ version = "0.0.0"
 dependencies = [
  "keycloak-support",
  "openshell-testkit",
- "tempfile",
+ "prost-types",
 ]
 
 [[package]]
@@ -2431,6 +2435,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "openshell-providers"
+version = "0.0.0"
+dependencies = [
+ "glob",
+ "noyalib",
+ "openshell-core",
+ "openshell-policy",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "url",
+]
+
+[[package]]
 name = "openshell-sdk"
 version = "0.0.0"
 dependencies = [
@@ -2491,6 +2510,7 @@ dependencies = [
  "openshell-bootstrap",
  "openshell-core",
  "openshell-policy",
+ "openshell-providers",
  "openshell-sdk",
  "openshell-testkit-macros",
  "prost-types",

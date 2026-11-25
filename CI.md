@@ -97,9 +97,10 @@ capable host and the [Windows runtime tests](https://github.com/ai-openshell/ope
 
 ### Advisory compatibility review
 
-`Codex Compatibility Review` runs in Branch Checks. Both Codex review jobs in
-release qualification are temporarily skipped pending fixes. The release review
-behavior described below applies when those jobs are enabled.
+`Codex Compatibility Review` and its PR comments are temporarily skipped in
+Branch Checks for all branches pending fixes. Both Codex review jobs in release
+qualification are also skipped. The review behavior described below applies
+when those jobs are enabled.
 Branch checks compare the prospective merge tree with its target,
 using workflow-revision review tooling and the target's tag-derived train policy.
 Release qualification reviews the cumulative diff from the previous reachable
