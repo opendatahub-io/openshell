@@ -190,6 +190,18 @@ one, or `--namespace NAME` to override the configured namespace. The installer
 prints the gateway and Dashboard URLs and the next steps for registering the
 gateway with the OpenShell CLI.
 
+When the namespace already exists and holds installer state (the
+`openshell-installer` ConfigMap) or gateway key material
+(`openshell-server-tls`, `openshell-client-tls`, `openshell-jwt-keys`,
+`openshell-credential-storage-key-encryption-key`, `openshell-dashboard-oidc`),
+the installer reuses it only when the namespace
+proves it created the deployment. A namespace created by the installer carries
+the `openshell.ai/installer: odh-dashboard` label. If you pre-create the
+namespace, add that label, or pass `--adopt-existing` after confirming the
+objects come from a previous installation of this gateway. Namespace editors
+cannot set the label on a namespace they do not administer, so the installer
+does not trust the ConfigMap label alone.
+
 ## Install directly with Helm
 
 Use this alternative when you want to manage the gateway and Dashboard Helm

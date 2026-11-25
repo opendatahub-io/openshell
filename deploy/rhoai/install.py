@@ -29,6 +29,11 @@ OWNER = "openshell.ai/installer"
 OWNER_VALUE = "odh-dashboard"
 GATEWAY_HOST = "openshell.ai/installer-gateway-host"
 INSTALL_STATE = "openshell-installer"
+# Material the charts create once and reuse on later runs. The PKI secrets are
+# reused by the certgen hook when all three exist; the key-encryption key is
+# reused by a `lookup` in the credential-storage template.
+PKI_SECRETS = ("openshell-server-tls", "openshell-client-tls", "openshell-jwt-keys")
+CREDENTIAL_KEK_SECRET = "openshell-credential-storage-key-encryption-key"
 OIDC_SECRET = "openshell-dashboard-oidc"
 OIDC_CA = "openshell-oidc-ca"
 DB_SECRET = "openshell-gateway-db"
@@ -653,10 +658,13 @@ def next_steps(config, context, config_dir):
 
 
 class Installer:
-    def __init__(self, config, timeout, context=None, config_dir=None):
+    def __init__(
+        self, config, timeout, context=None, config_dir=None, adopt_existing=False
+    ):
         self.config = config
         self.timeout = timeout
         self.config_dir = Path(config_dir) if config_dir is not None else Path.cwd()
+        self.adopt_existing = adopt_existing
         self._context = context
         require(
             self._context is None
@@ -968,6 +976,18 @@ class Installer:
                     + (f" in {self.ns}" if namespaced else " cluster-wide")
                 ) from None
 
+    def namespace_owned(self, namespace):
+        """Whether the installer can prove it owns this namespace.
+
+        A namespace editor cannot patch the Namespace object, so a marker on
+        it cannot be planted from inside the namespace. The ConfigMap label
+        alone can be, because any editor can create ConfigMaps.
+        """
+        metadata = (namespace or {}).get("metadata") or {}
+        return (metadata.get("labels") or {}).get(OWNER) == OWNER_VALUE or bool(
+            (metadata.get("annotations") or {}).get(GATEWAY_HOST)
+        )
+
     def identity_state(self):
         return {
             "gateway-host": self.config["gateway"]["host"],
@@ -1092,21 +1112,38 @@ class Installer:
             or original_host == self.config["gateway"]["host"],
             "Gateway hostname differs from the original install; certificate migration is required",
         )
+        # The ConfigMap label is not proof of ownership: it is writable from
+        # inside the namespace. Collect every object the chart would otherwise
+        # reuse and make the administrator vouch for them when this installer
+        # cannot prove it created the namespace.
+        pre_existing = []
+        if namespace:
+            if state:
+                pre_existing.append(f"configmap/{INSTALL_STATE}")
+            for secret in (*PKI_SECRETS, CREDENTIAL_KEK_SECRET, OIDC_SECRET):
+                if self.get("secret", secret):
+                    pre_existing.append(f"secret/{secret}")
+        # The namespace marker alone is not enough: require the state record it
+        # should accompany, so a deleted state ConfigMap cannot leave orphaned
+        # key material that a rerun would silently reuse.
+        trusted = self.namespace_owned(namespace) and bool(state or legacy_host)
+        if pre_existing and not trusted:
+            require(
+                self.adopt_existing,
+                f"Namespace {self.ns} already contains installer state or "
+                f"gateway key material ({', '.join(pre_existing)}), and this "
+                "installer did not create the namespace, so it cannot tell a "
+                "previous installation of this gateway from objects created by "
+                "someone else. If you created them in an earlier installation, "
+                "re-run with --adopt-existing. Otherwise inspect them "
+                f"(kubectl -n {self.ns} get <kind> <name> -o yaml) and delete "
+                "them before installing: the gateway reuses existing TLS, "
+                "JWT, and credential-storage key material instead of "
+                "generating new keys.",
+            )
         self.check_identity(state)
         if namespace:
             self.check_releases(managed=bool(state or legacy_host))
-            # The chart's bootstrap hook reuses existing TLS material. Do not
-            # accidentally use certificates belonging to another gateway.
-            if not (state or legacy_host):
-                for secret in (
-                    "openshell-server-tls",
-                    "openshell-client-tls",
-                    "openshell-jwt-keys",
-                ):
-                    require(
-                        not self.get("secret", secret),
-                        f"Existing gateway Secret {secret} requires explicit migration",
-                    )
         require(
             state or legacy_host or self.config["oidc"].get("client_secret_file"),
             "oidc.client_secret_file is required for the first install",
@@ -1386,6 +1423,12 @@ def main():
         help="Local source chart for --check only",
     )
     parser.add_argument(
+        "--adopt-existing",
+        action="store_true",
+        help="Adopt an existing installer state ConfigMap and gateway key "
+        "material in a namespace this installer did not create",
+    )
+    parser.add_argument(
         "--timeout", default="10m", help="Helm/controller wait timeout (default: 10m)"
     )
     args = parser.parse_args()
@@ -1406,7 +1449,11 @@ def main():
         require(shutil.which(tool), f"Required tool not found: {tool}")
     config = load_config(args.config.resolve(), args.namespace)
     installer = Installer(
-        config, args.timeout, args.context, args.config.resolve().parent
+        config,
+        args.timeout,
+        args.context,
+        args.config.resolve().parent,
+        adopt_existing=args.adopt_existing,
     )
     placeholders = resolve_main_hosts(
         config, args.check, args.apps_domain, installer.apps_domain

@@ -451,6 +451,7 @@ class InstallTests(unittest.TestCase):
             self.assertNotIn("db.example.com", " ".join(args))
 
         cluster.calls.clear()
+        cluster.adopt_existing = True
         cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
         self.assertFalse(
             any("create" in args and "can-i" not in args for args, _ in cluster.calls)
@@ -519,6 +520,7 @@ class InstallTests(unittest.TestCase):
             "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
             "data": {"gateway-host": legacy.config["gateway"]["host"]},
         }
+        legacy.adopt_existing = True
         legacy.preflight()
         self.config = configuration()
         self.config["gateway"].pop("database")
@@ -587,7 +589,7 @@ class InstallTests(unittest.TestCase):
             any(args[:3] == ["helm", "get", "manifest"] for args, _ in cluster.calls)
         )
         cluster.objects[("secret", "openshell-server-tls")] = {"data": {}}
-        with self.assertRaisesRegex(ValueError, "explicit migration"):
+        with self.assertRaisesRegex(ValueError, "--adopt-existing"):
             cluster.preflight()
 
     def test_preflight_rejects_credential_drift_without_changing_state(self):
@@ -719,6 +721,8 @@ class InstallTests(unittest.TestCase):
         }
         cluster.objects[("namespace", cluster.ns)] = copy.deepcopy(namespace)
         cluster.install(["gateway.tgz", "dashboard.tgz"], ["g.json", "d.json"])
+        # The admin namespace carries no installer marker, so reruns adopt it.
+        cluster.adopt_existing = True
         cluster.install(["gateway.tgz", "dashboard.tgz"], ["g.json", "d.json"])
         self.assertEqual(cluster.objects[("namespace", cluster.ns)], namespace)
         self.assertEqual(
@@ -869,8 +873,101 @@ class InstallTests(unittest.TestCase):
         cluster.objects[("secret", "openshell-server-tls")] = {
             "data": {"tls.crt": "old"}
         }
-        with self.assertRaisesRegex(ValueError, "explicit migration"):
+        with self.assertRaisesRegex(ValueError, "--adopt-existing"):
             cluster.install([], [])
+
+    def test_forged_installer_state_in_preexisting_namespace_requires_adoption(self):
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        cluster.objects[("configmap", installer.INSTALL_STATE)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
+            "data": {"gateway-host": cluster.config["gateway"]["host"]},
+        }
+        reusable = (*installer.PKI_SECRETS, installer.CREDENTIAL_KEK_SECRET)
+        for name in reusable:
+            cluster.objects[("secret", name)] = {"data": {"planted": "MQ=="}}
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "--adopt-existing") as raised:
+            cluster.preflight()
+        self.assertIn(f"configmap/{installer.INSTALL_STATE}", str(raised.exception))
+        for name in reusable:
+            self.assertIn(f"secret/{name}", str(raised.exception))
+        self.assertEqual(cluster.objects, before)
+        # The explicit flag is the administrator's assertion of ownership.
+        cluster.adopt_existing = True
+        cluster.preflight()
+
+    def test_namespace_owner_label_grants_ownership_without_adoption(self):
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}}
+        }
+        cluster.objects[("configmap", installer.INSTALL_STATE)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
+            "data": {
+                "gateway-host": cluster.config["gateway"]["host"],
+                "database-mode": "sqlite",
+            },
+        }
+        cluster.preflight()
+
+    def test_owned_namespace_without_state_requires_adoption(self):
+        # A deleted state ConfigMap must not let a rerun reuse orphaned certs.
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}}
+        }
+        cluster.objects[("secret", "openshell-server-tls")] = {"data": {"old": "MQ=="}}
+        with self.assertRaisesRegex(ValueError, "--adopt-existing"):
+            cluster.preflight()
+        cluster.adopt_existing = True
+        cluster.preflight()
+
+    def test_installer_created_namespace_carries_the_ownership_label(self):
+        cluster = self.cluster()
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        namespace = cluster.objects[("namespace", cluster.ns)]
+        self.assertEqual(
+            namespace["metadata"]["labels"][installer.OWNER], installer.OWNER_VALUE
+        )
+        # The rerun needs no adoption flag because the namespace proves ownership.
+        cluster.calls.clear()
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        self.assertFalse(cluster.adopt_existing)
+
+    def test_adopt_existing_flag_is_forwarded_to_preflight(self):
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        seen = []
+
+        def run(_instance, args, _payload=None):
+            if args[:2] == ["helm", "pull"]:
+                (Path(args[args.index("--destination") + 1]) / "chart.tgz").write_bytes(
+                    b"fake"
+                )
+            return ""
+
+        def preflight(instance):
+            seen.append(instance.adopt_existing)
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "install.py",
+                    "--config",
+                    str(path),
+                    "--preflight",
+                    "--adopt-existing",
+                ],
+            ),
+            patch.object(installer.shutil, "which", return_value="tool"),
+            patch.object(installer.Installer, "run", run),
+            patch.object(installer.Installer, "preflight", preflight),
+            redirect_stdout(io.StringIO()),
+        ):
+            installer.main()
+        self.assertEqual(seen, [True])
 
     def test_legacy_install_migrates_without_modifying_namespace(self):
         cluster = self.cluster()
@@ -948,6 +1045,7 @@ class InstallTests(unittest.TestCase):
                 cluster.objects[("secret", installer.OIDC_SECRET)] = copy.deepcopy(
                     existing
                 )
+                cluster.adopt_existing = True
                 path = Path(cluster.config["oidc"]["client_secret_file"])
                 if supplied is None:
                     cluster.config["oidc"].pop("client_secret_file")
@@ -1288,9 +1386,12 @@ class InstallTests(unittest.TestCase):
         path.write_text(json.dumps(self.config))
         clusters = []
 
-        def factory(config, _timeout, context=None, _config_dir=None):
+        def factory(
+            config, _timeout, context=None, _config_dir=None, adopt_existing=False
+        ):
             cluster = FakeCluster(config)
             cluster._context = context
+            cluster.adopt_existing = adopt_existing
             clusters.append(cluster)
             return cluster
 
