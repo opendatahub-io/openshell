@@ -39,6 +39,11 @@
         "registry": "registry.redhat.io",
         "repository": "rhoai/odh-openshell-dashboard-rhel9",
         "digest": "sha256:b1c4ae0e112ae974a7e61f62c7a5f6ed806585dec584e5289157d3c10ac12aa7"
+      },
+      "authProxy": {
+        "registry": "registry.access.redhat.com",
+        "repository": "hi/oauth2-proxy",
+        "digest": "sha256:fa4516e1c5bf6be0a7fc5291adc536e867951deee3449422a8bcfdef173c8edf"
       }
     }
   },

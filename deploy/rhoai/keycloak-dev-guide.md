@@ -8,7 +8,9 @@ against the cluster ingress CA.
 It deploys and removes a development Keycloak instance only. Use
 [README.md](README.md) to install OpenShell and the OpenShell Dashboard admin UI.
 Follow this guide first when you need a local identity provider; skip it when
-your cluster already has an OIDC provider.
+your cluster already has an OIDC provider. On a cluster that cannot reach the
+public registries, follow [Disconnected clusters: mirror the
+images](#disconnected-clusters-mirror-the-images) first.
 
 Set the environment used throughout the guide:
 
@@ -71,15 +73,23 @@ spec:
 EOF
 ```
 
-Deploy PostgreSQL from the Red Hat hardened image:
+Deploy PostgreSQL from the Red Hat hardened image, pinned by digest. The image
+is public, so this also works on a connected cluster. Refresh the digest from
+the `18.4` tag when you want a newer build:
 
 ```shell
-oc -n "$KEYCLOAK_NS" new-app registry.access.redhat.com/hi/postgresql:18.4 \
+skopeo inspect --format '{{.Digest}}' \
+  docker://registry.access.redhat.com/hi/postgresql:18.4
+oc -n "$KEYCLOAK_NS" new-app registry.access.redhat.com/hi/postgresql@sha256:67599d73c3dae0e8685c2f9ba31c11028477816bbc254cf862543cfb11c2dc3f \
   -e POSTGRES_USER=keycloak \
   -e POSTGRES_DATABASE=keycloak \
   -e PGDATA=/var/lib/postgresql/data/pgdata \
   --name=keycloak-db
 ```
+
+The digest form matters on a disconnected cluster: an
+`ImageDigestMirrorSet` rewrites digest pulls to the mirror registry but leaves
+tag pulls pointed at the original registry, where they fail.
 
 Do not pass the database password through `oc new-app`: it would appear in the
 process table and as a literal Deployment value. Add the reference from
@@ -355,6 +365,124 @@ oc -n openshift-config-managed get configmap default-ingress-cert \
 ./deploy/rhoai/keycloak-dev-guide-create-openshell-clients.sh
 ```
 
+## Disconnected clusters: mirror the images
+
+Skip this section when the cluster nodes can pull from `registry.redhat.io` and
+`registry.access.redhat.com` directly. On a disconnected cluster, every image
+this guide deploys must exist in a private registry the nodes can reach, and an
+`ImageDigestMirrorSet` (IDMS) must rewrite the pull to that registry. IDMS
+rewrites only digest references; the guide therefore deploys PostgreSQL by
+digest (see [Deploy PostgreSQL with persistent
+storage](#deploy-postgresql-with-persistent-storage)). Follow this section
+before running Part 1.
+
+The commands below use `registry.example.com:8443` as the private registry.
+Substitute your own, and log in to both ends before copying:
+
+```shell
+export MIRROR=registry.example.com:8443
+skopeo login registry.access.redhat.com
+skopeo login "$MIRROR"
+```
+
+### What to mirror
+
+Two groups of images are needed:
+
+- The PostgreSQL image. Copy it by tag; `--all` copies the multi-arch index
+  verbatim, so the digest in the mirror matches the upstream tag and the
+  digest-pinned deployment in Part 1 pulls the same build:
+
+  ```shell
+  skopeo copy --all \
+    docker://registry.access.redhat.com/hi/postgresql:18.4 \
+    docker://$MIRROR/hi/postgresql:18.4
+  ```
+
+  Resolve the current digest of the tag when you want to pin or refresh it:
+  `skopeo inspect --format '{{.Digest}}'
+  docker://registry.access.redhat.com/hi/postgresql:18.4`. The `18.4` tag
+  moves when Red Hat republishes the image.
+
+- The three Red Hat build of Keycloak images the operator uses. Print them for
+  the channel you plan to install:
+
+  ```shell
+  oc get packagemanifest rhbk-operator -n openshift-marketplace \
+    -o jsonpath='{.status.channels[?(@.name=="stable-v26.6")].currentCSVDesc.relatedImages}'
+  ```
+
+  The output lists `registry.redhat.io/rhbk/keycloak-operator-bundle`,
+  `keycloak-rhel9-operator`, and `keycloak-rhel9`, each pinned by digest. Copy
+  each one, using any tag on the destination (for example the CSV version):
+
+  ```shell
+  skopeo copy --all \
+    docker://registry.redhat.io/rhbk/keycloak-rhel9@sha256:<digest> \
+    docker://$MIRROR/rhbk/keycloak-rhel9:v26.6.9
+  ```
+
+Push to a tag on the mirror, not to a bare digest: Quay and some other
+registries accept a digest-only push but never serve the manifest afterwards,
+which surfaces as `manifest unknown` when the cluster pulls. The tag does not
+change the image; pulls stay pinned by digest.
+
+### Operator catalog
+
+The Subscription in [Install the Red Hat build of Keycloak
+Operator](#install-the-red-hat-build-of-keycloak-operator) pulls the operator
+manifests from a CatalogSource. Check that your cluster's catalogs contain the
+package:
+
+```shell
+oc get packagemanifest rhbk-operator -n openshift-marketplace
+```
+
+If it is missing, the disconnected catalog does not include the RHBK operator;
+add the package to your catalog mirror with
+[oc-mirror](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/disconnected_environments/olm-restricted-networks)
+and wait for the new catalog. If the CatalogSource is not named
+`redhat-operators`, substitute its name in the Subscription's `source` field.
+
+### ImageDigestMirrorSet entries
+
+List the sources your cluster already rewrites:
+
+```shell
+oc get imagedigestmirrorset \
+  -o jsonpath='{range .items[*].spec.imageDigestMirrors[*]}{.source}{"\n"}{end}' | sort -u
+```
+
+This guide needs `registry.access.redhat.com/hi` and `registry.redhat.io/rhbk`.
+Add only the entries that are missing. If an oc-mirror-generated set already
+covers a source, extend or reuse it instead of creating a duplicate entry; do
+not create a second set for the same source. A new set with only the missing
+entries looks like this:
+
+```shell
+oc apply -f - <<'EOF'
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: hi-mirror
+spec:
+  imageDigestMirrors:
+    - source: registry.access.redhat.com/hi
+      mirrors:
+        - registry.example.com:8443/hi
+      mirrorSourcePolicy: NeverContactSource
+EOF
+```
+
+`mirrorSourcePolicy: NeverContactSource` keeps the nodes from falling back to
+the blocked public registry. Applying an IDMS change rolls out a Machine Config
+Pool update, which may reboot the nodes depending on the OpenShift version;
+wait for both pools to report `UPDATED=True` before deploying anything:
+
+```shell
+oc get mcp
+```
+
 ## Troubleshooting
 
 ### "Client not found"
@@ -378,6 +506,26 @@ pod:
 oc -n "$KEYCLOAK_NS" get subscription rhbk-operator
 oc -n "$KEYCLOAK_NS" get csv
 oc -n "$KEYCLOAK_NS" get pods
+```
+
+### `ImagePullBackOff` or `BundleUnpackFailed` on a disconnected cluster
+
+The image or operator manifest is missing from the mirror, or no
+`ImageDigestMirrorSet` entry rewrites its registry; a tag reference where a
+digest is needed fails the same way. Check the failing pod's image and the IDMS
+sources against [Disconnected clusters: mirror the
+images](#disconnected-clusters-mirror-the-images).
+
+OLM caches a failed unpack in `openshift-marketplace`. After fixing the mirror
+or the IDMS, delete the failed Job and the ConfigMap of the same name so the
+retry starts clean, then restart the catalog operator, which runs in
+`openshift-operator-lifecycle-manager`:
+
+```shell
+oc -n openshift-marketplace get jobs
+oc -n openshift-marketplace delete job <failed-unpack-job>
+oc -n openshift-marketplace delete configmap <failed-unpack-job>
+oc -n openshift-operator-lifecycle-manager rollout restart deployment catalog-operator
 ```
 
 ## Cleanup
@@ -404,3 +552,6 @@ for this guide; skip it when the namespace is shared or already existed:
 ```shell
 oc delete namespace "$KEYCLOAK_NS"
 ```
+
+This guide does not delete mirrored images or `ImageDigestMirrorSet` entries;
+other workloads may depend on them.

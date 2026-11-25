@@ -20,6 +20,10 @@ retention or shared workloads. PostgreSQL improves durability and operability,
 but the installer still deploys one gateway replica, so it does not make the
 gateway highly available on its own.
 
+The main flow assumes the cluster and the administrator's workstation can reach
+the public registries. On a disconnected cluster, follow [Install on a
+disconnected cluster](#install-on-a-disconnected-cluster) before installing.
+
 ## Table of contents
 
 - [Install OpenShell and the OpenShell Dashboard admin UI on OpenShift](#install-openshell-and-the-openshell-dashboard-admin-ui-on-openshift)
@@ -44,6 +48,7 @@ gateway highly available on its own.
   - [Verify workspace authorization](#verify-workspace-authorization)
   - [Rerun and upgrade](#rerun-and-upgrade)
   - [Remove an installation](#remove-an-installation)
+  - [Install on a disconnected cluster](#install-on-a-disconnected-cluster)
   - [Troubleshoot common failures](#troubleshoot-common-failures)
   - [Contributor checks](#contributor-checks)
   - [Related documentation](#related-documentation)
@@ -67,15 +72,22 @@ gateway highly available on its own.
   in the OpenShell namespace.
 - A default StorageClass for sandbox workspace volumes. Without one, the
   sandbox's 2Gi workspace PersistentVolumeClaim stays Pending and the sandbox
-  never starts.
+  never starts. Clusters with only static, class-less PersistentVolumes need
+  the workaround described in [Install on a disconnected
+  cluster](#install-on-a-disconnected-cluster).
 - An OIDC provider with a confidential browser client that uses PKCE S256. For
   development, set one up with the
-  [Keycloak development guide](keycloak-dev-guide.md).
+  [Keycloak development guide](keycloak-dev-guide.md); on a disconnected
+  cluster, that guide's mirroring section applies too.
 - Registry access: `ghcr.io` from the workstation or server where the
   installer is being run for both Helm charts, and from the cluster nodes the
   registries your images come from: `quay.io` for ODH builds and
   `registry.redhat.io` for RHOAI builds (requires a pull secret).
-  `registry.access.redhat.com` is only needed when you use a Red Hat base image.
+  `registry.access.redhat.com` is only needed when you use a Red Hat base
+  image, the development PostgreSQL, or the pinned oauth2-proxy image. On a
+  cluster whose nodes cannot reach these registries, replace direct access
+  with a private mirror as described in [Install on a disconnected
+  cluster](#install-on-a-disconnected-cluster).
 
 The installer does not install an identity provider, Agent Sandbox, RHOAI, or
 console integration. It targets the current kubeconfig context unless you pass
@@ -220,6 +232,12 @@ then creates no ConfigMap and both workloads use the system trust roots.
 - `gateway.images.sandbox` uses a full repository path and has no separate
   registry key. The image must provide a shell at `/bin/bash`, `/usr/bin/bash`,
   or `/bin/sh`.
+- `dashboard.images.authProxy` overrides the dashboard chart's oauth2-proxy
+  image with `registry`, `repository`, and `digest` or `tag`. The RHOAI
+  examples pin the public `registry.access.redhat.com/hi/oauth2-proxy` image by
+  digest, which works on connected and disconnected clusters; see
+  [oauth2-proxy](#oauth2-proxy) under
+  [Install on a disconnected cluster](#install-on-a-disconnected-cluster).
 - Supported architectures: the installer runs on amd64-only clusters. Mixed
   amd64/arm64 clusters are not supported because the Red Hat Build of Agent
   Sandbox Operator is not available on arm64. The RHOAI 3.6 images and the ODH
@@ -368,15 +386,24 @@ spec:
 EOF
 ```
 
-Deploy PostgreSQL from the Red Hat hardened image:
+Deploy PostgreSQL from the Red Hat hardened image, pinned by digest. The
+image is public, so this also works on a connected cluster; refresh the digest
+from the `18.4` tag when you want a newer build:
 
 ```shell
-oc -n "$NS" new-app registry.access.redhat.com/hi/postgresql:18.4 \
+skopeo inspect --format '{{.Digest}}' \
+  docker://registry.access.redhat.com/hi/postgresql:18.4
+oc -n "$NS" new-app registry.access.redhat.com/hi/postgresql@sha256:67599d73c3dae0e8685c2f9ba31c11028477816bbc254cf862543cfb11c2dc3f \
   -e POSTGRES_USER=openshell \
   -e POSTGRES_DATABASE=openshell \
   -e PGDATA=/var/lib/postgresql/data/pgdata \
   --name=openshell-db
 ```
+
+On a disconnected cluster, the digest form is required: an
+`ImageDigestMirrorSet` rewrites digest pulls to the mirror registry but leaves
+tag pulls pointed at the original registry. Mirror the image first; see
+[Install on a disconnected cluster](#install-on-a-disconnected-cluster).
 
 Do not pass the password through `oc new-app`; it would appear in the process
 table and in the Deployment. Add the reference from
@@ -815,6 +842,199 @@ The development PostgreSQL from
 [Development PostgreSQL](#development-postgresql) is not installer-managed;
 delete its Deployment, Service, claim, and Secret separately.
 
+## Install on a disconnected cluster
+
+This section applies when the cluster nodes cannot pull from `ghcr.io`,
+`quay.io`, `registry.redhat.io`, or `registry.access.redhat.com`. The examples
+below use `registry.example.com:8443` as the private registry; substitute your
+own. Read the network scenarios first to see which parts apply to you, and work
+through this section before running the installer.
+
+### Network scenarios
+
+**A. Cluster egress blocked, ingress allowed.** The administrator's
+workstation has internet access and can reach the cluster API and Routes. Run
+`install.py`, the `openshell` CLI, and `verify.py` from that workstation. Helm
+also runs on the workstation: `install.py` pulls both charts with `helm pull`
+and installs them with `helm upgrade`, so the chart artifacts come straight
+from `ghcr.io` and `quay.io` and are never pulled by the cluster. What the
+cluster must pull is every image the charts deploy: the gateway (the certgen
+hook Job reuses the gateway image, so it adds no extra image), the supervisor,
+the sandbox runtime, the dashboard, and oauth2-proxy. Only the images need
+mirroring.
+
+**B. Ingress also blocked (fully air-gapped).** Run `install.py`, the CLI,
+`verify.py`, and the browser from a host inside the network, such as a bastion
+or jump host. That host has no internet, so in addition to the image mirroring
+from scenario A:
+
+- Mirror both Helm charts to the private registry and point the configuration
+  at the mirrors. Pull each chart on a connected host, push it to the registry,
+  and log the installing host in:
+
+  ```shell
+  helm pull oci://ghcr.io/nvidia/openshell/helm-chart --version 0.1.3
+  helm push openshell-0.1.3.tgz oci://registry.example.com:8443/charts
+  helm pull oci://quay.io/ai-openshell/charts/console --version 0.1.5
+  helm push console-0.1.5.tgz oci://registry.example.com:8443/charts
+  helm registry login registry.example.com:8443
+  ```
+
+  Then set `gateway.chart` to `oci://registry.example.com:8443/charts/openshell`
+  and `dashboard.chart` to `oci://registry.example.com:8443/charts/console` in
+  the configuration. Charts are pulled by the host that runs the installer, so
+  no `ImageDigestMirrorSet` entry is involved.
+
+- Bring the `uv`, `helm`, and `kubectl`/`oc` binaries, the `openshell` CLI, and
+  the installer's pinned PyYAML dependency to that host by an approved route.
+  The `curl … install.sh` CLI install command in [Register the gateway and log
+  in](#register-the-gateway-and-log-in) needs GitHub access; install the CLI on
+  a connected host and copy the binary instead.
+
+- The dashboard and gateway Routes are reachable only from inside the network.
+
+### What to mirror
+
+| Artifact | Source | Needed by |
+|---|---|---|
+| Gateway image | `registry.redhat.io/rhoai/odh-openshell-gateway-rhel9` (RHOAI) or `quay.io` (ODH) | gateway Deployment and certgen hook |
+| Supervisor image | `registry.redhat.io/rhoai/odh-openshell-supervisor-rhel9` or `quay.io` | sandbox pods |
+| Sandbox runtime image | `registry.redhat.io/rhoai/odh-openshell-sandbox-rhel9` or `quay.io` | sandbox pods |
+| Dashboard image | `registry.redhat.io/rhoai/odh-openshell-dashboard-rhel9` or `quay.io` | dashboard Deployment |
+| oauth2-proxy image | `registry.access.redhat.com/hi/oauth2-proxy` | dashboard auth proxy |
+| Development PostgreSQL | `registry.access.redhat.com/hi/postgresql` | [Development PostgreSQL](#development-postgresql) |
+| Agent Sandbox operator images | `registry.redhat.io/agent-sandbox` | Agent Sandbox operator |
+| Both Helm charts | `ghcr.io/nvidia/openshell/helm-chart`, `quay.io/ai-openshell/charts/console` | installer (scenario B only) |
+| Custom sandbox base images | your registry | `openshell sandbox create --from` |
+
+The CLI image also appears in the RHOAI CSV but is not used by the installer;
+mirror it only when you deploy it separately.
+
+### RHOAI images
+
+The RHOAI gateway, supervisor, sandbox, and dashboard images are mirrored by
+the RHOAI disconnected-installation procedure; see [Mirroring images to a
+private registry for a disconnected
+installation](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/installing_and_uninstalling_openshift_ai_self-managed_in_a_disconnected_environment/deploying-openshift-ai-in-a-disconnected-environment_install#mirroring-images-to-a-private-registry-for-a-disconnected-installation_install)
+in the RHOAI self-managed documentation.
+After RHOAI is installed, print the exact digests of your build:
+
+```shell
+oc get csv rhods-operator.3.6.0 -n redhat-ods-operator -o yaml | grep -A1 OPENSHELL
+```
+
+Copy those `registry.redhat.io/rhoai/...@sha256:...` values into the
+configuration's image digests; they must match what was mirrored. The digests
+in the example configurations belong to one RHOAI build and must be replaced
+with your cluster's CSV values. Do not switch to `"tag": "rhoai-3.6"` on a
+disconnected cluster: an `ImageDigestMirrorSet` rewrites only digest pulls, so
+a tag reference still goes to `registry.redhat.io` and fails.
+
+Check that `registry.redhat.io/rhoai` is covered by an
+`ImageDigestMirrorSet`, and which sources the cluster already rewrites:
+
+```shell
+oc get imagedigestmirrorset \
+  -o jsonpath='{range .items[*].spec.imageDigestMirrors[*]}{.source}{"\n"}{end}' | sort -u
+```
+
+If `registry.redhat.io/rhoai` is missing, add an entry that maps it to your
+registry with `mirrorSourcePolicy: NeverContactSource`:
+
+```shell
+oc apply -f - <<'EOF'
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: rhoai-mirror
+spec:
+  imageDigestMirrors:
+    - source: registry.redhat.io/rhoai
+      mirrors:
+        - registry.example.com:8443/rhoai
+      mirrorSourcePolicy: NeverContactSource
+EOF
+```
+
+Applying an IDMS change rolls out a Machine Config Pool update, which may
+reboot the nodes depending on the OpenShift version. Reuse an existing set
+(for example one generated by
+[oc-mirror](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/disconnected_environments/about-installing-oc-mirror-v2))
+when it already covers a source instead of creating a duplicate.
+
+### oauth2-proxy
+
+The dashboard chart's default auth proxy image
+(`quay.io/oauth2-proxy/oauth2-proxy:v7.15.2`) is pinned by tag, which an IDMS
+cannot rewrite. The RHOAI example configurations therefore override it with
+`dashboard.images.authProxy`, pinned by digest to the public Red Hat
+`hi/oauth2-proxy` image (oauth2-proxy 7.15.6, multi-arch):
+
+```json
+"authProxy": {
+  "registry": "registry.access.redhat.com",
+  "repository": "hi/oauth2-proxy",
+  "digest": "sha256:fa4516e1c5bf6be0a7fc5291adc536e867951deee3449422a8bcfdef173c8edf"
+}
+```
+
+On a disconnected cluster, mirror this image like the others and add
+`registry.access.redhat.com/hi` to an IDMS entry; one entry covers both this
+image and the development PostgreSQL, which come from the same repository. On
+a connected cluster, nothing changes: the image is public and the digest pin
+also works without a mirror. A custom proxy image goes in the same
+`dashboard.images.authProxy` block with `registry`, `repository`, and `digest`
+or `tag`; the installer maps it to the chart's `authProxy.image` value.
+
+### Agent Sandbox operator
+
+The Agent Sandbox Operator is a prerequisite on any cluster. On a disconnected
+cluster, follow [its disconnected
+documentation](https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.13/html/deploying_red_hat_build_of_agent_sandbox/index).
+Its images live under `registry.redhat.io/agent-sandbox`; an unmapped source
+shows up as `BundleUnpackFailed` when the operator catalog is unpacked.
+
+### Sandbox images
+
+Only digest references from mirrored sources can be pulled. `openshell
+sandbox create --from <image>` therefore needs an image that exists in the
+mirror. The default `nvcr.io` sandbox base image is not part of these mirrors;
+mirror it separately or point `--from` at a mirrored image.
+
+### StorageClass on clusters with static PersistentVolumes
+
+A disconnected cluster provisioned with static, class-less PersistentVolumes
+has no default StorageClass, and preflight rejects the install in PostgreSQL
+mode until one exists. Create a StorageClass with no provisioner, label the
+existing static PVs with it, and select it for sandbox workspace volumes:
+
+```shell
+oc apply -f - <<'EOF'
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: static-pv
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+EOF
+oc get pv -o go-template='{{range .items}}{{if not .spec.claimRef}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' |
+  xargs -I{} oc patch pv {} -p '{"spec":{"storageClassName":"static-pv"}}'
+```
+
+Then set `server.workspaceStorageClass: static-pv` in a
+[gateway values override](#operational-values-overrides) so workspace PVCs
+bind to the static PVs. Without the override, the chart omits
+`storageClassName` and the PVCs wait for a default class that does not exist.
+
+### Development PostgreSQL
+
+The development database deploys by digest; see [Development
+PostgreSQL](#development-postgresql) and the mirroring steps in [Disconnected
+clusters: mirror the
+images](keycloak-dev-guide.md#disconnected-clusters-mirror-the-images) in the
+Keycloak guide, which use the same `hi` repository and IDMS entry as
+oauth2-proxy.
+
 ## Troubleshoot common failures
 
 | Symptom                                                            | Cause and fix                                                                                                                                                                                                                                                                                                                                               |
@@ -832,6 +1052,8 @@ delete its Deployment, Service, claim, and Secret separately.
 | `Could not resolve the OpenShift apps domain`                      | Grant read access to `ingresses.config.openshift.io/cluster`, or set `gateway.host` and `dashboard.host` explicitly.                                                                                                                                                                                                                                        |
 | HTTP 403 after login                                               | The user holds no role in `allowed_roles`, or no group in `allowed_groups` for generic OIDC. Add a listed role or group to the user, then rerun the install command.                                                                                                                                                                                        |
 | Gateway host or issuer change is rejected                          | The installer state records the original identity. With omitted hosts, a namespace or ingress-domain change also changes the gateway host. Migrate the certificate and endpoint explicitly instead of editing state.                                                                                                                                        |
+| `ImagePullBackOff` on `registry.redhat.io`, `registry.access.redhat.com`, or `quay.io` images | On a disconnected cluster, the image is missing from the mirror or no `ImageDigestMirrorSet` entry rewrites its registry; a tag reference where a digest is needed fails the same way. See [Install on a disconnected cluster](#install-on-a-disconnected-cluster).                                                                                          |
+| Installer cannot download the Helm charts                           | The workstation running `install.py` cannot reach `ghcr.io` or `quay.io`. Run it from a host with internet access (scenario A), or mirror the charts and point `gateway.chart` and `dashboard.chart` at the mirror (scenario B); see [Install on a disconnected cluster](#install-on-a-disconnected-cluster).                                                |
 
 For Keycloak-specific failures, see
 [Troubleshooting](keycloak-dev-guide.md#troubleshooting) in the Keycloak

@@ -173,6 +173,19 @@ amd64-only and tagged with their commit; do not use the moving `odh-stable`
 tag. The ODH examples pin
 `sha256:cfb3b592c5909c7c1a5d5622f98a20bf8c503554d53b3441abb189140254450b`.
 
+The dashboard chart's default oauth2-proxy image is pinned by tag, which an
+`ImageDigestMirrorSet` cannot rewrite on a disconnected cluster. The RHOAI
+examples therefore pin `dashboard.images.authProxy` by digest to the public
+Red Hat `hi/oauth2-proxy` image (oauth2-proxy 7.15.6, multi-arch), which works
+on connected and disconnected clusters. The `hi` repository publishes no
+version tags, so refresh the digest from `:latest` and check the version label
+when you update it:
+
+```shell
+skopeo inspect --format '{{.Digest}}' \
+  docker://registry.access.redhat.com/hi/oauth2-proxy:latest
+```
+
 ## Tags and digests
 
 - `digest` takes precedence when an image sets both `digest` and `tag`.
@@ -181,6 +194,8 @@ tag. The ODH examples pin
 tags, and ranges are rejected.
 - `gateway.images.sandbox` has no registry key and uses a full repository path.
 The image must provide a shell at `/bin/bash`, `/usr/bin/bash`, or `/bin/sh`.
+- `dashboard.images.authProxy` accepts `registry`, `repository`, and `digest`
+or `tag` like the other images; see [Dashboard pairing](#dashboard-pairing).
 
 ## Chart values
 
