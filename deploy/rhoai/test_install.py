@@ -463,6 +463,16 @@ class InstallTests(unittest.TestCase):
             cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
         self.assertEqual(cluster.objects, before)
 
+    def test_existing_database_secret_without_uri_key_is_rejected(self):
+        self.database_config()
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        cluster.objects[("secret", installer.DB_SECRET)] = {"data": {}}
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "missing the uri key"):
+            cluster.preflight()
+        self.assertEqual(cluster.objects, before)
+
     def test_postgresql_install_into_new_namespace_creates_the_secret(self):
         self.database_config()
         cluster = self.cluster()
