@@ -1291,6 +1291,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde_json",
+ "socket2",
  "tokio",
  "tokio-rustls",
  "tungstenite",

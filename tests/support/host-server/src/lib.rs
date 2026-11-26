@@ -5,12 +5,11 @@
 //! `host.openshell.internal`, and that record what arrived, so a test can
 //! check what the supervisor forwarded upstream.
 //!
-//! The servers listen on every IPv4 host address, since drivers map
+//! The servers listen on every host address, IPv6 and IPv4, since drivers map
 //! `host.openshell.internal` to different ones, and stop when dropped. They
-//! don't listen on IPv6, so `host.openshell.internal` must resolve to an IPv4
-//! address of the test host. They run where the tests run, so a gateway whose
-//! sandboxes can't reach the test host, such as one on a remote cluster, can't
-//! run tests that use them.
+//! listen on IPv4 only where the host has no IPv6. They run where the tests
+//! run, so a gateway whose sandboxes can't reach the test host, such as one
+//! on a remote cluster, can't run tests that use them.
 //!
 //! - [`HttpRecorder`] answers HTTP requests with a fixed body or a handler's
 //!   [`Response`], and records each parsed [`Request`]. It serves HTTPS with
@@ -28,10 +27,13 @@ mod tcp;
 mod tls;
 mod websocket;
 
+use std::io::ErrorKind;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use socket2::{Domain, Protocol, Socket, Type};
 use testkit::sdk::raw::proto;
 use testkit::{PYTHON_BINARIES, Result, ResultExt as _, policy};
 use tokio::net::{TcpListener, TcpStream};
@@ -60,20 +62,43 @@ const WAIT_INTERVAL: Duration = Duration::from_millis(100);
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST: usize = 1024 * 1024;
 
-/// Listen on every IPv4 host address at `port`, or at a random free port for 0.
+/// Listen on every IPv6 and IPv4 host address at `port`, or on IPv4 only
+/// where the host has no IPv6. Port 0 picks a random free port.
 async fn bind(port: u16) -> Result<(TcpListener, u16)> {
-    let listener = TcpListener::bind(("0.0.0.0", port))
-        .await
-        .context(if port == 0 {
-            "bind a host server".to_string()
-        } else {
-            format!("bind a host server on port {port}")
-        })?;
+    let listener = match bind_dual_stack(port) {
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::AddrNotAvailable | ErrorKind::Unsupported
+            ) =>
+        {
+            TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await
+        }
+        result => result,
+    }
+    .context(if port == 0 {
+        "bind a host server".to_string()
+    } else {
+        format!("bind a host server on port {port}")
+    })?;
     let port = listener
         .local_addr()
         .context("read the host server's address")?
         .port();
     Ok((listener, port))
+}
+
+/// An IPv6 listener that also accepts IPv4, whatever the host's default.
+fn bind_dual_stack(port: u16) -> std::io::Result<TcpListener> {
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(false)?;
+    // As tokio's own bind does.
+    #[cfg(unix)]
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+    socket.listen(1024)?;
+    TcpListener::from_std(socket.into())
 }
 
 /// An accept loop on a new port that hands each connection to its own task,

@@ -109,6 +109,10 @@ let
         inputs.keycloak_realm_file = "../../scripts/keycloak-realm.json";
       };
     };
+    ipv6 = {
+      bases = [ "ubuntu-k3s" ];
+      setup.playbooks = [ "ansible/playbooks/k3s-ipv6.yaml" ];
+    };
     # Hardware-free CDI fixtures, for the cdi suite.
     cdi = {
       bases = dockerBases ++ podmanBases;

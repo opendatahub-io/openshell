@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Make the K3s base an IPv6-only cluster. The node keeps IPv4 for image pulls,
+# but pods and Services get only IPv6 addresses. k3s.yaml left K3s
+# stopped with no cluster state, so the next start creates it from this file.
+---
+- name: Configure IPv6-only K3s
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH
+      ansible.builtin.wait_for_connection:
+
+    # K3s takes the node's addresses from the default routes. tmachine gives
+    # the guest a global IPv6 address through QEMU's ipv6-net option.
+    - name: Wait for a global IPv6 address
+      ansible.builtin.setup:
+        gather_subset: [network]
+      register: k3s_ipv6_facts
+      until: (k3s_ipv6_facts.ansible_facts.ansible_default_ipv6.scope | default('')) == "global"
+      retries: 10
+      delay: 2
+
+    - name: Write the IPv6-only K3s configuration
+      ansible.builtin.copy:
+        dest: /etc/rancher/k3s/config.yaml
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          node-ip: {{ k3s_ipv6_facts.ansible_facts.ansible_default_ipv6.address }}
+          cluster-cidr: fd00:42::/56
+          service-cidr: fd00:43::/112
+          flannel-ipv6-masq: true

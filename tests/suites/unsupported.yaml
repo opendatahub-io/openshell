@@ -22,7 +22,9 @@
   issue: https://github.com/ai-openshell/openshell/issues/5752
   environments:
     - ubuntu-k3s/k3s-ha
+    - ubuntu-k3s-ipv6/k3s-ha
 - test: conformance::network_egress::fail_closed_middleware_blocks_uninspectable_traffic
   issue: https://github.com/ai-openshell/openshell/issues/5752
   environments:
     - ubuntu-k3s/k3s-ha
+    - ubuntu-k3s-ipv6/k3s-ha
