@@ -16,7 +16,7 @@
 # users separately; they need passwords and verified email addresses.
 #
 # Requires the environment variables set by the Keycloak development guide:
-#   KC_URL, KEYCLOAK_NS, REALM, API_ID, DASH_ID, CLI_ID, DASH_URL, CONFIG_DIR
+#   KC_URL, REALM, API_ID, DASH_ID, CLI_ID, DASH_URL, CONFIG_DIR
 # CONFIG_DIR must contain ingress-ca.crt, the CA bundle for the Keycloak Route.
 #
 # The script authenticates to the master realm as an administrator. It prompts
@@ -34,7 +34,6 @@ set -euo pipefail
 umask 077
 
 : "${KC_URL:?set KC_URL, for example https://keycloak.apps.example.com}"
-: "${KEYCLOAK_NS:?set KEYCLOAK_NS, for example keycloak}"
 : "${REALM:?set REALM, for example openshell}"
 : "${API_ID:?set API_ID, for example openshell-api-openshell-team}"
 : "${DASH_ID:?set DASH_ID, for example openshell-dashboard-openshell-team}"

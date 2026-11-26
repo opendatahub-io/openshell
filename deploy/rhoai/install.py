@@ -27,7 +27,6 @@ import yaml
 
 OWNER = "openshell.ai/installer"
 OWNER_VALUE = "odh-dashboard"
-GATEWAY_HOST = "openshell.ai/installer-gateway-host"
 INSTALL_STATE = "openshell-installer"
 # Material the charts create once and reuse on later runs. The PKI secrets are
 # reused by the certgen hook when all three exist; the key-encryption key is
@@ -984,9 +983,7 @@ class Installer:
         alone can be, because any editor can create ConfigMaps.
         """
         metadata = (namespace or {}).get("metadata") or {}
-        return (metadata.get("labels") or {}).get(OWNER) == OWNER_VALUE or bool(
-            (metadata.get("annotations") or {}).get(GATEWAY_HOST)
-        )
+        return (metadata.get("labels") or {}).get(OWNER) == OWNER_VALUE
 
     def identity_state(self):
         return {
@@ -1001,19 +998,27 @@ class Installer:
     def check_identity(self, state):
         desired = self.identity_state()
         if state is not None:
-            recorded = state.get("data", {}).get("database-mode", "sqlite")
+            data = state.get("data", {})
+            missing = sorted(key for key in desired if key not in data)
+            require(
+                not missing,
+                f"ConfigMap {INSTALL_STATE} does not record {', '.join(missing)}; "
+                "it was not written by this installer version. Reinstall into a "
+                "new namespace, or delete the gateway and its state before "
+                "installing again",
+            )
+            recorded = data["database-mode"]
             require(
                 recorded == desired["database-mode"],
                 "Database backend differs from the installer state "
                 f"({recorded!r} recorded, {desired['database-mode']!r} "
-                "configured); keep SQLite by setting gateway.database.mode to "
-                '"sqlite", or migrate the data explicitly before changing the '
+                "configured); set gateway.database.mode to the recorded "
+                "backend, or migrate the data explicitly before changing the "
                 "backend",
             )
-        for key, value in (state or {}).get("data", {}).items():
-            if key in desired:
+            for key, value in desired.items():
                 require(
-                    value == desired[key],
+                    data[key] == value,
                     f"Installer identity {key} changed; explicit identity/certificate migration is required",
                 )
         states = json.loads(
@@ -1040,7 +1045,7 @@ class Installer:
             if "oidc-issuer" not in data:
                 print(
                     colorize(
-                        f"Note: legacy installer state in {other['metadata']['namespace']} "
+                        f"Note: installer state in {other['metadata']['namespace']} "
                         "has no identity metadata; verify audience isolation manually.",
                         "33",
                     )
@@ -1096,20 +1101,10 @@ class Installer:
             not state or state["metadata"].get("labels", {}).get(OWNER) == OWNER_VALUE,
             f"ConfigMap {INSTALL_STATE} already exists outside this installer",
         )
-        # Preserve compatibility with installations made before state moved off
-        # the Namespace. Never modify administrator-owned Namespace metadata.
-        legacy_host = (
-            (namespace or {})
-            .get("metadata", {})
-            .get("annotations", {})
-            .get(GATEWAY_HOST)
-        )
-        original_host = (
-            state.get("data", {}).get("gateway-host") if state else legacy_host
-        )
         require(
-            not (state or legacy_host)
-            or original_host == self.config["gateway"]["host"],
+            not state
+            or state.get("data", {}).get("gateway-host")
+            == self.config["gateway"]["host"],
             "Gateway hostname differs from the original install; certificate migration is required",
         )
         # The ConfigMap label is not proof of ownership: it is writable from
@@ -1126,7 +1121,7 @@ class Installer:
         # The namespace marker alone is not enough: require the state record it
         # should accompany, so a deleted state ConfigMap cannot leave orphaned
         # key material that a rerun would silently reuse.
-        trusted = self.namespace_owned(namespace) and bool(state or legacy_host)
+        trusted = self.namespace_owned(namespace) and bool(state)
         if pre_existing and not trusted:
             require(
                 self.adopt_existing,
@@ -1143,9 +1138,9 @@ class Installer:
             )
         self.check_identity(state)
         if namespace:
-            self.check_releases(managed=bool(state or legacy_host))
+            self.check_releases(managed=bool(state))
         require(
-            state or legacy_host or self.config["oidc"].get("client_secret_file"),
+            state or self.config["oidc"].get("client_secret_file"),
             "oidc.client_secret_file is required for the first install",
         )
         self.database(namespace_exists=bool(namespace), check_only=True)
@@ -1325,21 +1320,6 @@ class Installer:
                     },
                     "data": self.identity_state(),
                 }
-            )
-        else:
-            # Add identity metadata to legacy state only after preflight passed.
-            self.run(
-                [
-                    *self.kube,
-                    "-n",
-                    self.ns,
-                    "patch",
-                    "configmap",
-                    INSTALL_STATE,
-                    "--type=merge",
-                    "-p",
-                    json.dumps({"data": self.identity_state()}),
-                ]
             )
         self.database_secret()
         self.database(namespace_exists=True)

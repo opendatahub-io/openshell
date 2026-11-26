@@ -99,11 +99,6 @@ class FakeCluster(installer.Installer):
             return json.dumps({"items": self.nodes})
         if "--all-namespaces" in args:
             return json.dumps({"items": self.other_states})
-        if "patch" in args:
-            self.objects[("configmap", installer.INSTALL_STATE)]["data"].update(
-                json.loads(args[args.index("-p") + 1])["data"]
-            )
-            return ""
         if args[:2] == ["helm", "pull"]:
             destination = Path(args[args.index("--destination") + 1])
             (destination / "chart.tgz").write_bytes(b"fake")
@@ -505,7 +500,7 @@ class InstallTests(unittest.TestCase):
         self.assertIn("Default StorageClass: none\n", output.getvalue())
         self.assertIn("server.workspaceStorageClass: custom", output.getvalue())
 
-    def test_database_state_blocks_switching_and_reads_legacy_state_as_sqlite(self):
+    def test_database_state_blocks_switching(self):
         cluster = self.cluster()
         cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
         self.database_config()
@@ -513,23 +508,39 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Database backend differs"):
             cluster.preflight()
 
-        self.config = configuration()
-        legacy = self.cluster()
-        legacy.objects[("namespace", legacy.ns)] = {"metadata": {}}
-        legacy.objects[("configmap", installer.INSTALL_STATE)] = {
-            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
-            "data": {"gateway-host": legacy.config["gateway"]["host"]},
-        }
-        legacy.adopt_existing = True
-        legacy.preflight()
-        self.config = configuration()
+    def test_incomplete_installer_state_is_rejected(self):
+        # State without the full identity (for example from a pre-release
+        # installer) must not pass as a match: a missing database-mode would
+        # otherwise let a rerun switch backends without the guard.
         self.config["gateway"].pop("database")
         (self.root / installer.DB_URI_FILE).write_text(
             "postgresql://openshell:secret@db.example.com:5432/openshell\n"
         )
-        legacy.config = self.load()
-        with self.assertRaisesRegex(ValueError, "Database backend differs"):
-            legacy.preflight()
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}}
+        }
+        cluster.objects[("configmap", installer.INSTALL_STATE)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
+            "data": {"gateway-host": cluster.config["gateway"]["host"]},
+        }
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "does not record database-mode"):
+            cluster.preflight()
+        self.assertEqual(cluster.objects, before)
+        for key in cluster.identity_state():
+            if key == "gateway-host":
+                continue  # checked earlier, as the hostname guard
+            data = cluster.identity_state()
+            del data[key]
+            cluster.objects[("configmap", installer.INSTALL_STATE)]["data"] = data
+            before = copy.deepcopy(cluster.objects)
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(ValueError, f"does not record {key}"),
+            ):
+                cluster.preflight()
+            self.assertEqual(cluster.objects, before)
 
     def test_database_preflight_reports_without_creating_the_secret(self):
         self.database_config()
@@ -881,7 +892,7 @@ class InstallTests(unittest.TestCase):
         cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
         cluster.objects[("configmap", installer.INSTALL_STATE)] = {
             "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
-            "data": {"gateway-host": cluster.config["gateway"]["host"]},
+            "data": cluster.identity_state(),
         }
         reusable = (*installer.PKI_SECRETS, installer.CREDENTIAL_KEK_SECRET)
         for name in reusable:
@@ -897,6 +908,19 @@ class InstallTests(unittest.TestCase):
         cluster.adopt_existing = True
         cluster.preflight()
 
+    def test_preexisting_dashboard_oidc_secret_alone_requires_adoption(self):
+        # A planted cookie secret would otherwise be reused by the dashboard.
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        cluster.objects[("secret", installer.OIDC_SECRET)] = {
+            "data": {"planted": "MQ=="}
+        }
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "--adopt-existing") as raised:
+            cluster.preflight()
+        self.assertIn(f"secret/{installer.OIDC_SECRET}", str(raised.exception))
+        self.assertEqual(cluster.objects, before)
+
     def test_namespace_owner_label_grants_ownership_without_adoption(self):
         cluster = self.cluster()
         cluster.objects[("namespace", cluster.ns)] = {
@@ -904,12 +928,28 @@ class InstallTests(unittest.TestCase):
         }
         cluster.objects[("configmap", installer.INSTALL_STATE)] = {
             "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
-            "data": {
-                "gateway-host": cluster.config["gateway"]["host"],
-                "database-mode": "sqlite",
-            },
+            "data": cluster.identity_state(),
         }
         cluster.preflight()
+
+    def test_namespace_annotation_does_not_grant_ownership(self):
+        # Only the owner label on the Namespace proves the installer created it.
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {
+            "metadata": {
+                "annotations": {
+                    "openshell.ai/installer-gateway-host": cluster.config["gateway"][
+                        "host"
+                    ]
+                }
+            }
+        }
+        cluster.objects[("configmap", installer.INSTALL_STATE)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
+            "data": cluster.identity_state(),
+        }
+        with self.assertRaisesRegex(ValueError, "--adopt-existing"):
+            cluster.preflight()
 
     def test_owned_namespace_without_state_requires_adoption(self):
         # A deleted state ConfigMap must not let a rerun reuse orphaned certs.
@@ -930,10 +970,11 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(
             namespace["metadata"]["labels"][installer.OWNER], installer.OWNER_VALUE
         )
-        # The rerun needs no adoption flag because the namespace proves ownership.
-        cluster.calls.clear()
+        # The rerun finds reusable objects, which would require adoption in an
+        # unowned namespace; the label proves ownership, so no flag is needed.
+        self.assertIn(("configmap", installer.INSTALL_STATE), cluster.objects)
+        self.assertIn(("secret", installer.OIDC_SECRET), cluster.objects)
         cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
-        self.assertFalse(cluster.adopt_existing)
 
     def test_adopt_existing_flag_is_forwarded_to_preflight(self):
         path = self.root / "config.json"
@@ -968,27 +1009,6 @@ class InstallTests(unittest.TestCase):
         ):
             installer.main()
         self.assertEqual(seen, [True])
-
-    def test_legacy_install_migrates_without_modifying_namespace(self):
-        cluster = self.cluster()
-        namespace = {
-            "metadata": {
-                "labels": {installer.OWNER: installer.OWNER_VALUE},
-                "annotations": {
-                    installer.GATEWAY_HOST: cluster.config["gateway"]["host"]
-                },
-            }
-        }
-        cluster.objects[("namespace", cluster.ns)] = copy.deepcopy(namespace)
-        cluster.releases = [{"name": "openshell", "chart": "helm-chart-0.1.3"}]
-        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
-        self.assertEqual(cluster.objects[("namespace", cluster.ns)], namespace)
-        self.assertEqual(
-            cluster.objects[("configmap", installer.INSTALL_STATE)]["data"][
-                "gateway-host"
-            ],
-            cluster.config["gateway"]["host"],
-        )
 
     def test_missing_prerequisite_stops_before_mutation(self):
         cluster = self.cluster()

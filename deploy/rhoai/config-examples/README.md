@@ -57,7 +57,8 @@ unset DB_URI
 chmod 600 "$CONFIG_DIR/gateway-db-uri.txt"
 ```
 
-The URI uses `postgresql://user:password@host:5432/database`. The installer
+The URI uses `postgresql://user:password@host:5432/database`; add
+`?sslmode=verify-full` for a database outside the cluster. The installer
 validates ASCII, the scheme, the host, and the absence of a fragment; it does
 not test connectivity. SQLite mode rejects `uri_file`. Switching the recorded
 backend in either direction is rejected by installer state; migrate the data

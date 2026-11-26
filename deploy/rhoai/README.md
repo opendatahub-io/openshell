@@ -7,6 +7,12 @@ web UI for managing workspaces and sandboxes.
 namespace using Helm. This guide uses the RHOAI 3.6 image pins and PostgreSQL
 configuration in `config-examples/config.example-rhoai-3.6-postgresql-keycloak.json`.
 
+The installer is an interim tool until an OpenShift Operator deploys OpenShell.
+It first ships with RHOAI 3.6 GA. Rerunning it against an existing installation
+works only for installations made with the RHOAI 3.6 GA version or later.
+The installer refuses installations made with earlier development versions,
+or asks for `--adopt-existing`; reinstall those into a new namespace.
+
 ## Prerequisites
 
 - OpenShift 4.20 or newer on amd64 nodes, with the Red Hat Build of Agent
@@ -87,8 +93,23 @@ unset DB_URI
 chmod 600 "$CONFIG_DIR/gateway-db-uri.txt"
 ```
 
-Use a URI such as `postgresql://user:password@host:5432/database`. Keep the
-database password out of `config.json`.
+Use a URI such as
+`postgresql://user:password@host:5432/database?sslmode=verify-full`. Keep the
+database password out of `config.json`. Without `sslmode`, the gateway uses
+TLS only when the server offers it and does not verify the certificate. With
+`verify-full`, the server certificate must chain to a CA in the gateway
+image's system trust store. The installer does not mount a separate database
+CA, so a database signed by a private CA cannot use `verify-full` yet;
+`sslmode=require` encrypts the connection but does not verify the server.
+
+The database outlives the namespace. The gateway encrypts stored provider
+credentials with the key in the `openshell-credential-storage-key-encryption-key`
+Secret, so back up that Secret together with the database. If you reinstall
+into a recreated namespace against the same database, create the namespace,
+restore the Secret, and run the installer with `--adopt-existing`: the
+restored key counts as existing key material, and deleting it as the
+installer's error suggests makes the chart generate a new key that cannot
+decrypt the stored credentials.
 
 The Keycloak development guide uses the cluster's default ingress certificate.
 For that setup, create the CA file referenced by `oidc.ca_file` in the example:
@@ -109,8 +130,16 @@ in `config.json` and use the `CONFIG_DIR` from above:
 
 ```shell
 export NS=openshell-team
-oc get namespace "$NS" >/dev/null 2>&1 || oc create namespace "$NS"
+if ! oc get namespace "$NS" >/dev/null 2>&1; then
+  oc create namespace "$NS" &&
+    oc label namespace "$NS" openshell.ai/installer=odh-dashboard
+fi
 ```
+
+The label marks the new, empty namespace as created for the installer, so
+reruns do not need `--adopt-existing`. Do not add it to a namespace that
+already existed; see
+[Reinstalling into an existing namespace](#reinstalling-into-an-existing-namespace).
 
 Create a password Secret and a persistent volume claim:
 
@@ -190,17 +219,24 @@ one, or `--namespace NAME` to override the configured namespace. The installer
 prints the gateway and Dashboard URLs and the next steps for registering the
 gateway with the OpenShell CLI.
 
+### Reinstalling into an existing namespace
+
 When the namespace already exists and holds installer state (the
 `openshell-installer` ConfigMap) or gateway key material
 (`openshell-server-tls`, `openshell-client-tls`, `openshell-jwt-keys`,
 `openshell-credential-storage-key-encryption-key`, `openshell-dashboard-oidc`),
-the installer reuses it only when the namespace
-proves it created the deployment. A namespace created by the installer carries
-the `openshell.ai/installer: odh-dashboard` label. If you pre-create the
-namespace, add that label, or pass `--adopt-existing` after confirming the
-objects come from a previous installation of this gateway. Namespace editors
-cannot set the label on a namespace they do not administer, so the installer
-does not trust the ConfigMap label alone.
+the installer reuses it only when the namespace proves the installer created
+the deployment: the Namespace carries the `openshell.ai/installer:
+odh-dashboard` label and the installer state is present. The installer sets the
+label when it creates the namespace. Namespace editors cannot set it on a
+namespace they do not administer, so the installer does not trust the ConfigMap
+label alone.
+
+Do not add the label to a namespace that other users could already write to,
+such as an existing Data Science Project: anyone with edit access could have
+planted these objects, and the gateway would reuse their keys. Instead, inspect
+the listed objects and pass `--adopt-existing` only if they come from a
+previous installation of this gateway; otherwise delete them first.
 
 ## Install directly with Helm
 
