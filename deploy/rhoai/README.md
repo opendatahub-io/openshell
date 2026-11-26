@@ -13,7 +13,8 @@ works only for installations made with the RHOAI 3.6 GA version or later.
 The installer refuses installations made with earlier development versions,
 or asks for `--adopt-existing`; reinstall those into a new namespace. To move
 an installation to newer releases, see
-[Upgrade an installation](#upgrade-an-installation).
+[Upgrade an installation](#upgrade-an-installation); to remove it, see
+[Uninstall](#uninstall).
 
 ## Prerequisites
 
@@ -521,6 +522,68 @@ After the upgrade:
 You cannot roll back in place. To return to the previous versions, restore the
 database backup into an empty database, then rerun the installer with the
 previous configuration.
+
+## Uninstall
+
+Uninstalling deletes the sandboxes, the gateway's keys, and in SQLite mode the
+gateway data. To reinstall later with the same data, back up the database and
+the key-encryption key Secret first, as described in
+[Upgrade an installation](#upgrade-an-installation).
+
+While the gateway is still running, delete the sandboxes in each workspace and
+remove the CLI registration:
+
+```shell
+openshell workspace list
+openshell sandbox delete --all --workspace <workspace>
+openshell gateway remove "$NS"
+```
+
+Uninstall both releases. This also removes the gateway's cluster-scoped RBAC,
+which deleting the namespace alone would leave behind:
+
+```shell
+helm uninstall openshell-dashboard -n "$NS"
+helm uninstall openshell -n "$NS"
+```
+
+Helm keeps the objects that the installer created and the key material the
+gateway chart reuses on reinstall. If the installer created the namespace for
+this deployment, delete the namespace. This also removes the development
+PostgreSQL database if you deployed it there:
+
+```shell
+oc delete namespace "$NS"
+```
+
+In a namespace that also holds other workloads, delete the remaining objects
+and the ownership label instead:
+
+```shell
+oc -n "$NS" delete configmap openshell-installer openshell-oidc-ca --ignore-not-found
+oc -n "$NS" delete secret openshell-gateway-db openshell-dashboard-oidc \
+  openshell-server-tls openshell-client-tls openshell-jwt-keys \
+  openshell-credential-storage-key-encryption-key --ignore-not-found
+oc -n "$NS" delete pvc openshell-data-openshell-0 --ignore-not-found
+oc label namespace "$NS" openshell.ai/installer-
+```
+
+For the development database, also run:
+
+```shell
+oc -n "$NS" delete all -l app=openshell-db
+oc -n "$NS" delete pvc openshell-db-data
+oc -n "$NS" delete secret openshell-db-secret
+```
+
+Check `oc -n "$NS" get pvc` for leftover sandbox workspace claims.
+
+The installer does not manage an external database or the identity provider:
+drop the OpenShell database with your database's tooling, and remove the OIDC
+clients as described in the
+[Keycloak development guide](keycloak-dev-guide.md#cleanup). Delete
+`$CONFIG_DIR` when you no longer need it; it holds the client secret and the
+database URI.
 
 ## Disconnected clusters
 
