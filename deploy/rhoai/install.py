@@ -1143,7 +1143,7 @@ class Installer:
             state or self.config["oidc"].get("client_secret_file"),
             "oidc.client_secret_file is required for the first install",
         )
-        self.database(namespace_exists=bool(namespace), check_only=True)
+        self.database(check_only=True, namespace_exists=bool(namespace))
         self.credentials(check_only=True, namespace_exists=bool(namespace))
         return namespace
 
@@ -1172,19 +1172,38 @@ class Installer:
         )
         return uri
 
-    def database(self, *, namespace_exists, check_only=False):
+    def database(self, check_only=False, *, namespace_exists=True):
+        require(
+            namespace_exists or check_only,
+            "Create the namespace before the database Secret",
+        )
         uri = self.database_uri()
         if uri is None:
             return
-        print(
-            f"{colorize('Database:', '1')} external PostgreSQL via Secret {DB_SECRET}"
-        )
+        if check_only:
+            print(
+                f"{colorize('Database:', '1')} external PostgreSQL via Secret {DB_SECRET}"
+            )
         if not namespace_exists:
             return
         existing = self.get("secret", DB_SECRET)
         if existing is None:
             if check_only:
                 print(f"  Secret {DB_SECRET} will be created during the install.")
+                return
+            self.create(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "type": "Opaque",
+                    "metadata": {
+                        "name": DB_SECRET,
+                        "namespace": self.ns,
+                        "labels": {OWNER: OWNER_VALUE},
+                    },
+                    "data": {"uri": base64.b64encode(uri).decode()},
+                }
+            )
             return
         data = existing.get("data", {})
         require(
@@ -1195,24 +1214,6 @@ class Installer:
             base64.b64decode(data["uri"]) == uri,
             f"Database URI differs from Secret {DB_SECRET}; rotate the Secret "
             "explicitly before rerunning",
-        )
-
-    def database_secret(self):
-        uri = self.database_uri()
-        if uri is None or self.get("secret", DB_SECRET) is not None:
-            return
-        self.create(
-            {
-                "apiVersion": "v1",
-                "kind": "Secret",
-                "type": "Opaque",
-                "metadata": {
-                    "name": DB_SECRET,
-                    "namespace": self.ns,
-                    "labels": {OWNER: OWNER_VALUE},
-                },
-                "data": {"uri": base64.b64encode(uri).decode()},
-            }
         )
 
     def credentials(self, check_only=False, *, namespace_exists=True):
@@ -1321,8 +1322,7 @@ class Installer:
                     "data": self.identity_state(),
                 }
             )
-        self.database_secret()
-        self.database(namespace_exists=True)
+        self.database()
         self.credentials()
         for index, release in enumerate(("openshell", "openshell-dashboard")):
             print(

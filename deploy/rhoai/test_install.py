@@ -11,6 +11,7 @@ import copy
 import importlib.util
 import io
 import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -402,27 +403,29 @@ class InstallTests(unittest.TestCase):
             "postgres://openshell:secret@db.example.com:5432/openshell",
             "postgresql://openshell:secret@db.example.com/openshell?sslmode=require",
         )
-        rejected = (
-            "mysql://openshell:secret@db.example.com/openshell",
-            "",
-            "\n",
-            "postgresql://openshell:secret@db.example.com/openshell#fragment",
-            "postgresql://openshell:sécrét@db.example.com/openshell",
-        )
-        for uri in accepted + rejected:
+        url_error = "must be a postgresql:// or postgres:// URL with a host"
+        rejected = {
+            "mysql://openshell:secret@db.example.com/openshell": url_error,
+            "": "contains no URI",
+            "\n": "contains no URI",
+            "postgresql://openshell:secret@db.example.com/openshell#fragment": url_error,
+            "postgresql://openshell:sécrét@db.example.com/openshell": "must be ASCII",
+            "postgresql:///openshell": url_error,
+            "postgresql://": url_error,
+            "postgresql://[::1/openshell": url_error,
+        }
+        for uri in accepted:
             with self.subTest(uri=uri):
                 self.config = configuration()
                 self.database_config(uri=uri)
-                try:
-                    cluster = self.cluster()
-                except ValueError:
-                    self.assertNotIn(uri, accepted)
-                    continue
-                if uri in accepted:
-                    self.assertEqual(cluster.database_uri(), uri.encode())
-                else:
-                    with self.assertRaises(ValueError):
-                        cluster.database_uri()
+                self.assertEqual(self.cluster().database_uri(), uri.encode())
+        for uri, message in rejected.items():
+            with self.subTest(uri=uri):
+                self.config = configuration()
+                self.database_config(uri=uri)
+                cluster = self.cluster()
+                with self.assertRaisesRegex(ValueError, re.escape(message)):
+                    cluster.database_uri()
 
     def test_database_secret_is_stdin_only_and_rotation_is_explicit(self):
         self.database_config()
@@ -459,6 +462,22 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differs"):
             cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
         self.assertEqual(cluster.objects, before)
+
+    def test_postgresql_install_into_new_namespace_creates_the_secret(self):
+        self.database_config()
+        cluster = self.cluster()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        secret = cluster.objects[("secret", installer.DB_SECRET)]
+        self.assertEqual(
+            base64.b64decode(secret["data"]["uri"]),
+            b"postgresql://openshell:secret@db.example.com:5432/openshell",
+        )
+        self.assertEqual(
+            secret["metadata"]["labels"][installer.OWNER], installer.OWNER_VALUE
+        )
+        self.assertEqual(output.getvalue().count("Database:"), 1)
 
     def test_postgresql_storage_requirements(self):
         self.database_config()
