@@ -211,13 +211,16 @@ In a supervisor pool, one member hosts each route, but a runtime reaches an
 arbitrary member. A routed runtime therefore sends preface version `2` on every
 dial, which the supervisor answers before any TLS with a status byte, a
 length byte, and a runtime listener address as ASCII `ip:port` (IPv6
-bracketed): `1` accepts, naming the member itself (empty before it has a
-route directory), and the handshake proceeds as for version 1; `2` redirects
+bracketed): `1` accepts, naming the member itself (empty before it knows its
+pool address), and the handshake proceeds as for version 1; `2` redirects
 to the owner; `3` reports the route unknown and carries no address. A member
-redirects routes it does not host according to the gateway's route directory
-(`RuntimeRouter::set_directory`), never to its own address, and the directory
-also wins over a local registration it no longer agrees with, which is being
-released. Replies are unauthenticated hints like the handle: the member must
+knows only the routes it owns (`RuntimeRouter::set_owned`). For any other
+route it asks a resolver (`RuntimeRouter::set_resolver`; a pool member asks
+the gateway) and redirects to the owner it names, never to its own address.
+The answer also wins over a local registration the member no longer owns,
+which is being released. A lookup that times out or names no owner falls back
+to the local registration, or reports the route unknown. Replies are
+unauthenticated hints like the handle: the member must
 still complete the pinned TLS handshake, and every request still carries the
 bearer token. A lone shared supervisor accepts without naming itself, which
 tells the runtime there is no pool to probe. Version 1 prefaces, from runtimes

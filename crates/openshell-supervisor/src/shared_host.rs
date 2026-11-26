@@ -35,12 +35,12 @@ use miette::Result;
 use openshell_core::proto::supervisor_host::v1::supervisor_host_client::SupervisorHostClient;
 use openshell_core::proto::supervisor_host::v1::{
     AssignmentSnapshot, HostGatewayMessage, HostHeartbeat, HostHello, HostMessage, HostStatus,
-    PoolMember, SandboxInstanceAssignment, SandboxInstanceTakeover, host_gateway_message,
-    host_message,
+    PoolMember, RouteLookup, RouteOwner, SandboxInstanceAssignment, SandboxInstanceTakeover,
+    host_gateway_message, host_message,
 };
 use openshell_extension_core::BearerTokenSlot;
 use openshell_sandbox_backend::BoundaryTakeover;
-use openshell_sandbox_backend::runtime_routed::RuntimeRouter;
+use openshell_sandbox_backend::runtime_routed::{ResolveRoute, RuntimeRouter};
 use openshell_supervisor_control::{
     PoolLimits, SandboxInstancePhaseReport, SandboxInstanceRegistration,
     SandboxInstanceStatusReport,
@@ -78,6 +78,85 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Host-to-gateway messages queued before the stream applies backpressure.
 const OUTBOUND_QUEUE: usize = 16;
+/// Routes whose owner the host asks the gateway for at once.
+const MAX_ROUTE_LOOKUPS: usize = 64;
+
+/// Asks the gateway that accepts the host's stream where a route this member
+/// does not own is supervised.
+#[derive(Default)]
+struct RouteLookups {
+    /// The accepted stream's outbound queue.
+    stream: Mutex<Option<tokio::sync::mpsc::Sender<HostMessage>>>,
+    /// Connections waiting for each route's owner.
+    waiting: Mutex<
+        std::collections::HashMap<String, Vec<tokio::sync::oneshot::Sender<Option<SocketAddr>>>>,
+    >,
+}
+
+impl RouteLookups {
+    /// Send lookups on `stream`, or on none. Lookups sent on an earlier
+    /// stream are never answered, so their callers resolve no owner.
+    fn connect(&self, stream: Option<tokio::sync::mpsc::Sender<HostMessage>>) {
+        *self
+            .stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = stream;
+        self.waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    fn answer(&self, owner: RouteOwner) {
+        let waiters = self
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&owner.route);
+        let address = owner.runtime_address.parse().ok();
+        for waiter in waiters.into_iter().flatten() {
+            let _ = waiter.send(address);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ResolveRoute for RouteLookups {
+    async fn owner(&self, route: &str) -> Option<SocketAddr> {
+        let (waiter, answer) = tokio::sync::oneshot::channel();
+        {
+            let mut waiting = self
+                .waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(waiters) = waiting.get_mut(route) {
+                waiters.push(waiter);
+            } else {
+                if waiting.len() >= MAX_ROUTE_LOOKUPS {
+                    return None;
+                }
+                let stream = self
+                    .stream
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()?;
+                // Half the queue stays free for heartbeats and status reports.
+                if stream.capacity() <= OUTBOUND_QUEUE / 2 {
+                    return None;
+                }
+                stream
+                    .try_send(HostMessage {
+                        payload: Some(host_message::Payload::RouteLookup(RouteLookup {
+                            route: route.to_string(),
+                        })),
+                    })
+                    .ok()?;
+                waiting.insert(route.to_string(), vec![waiter]);
+            }
+        }
+        answer.await.ok().flatten()
+    }
+}
 
 /// How a host notices a silent gateway and paces its reconnects: it must
 /// reach a responsive gateway replica well before its membership record
@@ -186,6 +265,7 @@ pub struct SharedHost {
     app_listener: Option<crate::app_listener::HostHandle>,
     host: SandboxInstanceHost,
     router: Arc<RuntimeRouter>,
+    route_lookups: Arc<RouteLookups>,
     gateway_endpoint: String,
     removal_grace: Duration,
     attach_request_timeout: Duration,
@@ -305,10 +385,13 @@ impl SharedHost {
         let host = SandboxInstanceHost::new(config.instance_root)?;
         let router = RuntimeRouter::bind(config.runtime_listen)
             .map_err(|error| miette::miette!("{error}"))?;
+        let route_lookups = Arc::new(RouteLookups::default());
+        router.set_resolver(route_lookups.clone());
         Ok(Arc::new(Self {
             app_listener,
             host,
             router,
+            route_lookups,
             gateway_endpoint: config.gateway_endpoint,
             removal_grace: config.removal_grace,
             attach_request_timeout: config.attach_request_timeout,
@@ -534,24 +617,15 @@ impl SharedHost {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             snapshot.stop_routes.iter().cloned().collect();
-        // Runtimes that reach this member for an instance another member
-        // supervises are redirected there.
-        let owners = snapshot
-            .route_directory
-            .iter()
-            .filter_map(|entry| {
-                let address = entry.runtime_address.parse().ok();
-                if address.is_none() {
-                    tracing::warn!(route = %entry.route, "ignoring a malformed route directory address");
-                }
-                Some((entry.route.clone(), address?))
-            })
-            .collect();
-        self.router
-            .set_directory(Some(self.pool.runtime_address), owners);
         // Owned instances the gateway could not describe yet are kept as they
         // are: neither started, released, nor stopped.
         routes.extend(snapshot.keep_routes.iter().cloned());
+        // Runtimes that reach this member for any other route are redirected
+        // to the owner the gateway names.
+        self.router.set_owned(
+            Some(self.pool.runtime_address),
+            routes.iter().cloned().collect(),
+        );
         let hosted = self
             .host
             .list()
@@ -1514,6 +1588,8 @@ async fn run_stream(
                         accepted = true;
                         host.gateway_connected.send_replace(true);
                         host.gateway_home.send_replace(Some(accepted_message.peer_endpoint.clone()));
+                        host.route_lookups
+                            .connect(accepted_message.route_lookups.then(|| tx.clone()));
                         tracing::info!(session = %accepted_message.session_id, "gateway accepted the supervisor host");
                         // A pool gateway detects failed members by silence,
                         // so it asks for more frequent heartbeats.
@@ -1552,6 +1628,7 @@ async fn run_stream(
                         received_revision = snapshot.revision;
                         reconciler.submit(stream, snapshot);
                     }
+                    Some(host_gateway_message::Payload::RouteOwner(owner)) => host.route_lookups.answer(owner),
                     Some(host_gateway_message::Payload::Heartbeat(_)) | None => {}
                 }
             }
@@ -1617,6 +1694,7 @@ async fn run_stream(
             }
         }
     };
+    host.route_lookups.connect(None);
     host.gateway_connected.send_replace(false);
     host.gateway_home.send_replace(None);
     end
@@ -2063,17 +2141,34 @@ mod tests {
             pool: true,
             instances,
             stop_routes: vec![stopped_route.to_string()],
-            route_directory: vec![openshell_core::proto::supervisor_host::v1::RouteOwner {
-                route: elsewhere.to_string(),
-                runtime_address: owner.to_string(),
-            }],
             ..AssignmentSnapshot::default()
         })
         .await
         .expect("an oversized snapshot is applied, not refused");
+        // The gateway names the owner of a route this member does not own.
+        let (lookups, mut asked) = tokio::sync::mpsc::channel(OUTBOUND_QUEUE);
+        host.route_lookups.connect(Some(lookups));
+        let gateway = {
+            let host = host.clone();
+            tokio::spawn(async move {
+                while let Some(HostMessage {
+                    payload: Some(host_message::Payload::RouteLookup(lookup)),
+                }) = asked.recv().await
+                {
+                    host.route_lookups.answer(RouteOwner {
+                        runtime_address: if lookup.route == elsewhere {
+                            owner.to_string()
+                        } else {
+                            String::new()
+                        },
+                        route: lookup.route,
+                    });
+                }
+            })
+        };
 
-        // The listed stop ran, the hosted instance stays, and the directory
-        // redirects runtimes of routes owned elsewhere.
+        // The listed stop ran, the hosted instance stays, and runtimes of
+        // routes owned elsewhere are redirected to the owner.
         assert_eq!(stops.try_recv(), Ok(()));
         assert!(host.status(stopped_route).is_none());
         assert_eq!(
@@ -2091,6 +2186,8 @@ mod tests {
                 .unwrap(),
             openshell_sandbox_backend::runtime_routed::RouteReply::Redirect(owner)
         );
+        host.route_lookups.connect(None);
+        gateway.abort();
         // Only up to capacity was attempted: the hosted instance and all but
         // the last new one in route order; the last stays unstarted.
         let rejected = host.rejected.lock().unwrap().clone();
@@ -2100,6 +2197,55 @@ mod tests {
         assert!(rejected.contains_key("rt-new-0000-0123456789"));
         assert!(host.list().iter().all(|status| status.route != last));
         host.shut_down().await;
+    }
+
+    #[tokio::test]
+    async fn route_lookups_share_one_request_and_never_crowd_the_stream() {
+        let lookups = Arc::new(RouteLookups::default());
+        assert_eq!(lookups.owner("rt-a").await, None, "no stream, no owner");
+
+        let (stream, mut sent) = tokio::sync::mpsc::channel(OUTBOUND_QUEUE);
+        lookups.connect(Some(stream.clone()));
+        let first = tokio::spawn({
+            let lookups = lookups.clone();
+            async move { lookups.owner("rt-a").await }
+        });
+        let second = tokio::spawn({
+            let lookups = lookups.clone();
+            async move { lookups.owner("rt-a").await }
+        });
+        let asked = sent.recv().await.expect("a lookup is sent");
+        assert!(matches!(
+            asked.payload,
+            Some(host_message::Payload::RouteLookup(RouteLookup { ref route })) if route == "rt-a"
+        ));
+        while lookups.waiting.lock().unwrap().get("rt-a").map(Vec::len) != Some(2) {
+            tokio::task::yield_now().await;
+        }
+        assert!(sent.try_recv().is_err(), "the same route is asked once");
+        let owner: SocketAddr = "10.0.0.2:5500".parse().unwrap();
+        lookups.answer(RouteOwner {
+            route: "rt-a".to_string(),
+            runtime_address: owner.to_string(),
+        });
+        assert_eq!(first.await.unwrap(), Some(owner));
+        assert_eq!(second.await.unwrap(), Some(owner));
+
+        // A lookup the stream would have to queue behind heartbeats is not sent.
+        for _ in 0..=OUTBOUND_QUEUE / 2 {
+            stream.try_send(HostMessage::default()).unwrap();
+        }
+        assert_eq!(lookups.owner("rt-b").await, None);
+        while sent.try_recv().is_ok() {}
+
+        // Dropping the stream releases lookups it will never answer.
+        let pending = tokio::spawn({
+            let lookups = lookups.clone();
+            async move { lookups.owner("rt-c").await }
+        });
+        sent.recv().await.expect("a lookup is sent");
+        lookups.connect(None);
+        assert_eq!(pending.await.unwrap(), None);
     }
 
     /// How one connection attempt to a [`FakeGateway`] goes.
@@ -2187,6 +2333,7 @@ mod tests {
                     nanos: 0,
                 }),
                 peer_endpoint: peer_endpoint.to_string(),
+                route_lookups: true,
             },
         ))
     }
@@ -2318,6 +2465,47 @@ mod tests {
             }
         });
         (reported, gateway)
+    }
+
+    /// A replica that predates lookups ends the stream on one, so the host
+    /// asks only replicas that accept with `route_lookups`.
+    #[tokio::test(start_paused = true)]
+    async fn route_lookups_go_only_to_a_gateway_that_answers_them() {
+        for answers in [false, true] {
+            let (host, _gateway, mut streams, _root) = attach_pool_host(vec![Attempt::Now]);
+            let mut stream = streams.recv().await.unwrap();
+            assert!(is_hello(stream.outbound.recv().await));
+            let mut accepted = accepted();
+            if let Some(host_gateway_message::Payload::Accepted(message)) = &mut accepted.payload {
+                message.route_lookups = answers;
+            }
+            stream.inbound.send(Ok(accepted)).await.unwrap();
+            assert!(next_status(&mut stream.outbound).await.is_some());
+
+            let lookup = tokio::spawn({
+                let host = host.clone();
+                async move { host.route_lookups.owner("rt-elsewhere-0123456789").await }
+            });
+            if answers {
+                loop {
+                    match stream.outbound.recv().await.and_then(|m| m.payload) {
+                        Some(host_message::Payload::RouteLookup(_)) => break,
+                        Some(_) => {}
+                        None => panic!("the stream ended before a lookup was sent"),
+                    }
+                }
+                lookup.abort();
+            } else {
+                assert_eq!(lookup.await.unwrap(), None);
+                while let Ok(message) = stream.outbound.try_recv() {
+                    assert!(!matches!(
+                        message.payload,
+                        Some(host_message::Payload::RouteLookup(_))
+                    ));
+                }
+            }
+            host.shut_down().await;
+        }
     }
 
     /// The part of the reconnect budget the host itself spends: everything

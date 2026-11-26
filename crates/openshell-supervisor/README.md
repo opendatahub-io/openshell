@@ -259,8 +259,9 @@ control listener: it dials the gateway and receives its assignments from it.
   deferred, reported as starting, and retried at the heartbeat cadence. The
   host follows the gateway's heartbeat interval, offers each instance's
   runtime the recovery deadline of the latest snapshot
-  (`recovery_timeout_secs`) when it attaches, feeds the route directory to the
-  runtime router for redirects, and on SIGTERM announces that it is
+  (`recovery_timeout_secs`) when it attaches, redirects a runtime that reaches
+  it for a route it does not own to the owner the gateway names
+  (`RouteLookup`), and on SIGTERM announces that it is
   leaving, waits up to 40 seconds for the gateway to move its instances, and
   relinquishes what remains.
 

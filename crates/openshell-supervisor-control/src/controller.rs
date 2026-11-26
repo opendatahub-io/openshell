@@ -907,6 +907,7 @@ impl SupervisorHostController {
                     nanos: 0,
                 }),
                 peer_endpoint,
+                route_lookups: true,
             })),
         }))
         .await
@@ -1086,9 +1087,30 @@ impl SupervisorHostController {
         Ok(())
     }
 
+    /// Where `route` is supervised: the runtime listener of the live member
+    /// that owns it, or empty when none does.
+    fn route_owner(&self, route: String) -> RouteOwner {
+        let pool = lock(&self.inner.pool);
+        let runtime_address = pool
+            .view
+            .owners
+            .get(&route)
+            .and_then(|owner| {
+                pool.view
+                    .members
+                    .iter()
+                    .find(|member| member.member_id == owner.member_id)
+            })
+            .map(|member| member.runtime_address.clone())
+            .unwrap_or_default();
+        RouteOwner {
+            route,
+            runtime_address,
+        }
+    }
+
     /// The snapshot for session `id`'s member: the instances its process
-    /// owns, the stop list, and the route directory. `None` until it can be
-    /// authoritative.
+    /// owns and the stop list. `None` until it can be authoritative.
     fn snapshot(&self, id: u64) -> Option<AssignmentSnapshot> {
         let mut desired = lock(&self.inner.desired);
         if !desired.initialized {
@@ -1143,23 +1165,6 @@ impl SupervisorHostController {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let addresses = pool
-            .view
-            .members
-            .iter()
-            .map(|member| (member.member_id.as_str(), member.runtime_address.as_str()))
-            .collect::<BTreeMap<_, _>>();
-        let route_directory = pool
-            .view
-            .owners
-            .iter()
-            .filter_map(|(route, owner)| {
-                Some(RouteOwner {
-                    route: route.clone(),
-                    runtime_address: (*addresses.get(owner.member_id.as_str())?).to_string(),
-                })
-            })
-            .collect();
         // Owned desired instances whose launch material this gateway has not
         // loaded yet are kept as they are rather than released.
         let kept_terms = pool
@@ -1185,12 +1190,12 @@ impl SupervisorHostController {
             instances,
             pool: true,
             stop_routes,
-            route_directory,
             keep_routes,
             recovery_timeout: Some(prost_types::Duration {
                 seconds: i64::from(pool.recovery_timeout_secs),
                 nanos: 0,
             }),
+            ..AssignmentSnapshot::default()
         })
     }
 
@@ -1240,7 +1245,6 @@ impl SupervisorHostController {
                 let unchanged = last_snapshot.as_ref().is_some_and(|previous| {
                     previous.instances == snapshot.instances
                         && previous.stop_routes == snapshot.stop_routes
-                        && previous.route_directory == snapshot.route_directory
                         && previous.keep_routes == snapshot.keep_routes
                 });
                 if !unchanged {
@@ -1274,6 +1278,13 @@ impl SupervisorHostController {
                     }
                     Some(Ok(HostMessage { payload: Some(host_message::Payload::Heartbeat(_)) })) => {
                         last_heard = tokio::time::Instant::now();
+                    }
+                    Some(Ok(HostMessage { payload: Some(host_message::Payload::RouteLookup(lookup)) })) => {
+                        last_heard = tokio::time::Instant::now();
+                        let owner = self.route_owner(lookup.route);
+                        if !send(host_gateway_message::Payload::RouteOwner(owner)).await {
+                            return;
+                        }
                     }
                     Some(Ok(_)) => {
                         let _ = tx
@@ -1604,6 +1615,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_member_snapshot_does_not_grow_with_the_pool() {
+        use prost::Message as _;
+
+        let controller = SupervisorHostController::new();
+        let (one, _) = controller
+            .begin_session(identity(), &member_hello("m1", "p1", 1))
+            .unwrap();
+        let mut view = loaded_view(
+            vec![member_view("m1", "p1"), member_view("m-2", "p2")],
+            [("rt-own-0000000000000", owner("m1", "p1", 1))],
+        );
+        for index in 0..crate::pool_limits::MAX_POOL_INSTANCES_CEILING {
+            let route = format!("rt-{index:029}");
+            view.desired.insert(route.clone());
+            view.owners.insert(route, owner("m-2", "p2", 1));
+        }
+        controller.update_pool(view, tokio::time::Instant::now());
+
+        let snapshot = controller.snapshot(one).unwrap();
+        assert_eq!(routes(&snapshot), ["rt-own-0000000000000"]);
+        assert!(
+            snapshot.encoded_len() <= PoolLimits::new(1, 1).unwrap().max_gateway_message_bytes()
+        );
+    }
+
+    #[tokio::test]
     async fn pool_members_receive_only_what_their_process_owns() {
         let controller = SupervisorHostController::new();
         controller.set_recovery_timeout_secs(75);
@@ -1641,14 +1678,11 @@ mod tests {
         assert_eq!(routes(&first), ["rt-a"]);
         assert!(first.instances[0].takeover.is_none());
         assert_eq!(routes(&controller.snapshot(two).unwrap()), ["rt-b"]);
-        // Every member can redirect runtimes to any instance's owner.
+        // Every member can look up any instance's owner to redirect runtimes.
+        let owner_of = |route: &str| controller.route_owner(route.to_string()).runtime_address;
         assert_eq!(
-            first
-                .route_directory
-                .iter()
-                .map(|entry| (entry.route.as_str(), entry.runtime_address.as_str()))
-                .collect::<Vec<_>>(),
-            [("rt-a", "10.0.0.2:5500"), ("rt-b", "10.0.0.3:5500")]
+            [owner_of("rt-a"), owner_of("rt-b"), owner_of("rt-unknown")],
+            ["10.0.0.2:5500", "10.0.0.3:5500", ""]
         );
 
         // A takeover moves rt-b to m1 with the new term's credentials; m2's
@@ -1935,10 +1969,10 @@ mod tests {
         assert_eq!(routes(&snapshot), ["rt-a", "rt-b"]);
         assert_eq!(snapshot.keep_routes, ["rt-c"]);
         assert!(
-            snapshot
-                .route_directory
-                .iter()
-                .any(|entry| entry.route == "rt-c")
+            !controller
+                .route_owner("rt-c".to_string())
+                .runtime_address
+                .is_empty()
         );
         // Once loaded, it is assigned.
         controller.update_pool(

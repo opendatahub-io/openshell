@@ -33,7 +33,7 @@ re-implementing the control contracts.
   term with its credentials, or with the term alone when another gateway
   replica minted them), `stop_routes` for withdrawn instances it owns,
   `keep_routes` for owned desired instances whose material this replica has
-  not loaded yet, the route directory for runtime redirects, and the recovery
+  not loaded yet, and the recovery
   deadline its hosts offer each runtime (`POOL_RECOVERY_TIMEOUT_SECS`, 60 s,
   unless configured). Omission means release, never stop. Nothing is sent
   before the first view. An instance is judged by its owning process's

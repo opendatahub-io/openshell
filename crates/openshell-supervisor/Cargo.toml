@@ -31,6 +31,7 @@ openshell-supervisor-middleware-builtins = { path = "../openshell-supervisor-mid
 openshell-supervisor-network = { path = "../openshell-supervisor-network", default-features = false }
 openshell-supervisor-process = { path = "../openshell-supervisor-process" }
 
+async-trait = "0.1"
 axum = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }

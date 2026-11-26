@@ -40,6 +40,7 @@ message HostMessage {
     HostHello hello = 1;
     HostStatus status = 2;
     HostHeartbeat heartbeat = 3;
+    RouteLookup route_lookup = 4;
   }
 }
 
@@ -51,6 +52,7 @@ message HostGatewayMessage {
     AssignmentSnapshot assignments = 3;
     HostGatewayHeartbeat heartbeat = 4;
     HostRedirect redirect = 5;
+    RouteOwner route_owner = 6;
   }
 }
 
@@ -94,6 +96,9 @@ message HostAccepted {
   // instances' sessions here so they run on the replica serving this stream.
   // Empty when the replica has no peer endpoint.
   string peer_endpoint = 3;
+  // The replica answers RouteLookup. A host sends no lookup on a stream
+  // without it, since a replica that predates lookups ends the stream on one.
+  bool route_lookups = 4;
 }
 
 // Another gateway replica should serve the host, which dials it at once. The
@@ -120,8 +125,8 @@ message AssignmentSnapshot {
   // Pool hosts only: routes whose sandbox is stopping or deleted; the host
   // stops their workloads if it still hosts them.
   repeated string stop_routes = 4;
-  // Pool hosts only: where each instance placed in the pool is supervised,
-  // so a sandbox runtime that reaches this host is redirected to its owner.
+  // Deprecated and no longer sent: a pool host asks for the owner of a route
+  // it does not own with RouteLookup instead.
   repeated RouteOwner route_directory = 5;
   // Pool hosts only: routes this host's process owns whose launch material
   // this gateway replica has not loaded yet. The host keeps supervising them
@@ -135,10 +140,18 @@ message AssignmentSnapshot {
   google.protobuf.Duration recovery_timeout = 7;
 }
 
+// A pool host asks where a route it does not own is supervised, so a sandbox
+// runtime that reached it can be redirected. The gateway answers each lookup
+// with a RouteOwner for the same route.
+message RouteLookup {
+  string route = 1;
+}
+
 // The pool member that supervises one route.
 message RouteOwner {
   string route = 1;
-  // Runtime listener address (IP:port) of the owning member.
+  // Runtime listener address (IP:port) of the owning member; empty when no
+  // live member owns the route.
   string runtime_address = 2;
 }
 

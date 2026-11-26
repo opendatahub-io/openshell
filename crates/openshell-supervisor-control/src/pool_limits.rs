@@ -9,8 +9,9 @@
 //! accept. Across the pool, the gateway runs at most
 //! [`PoolLimits::max_pool_instances`] instances: its live replicas times the
 //! members each serves times each member's cap, never past
-//! [`MAX_POOL_INSTANCES_CEILING`]. Buffers sized by these limits follow the
-//! configured cap, not the largest one allowed.
+//! [`MAX_POOL_INSTANCES_CEILING`]. A member's messages carry only its own
+//! instances, so buffers sized by these limits follow the configured
+//! per-member cap, not the size of the pool.
 
 use crate::registration::MAX_LAUNCH_MATERIAL_BYTES;
 
@@ -21,7 +22,9 @@ pub const DEFAULT_MAX_INSTANCES_PER_MEMBER: usize = 128;
 pub const MAX_INSTANCES_PER_MEMBER: usize = 1024;
 /// Pool members one gateway replica is sized to serve unless configured.
 pub const DEFAULT_MAX_MEMBERS_PER_GATEWAY: usize = 32;
-/// Most sandbox instances a pool runs, whatever its configuration.
+/// Most sandbox instances a pool runs, whatever its configuration. It bounds
+/// the pool-wide ownership state every gateway replica holds and reads when
+/// it places a sandbox.
 pub const MAX_POOL_INSTANCES_CEILING: usize = 131_072;
 
 /// Framing allowance per assignment in a snapshot, beyond its launch material.
@@ -30,9 +33,10 @@ const ASSIGNMENT_FRAMING_BYTES: usize = 1024;
 const REPORTED_INSTANCE_BYTES: usize = 1024;
 /// Smallest bound on a host message.
 const MIN_HOST_MESSAGE_BYTES: usize = 1024 * 1024;
-/// Allowance per entry of the pool-wide route directory every snapshot
-/// carries: a route handle of up to 64 bytes, an `IP:port`, and framing.
-const ROUTE_DIRECTORY_ENTRY_BYTES: usize = 128;
+/// Smallest bound on a gateway message, so a member with a small cap still
+/// decodes a snapshot whose stop and keep lists outgrow its assignments.
+const MIN_GATEWAY_MESSAGE_BYTES: usize =
+    16 * (MAX_LAUNCH_MATERIAL_BYTES + ASSIGNMENT_FRAMING_BYTES);
 /// Fewest instances a status report may describe, so a member with a small
 /// cap can still report instances it is removing or keeping.
 const MIN_REPORTED_INSTANCES: usize = 64;
@@ -107,12 +111,11 @@ impl PoolLimits {
     }
 
     /// Largest gateway message a member decodes: a full snapshot of its cap
-    /// of assignments at their largest, plus the route directory of the
-    /// largest pool.
+    /// of assignments at their largest, plus framing.
     #[must_use]
     pub fn max_gateway_message_bytes(self) -> usize {
-        self.max_instances_per_member * (MAX_LAUNCH_MATERIAL_BYTES + ASSIGNMENT_FRAMING_BYTES)
-            + MAX_POOL_INSTANCES_CEILING * ROUTE_DIRECTORY_ENTRY_BYTES
+        (self.max_instances_per_member * (MAX_LAUNCH_MATERIAL_BYTES + ASSIGNMENT_FRAMING_BYTES))
+            .max(MIN_GATEWAY_MESSAGE_BYTES)
     }
 
     /// Largest member message: a status report of every instance it may
@@ -159,29 +162,9 @@ mod tests {
         assert_eq!(
             PoolLimits::default().max_gateway_message_bytes(),
             128 * (MAX_LAUNCH_MATERIAL_BYTES + ASSIGNMENT_FRAMING_BYTES)
-                + MAX_POOL_INSTANCES_CEILING * ROUTE_DIRECTORY_ENTRY_BYTES
         );
+        assert_eq!(tiny.max_gateway_message_bytes(), MIN_GATEWAY_MESSAGE_BYTES);
         assert_eq!(tiny.max_host_message_bytes(), MIN_HOST_MESSAGE_BYTES);
         assert_eq!(largest.max_host_message_bytes(), 4 * 1024 * 1024);
-    }
-
-    #[test]
-    fn a_small_cap_decodes_the_route_directory_of_the_largest_pool() {
-        use crate::proto::{AssignmentSnapshot, RouteOwner};
-        use prost::Message as _;
-
-        let route_directory = (0..MAX_POOL_INSTANCES_CEILING)
-            .map(|index| RouteOwner {
-                route: format!("rt-{index:061}"),
-                runtime_address: "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535".to_string(),
-            })
-            .collect();
-        let snapshot = AssignmentSnapshot {
-            route_directory,
-            ..Default::default()
-        };
-        let limits = PoolLimits::new(1, 1).unwrap();
-        let own_assignments = MAX_LAUNCH_MATERIAL_BYTES + ASSIGNMENT_FRAMING_BYTES;
-        assert!(snapshot.encoded_len() <= limits.max_gateway_message_bytes() - own_assignments);
     }
 }

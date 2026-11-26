@@ -109,7 +109,8 @@ mod linux {
     /// Bounds connecting to one supervisor address and negotiating the route
     /// there, so an unreachable cached owner leaves time for the configured
     /// addresses.
-    const RUNTIME_ROUTE_HOP_TIMEOUT: Duration = Duration::from_secs(2);
+    const RUNTIME_ROUTE_HOP_TIMEOUT: Duration =
+        openshell_sandbox_backend::runtime_routed::ROUTE_HOP_TIMEOUT;
     /// Redirects followed from each supervisor address a dial starts at.
     const MAX_RUNTIME_ROUTE_REDIRECTS: usize = 2;
     /// Spares a routed runtime keeps unused at once: one at its owner, and in
@@ -1155,7 +1156,7 @@ mod linux {
         stream: tokio::net::TcpStream,
         /// The supervisor named itself, as only a pool member does.
         named: bool,
-        /// A member's route directory led here.
+        /// A member's redirect led here.
         redirected: bool,
     }
 

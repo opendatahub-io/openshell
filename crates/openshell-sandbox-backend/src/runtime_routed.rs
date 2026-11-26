@@ -18,18 +18,20 @@
 //!
 //! In a supervisor pool one member hosts each route, but a runtime reaches
 //! an arbitrary member. A version 2 preface is answered before any TLS: the
-//! member that hosts the route accepts, naming itself, and the TLS handshake
-//! follows, while any other member names the owner from its gateway-provided
-//! route directory, or reports the route unknown, and closes. The directory
-//! wins over a local registration it no longer agrees with, which is being
-//! released. Replies are hints like the handle itself: the owner must still
-//! complete the pinned TLS handshake, and every request still carries the
-//! bearer token.
+//! member that owns the route accepts, naming itself, and the TLS handshake
+//! follows, while any other member asks its [`ResolveRoute`] for the owner
+//! and names it, or reports the route unknown, and closes. A local
+//! registration of a route the member no longer owns is being released, so
+//! the owner it resolves wins over it. Replies are hints like the handle
+//! itself: the owner must still complete the pinned TLS handshake, and every
+//! request still carries the bearer token.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use async_trait::async_trait;
 
 use openshell_isolation_interface::contract::{BackendError, BoundaryDuplexStream};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
@@ -62,6 +64,13 @@ const MAX_PENDING_HANDSHAKES: usize = 64;
 const MAX_PENDING_HANDSHAKES_PER_ROUTE: usize = 4;
 /// Bound on reading the preface and completing TLS for one socket.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a runtime waits on one supervisor address to connect, send its
+/// preface, and read the reply.
+pub const ROUTE_HOP_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bound on resolving the owner of a route this listener does not own. Half
+/// the runtime's hop budget, so a stalled lookup still leaves time to fall
+/// back and reply before the runtime gives up on this address.
+const ROUTE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
 /// Authenticated connections queued for a sandbox instance but not yet claimed.
 const MAX_QUEUED_CONNECTIONS: usize = 2;
 
@@ -139,8 +148,8 @@ async fn read_route_preface<S: AsyncRead + Unpin>(stream: &mut S) -> std::io::Re
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RouteReply {
     /// This supervisor hosts the route; the TLS handshake follows on the same
-    /// connection. Names the member's runtime listener as its route directory
-    /// does, when it has one; unauthenticated, like everything before TLS.
+    /// connection. Names the member's runtime listener, when it knows it;
+    /// unauthenticated, like everything before TLS.
     Accept(Option<SocketAddr>),
     /// Another pool member hosts the route, at this runtime listener address.
     /// Unauthenticated, like the handle that selected it.
@@ -218,6 +227,22 @@ fn redirect_reply(owner: SocketAddr) -> Result<Vec<u8>, String> {
     address_reply(ROUTE_REPLY_REDIRECT, Some(owner))
 }
 
+/// Finds which pool member's runtime listener hosts a route.
+#[async_trait]
+pub trait ResolveRoute: Send + Sync {
+    /// The owner's runtime listener, or `None` when no member is known to
+    /// host `route`.
+    async fn owner(&self, route: &str) -> Option<SocketAddr>;
+}
+
+/// A fixed map of route owners.
+#[async_trait]
+impl<S: std::hash::BuildHasher + Send + Sync> ResolveRoute for HashMap<String, SocketAddr, S> {
+    async fn owner(&self, route: &str) -> Option<SocketAddr> {
+        self.get(route).copied()
+    }
+}
+
 struct Route {
     /// Distinguishes a re-registered handle from the registration it replaced.
     id: u64,
@@ -230,49 +255,61 @@ struct Route {
 struct Routes {
     next_id: u64,
     by_handle: HashMap<String, Route>,
-    /// This listener's address, as the route directory names it.
+    /// This listener's address, as other members name it.
     own_address: Option<SocketAddr>,
-    /// Runtime listener of the pool member that hosts each route.
-    owners: HashMap<String, SocketAddr>,
+    /// Routes this pool member owns; `None` outside a pool, where every
+    /// registration is owned.
+    owned: Option<HashSet<String>>,
+    resolver: Option<Arc<dyn ResolveRoute>>,
+}
+
+/// A sandbox instance registered on this listener, which other members name
+/// as `own`.
+struct LocalRoute {
+    tls: SandboxTlsClientConfig,
+    spares: mpsc::Sender<BoundaryDuplexStream>,
+    pending: Arc<Semaphore>,
+    own: Option<SocketAddr>,
 }
 
 /// Where a routing preface's handle leads.
 enum Destination {
-    /// A sandbox instance registered on this listener, which the directory
-    /// names as `own`.
-    Local {
-        tls: SandboxTlsClientConfig,
-        spares: mpsc::Sender<BoundaryDuplexStream>,
-        pending: Arc<Semaphore>,
+    Local(LocalRoute),
+    /// Another member may own the route; `local` serves it when none does.
+    Resolve {
+        resolver: Arc<dyn ResolveRoute>,
         own: Option<SocketAddr>,
+        local: Option<LocalRoute>,
     },
-    /// Another pool member's runtime listener.
-    Owner(SocketAddr),
     Unknown,
 }
 
 impl Routes {
-    /// The directory never sends a runtime back to this listener. For a
-    /// runtime that follows redirects, the directory also wins over a local
-    /// registration naming another owner: the gateway moved the route, and
-    /// the registration is being released. A runtime that cannot follow one
-    /// reaches the registration, as before pools existed.
+    /// Only a runtime that follows redirects is sent to another member, and
+    /// only for a route this member does not own: either one registered
+    /// elsewhere, or a local registration being released after the gateway
+    /// moved its route. A runtime that cannot follow a redirect reaches the
+    /// registration, as before pools existed.
     fn destination(&self, handle: &str, follows_redirects: bool) -> Destination {
-        let owner = self
-            .owners
-            .get(handle)
-            .copied()
-            .filter(|owner| Some(*owner) != self.own_address);
-        match (self.by_handle.get(handle), owner) {
-            (Some(_), Some(owner)) if follows_redirects => Destination::Owner(owner),
-            (Some(route), _) => Destination::Local {
-                tls: route.tls.clone(),
-                spares: route.spares.clone(),
-                pending: route.pending.clone(),
+        let local = self.by_handle.get(handle).map(|route| LocalRoute {
+            tls: route.tls.clone(),
+            spares: route.spares.clone(),
+            pending: route.pending.clone(),
+            own: self.own_address,
+        });
+        let owned = self
+            .owned
+            .as_ref()
+            .is_none_or(|owned| owned.contains(handle));
+        match (local, &self.resolver) {
+            (Some(local), _) if owned || !follows_redirects => Destination::Local(local),
+            (local, Some(resolver)) if follows_redirects => Destination::Resolve {
+                resolver: resolver.clone(),
                 own: self.own_address,
+                local,
             },
-            (None, Some(owner)) => Destination::Owner(owner),
-            (None, None) => Destination::Unknown,
+            (Some(local), _) => Destination::Local(local),
+            (None, _) => Destination::Unknown,
         }
     }
 }
@@ -360,16 +397,31 @@ impl RuntimeRouter {
         }))
     }
 
-    /// Replace the route directory of a supervisor pool: the runtime listener
-    /// of the member that hosts each route. A runtime whose version 2 preface
-    /// names a route not registered here is redirected to that member. `own`
-    /// is this listener's address as the directory names it; an entry naming
-    /// it reports the route unknown instead, so a runtime is never redirected
-    /// back here.
-    pub fn set_directory(&self, own: Option<SocketAddr>, owners: HashMap<String, SocketAddr>) {
+    /// Join a supervisor pool: a runtime whose version 2 preface names a route
+    /// this member does not own is redirected to the member `resolver` names.
+    pub fn set_resolver(&self, resolver: Arc<dyn ResolveRoute>) {
+        lock(&self.routes).resolver = Some(resolver);
+    }
+
+    /// Replace the routes this pool member owns. `own` is this listener's
+    /// address as other members name it; an owner resolved to it reports the
+    /// route unknown instead, so a runtime is never redirected back here.
+    pub fn set_owned(&self, own: Option<SocketAddr>, owned: HashSet<String>) {
         let mut routes = lock(&self.routes);
         routes.own_address = own;
-        routes.owners = owners;
+        routes.owned = Some(owned);
+    }
+
+    /// Serve a fixed route directory: the runtime listener of the member that
+    /// hosts each route. This member owns the routes it names as `own`.
+    pub fn set_directory(&self, own: Option<SocketAddr>, owners: HashMap<String, SocketAddr>) {
+        let owned = owners
+            .iter()
+            .filter(|(_, owner)| Some(**owner) == own)
+            .map(|(route, _)| route.clone())
+            .collect();
+        self.set_owned(own, owned);
+        self.set_resolver(Arc::new(owners));
     }
 }
 
@@ -508,24 +560,39 @@ async fn route_connection(
     // The handle only selects which pinned identity to expect, or which pool
     // member to name.
     let destination = lock(routes).destination(&handle, negotiated);
-    let (tls, spares, route_pending, own) = match destination {
-        Destination::Local {
-            tls,
-            spares,
-            pending,
+    let local = match destination {
+        Destination::Local(local) => Some(local),
+        Destination::Resolve {
+            resolver,
             own,
-        } => (tls, spares, pending, own),
-        Destination::Owner(owner) if negotiated => {
-            send_reply(&mut stream, deadline, &redirect_reply(owner)?).await?;
-            tracing::debug!(%owner, "redirected routed runtime connection to the route's owner");
-            return Ok(());
-        }
-        Destination::Owner(_) | Destination::Unknown => {
-            if negotiated {
-                send_reply(&mut stream, deadline, &[ROUTE_REPLY_UNKNOWN]).await?;
+            local,
+        } => {
+            let lookup_deadline = deadline.min(tokio::time::Instant::now() + ROUTE_LOOKUP_TIMEOUT);
+            let owner = tokio::time::timeout_at(lookup_deadline, resolver.owner(&handle))
+                .await
+                .ok()
+                .flatten()
+                .filter(|owner| Some(*owner) != own);
+            if let Some(owner) = owner {
+                send_reply(&mut stream, deadline, &redirect_reply(owner)?).await?;
+                tracing::debug!(%owner, "redirected routed runtime connection to the route's owner");
+                return Ok(());
             }
-            return Err("unknown or retired runtime route handle".to_string());
+            local
         }
+        Destination::Unknown => None,
+    };
+    let Some(LocalRoute {
+        tls,
+        spares,
+        pending: route_pending,
+        own,
+    }) = local
+    else {
+        if negotiated {
+            send_reply(&mut stream, deadline, &[ROUTE_REPLY_UNKNOWN]).await?;
+        }
+        return Err("unknown or retired runtime route handle".to_string());
     };
     let Ok(_route_permit) = route_pending.try_acquire_owned() else {
         return Err("runtime route handshake limit reached".to_string());
@@ -766,6 +833,112 @@ mod tests {
         );
         assert_eq!(negotiate(address, &elsewhere).await.1, RouteReply::Unknown);
         assert!(!delivered(&registration, &tls).await);
+    }
+
+    #[tokio::test]
+    async fn only_routes_this_member_does_not_own_are_resolved() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting {
+            lookups: AtomicUsize,
+            owner: Mutex<Option<SocketAddr>>,
+        }
+        #[async_trait]
+        impl ResolveRoute for Counting {
+            async fn owner(&self, _route: &str) -> Option<SocketAddr> {
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                *self.owner.lock().unwrap()
+            }
+        }
+
+        let router = RuntimeRouter::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = router.local_addr();
+        let identity =
+            generate_sandbox_tls_material(openshell_core::SandboxSessionId::new()).unwrap();
+        let tls = client_tls(&identity);
+        let hosted = new_route_handle();
+        let _registration = router.register(&hosted, &tls).unwrap();
+        let owner: SocketAddr = "10.0.0.2:7443".parse().unwrap();
+        let resolver = Arc::new(Counting {
+            lookups: AtomicUsize::new(0),
+            owner: Mutex::new(Some(owner)),
+        });
+        router.set_resolver(resolver.clone());
+        router.set_owned(Some(address), HashSet::from([hosted.clone()]));
+
+        // An owned route is accepted without asking anyone.
+        assert_eq!(
+            negotiate(address, &hosted).await.1,
+            RouteReply::Accept(Some(address))
+        );
+        assert_eq!(resolver.lookups.load(Ordering::SeqCst), 0);
+
+        // A route owned elsewhere, and a registration this member no longer
+        // owns, are resolved and redirected.
+        assert_eq!(
+            negotiate(address, &new_route_handle()).await.1,
+            RouteReply::Redirect(owner)
+        );
+        router.set_owned(Some(address), HashSet::new());
+        assert_eq!(
+            negotiate(address, &hosted).await.1,
+            RouteReply::Redirect(owner)
+        );
+        assert_eq!(resolver.lookups.load(Ordering::SeqCst), 2);
+
+        // When no other owner is known, the registration still serves its
+        // runtime and an unregistered route is unknown.
+        *resolver.owner.lock().unwrap() = None;
+        assert_eq!(
+            negotiate(address, &hosted).await.1,
+            RouteReply::Accept(Some(address))
+        );
+        assert_eq!(
+            negotiate(address, &new_route_handle()).await.1,
+            RouteReply::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_lookup_answers_within_the_runtime_hop_budget() {
+        struct Stalled;
+        #[async_trait]
+        impl ResolveRoute for Stalled {
+            async fn owner(&self, _route: &str) -> Option<SocketAddr> {
+                std::future::pending().await
+            }
+        }
+
+        let router = RuntimeRouter::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let address = router.local_addr();
+        let identity =
+            generate_sandbox_tls_material(openshell_core::SandboxSessionId::new()).unwrap();
+        let tls = client_tls(&identity);
+        let registered = new_route_handle();
+        let _registration = router.register(&registered, &tls).unwrap();
+        router.set_resolver(Arc::new(Stalled));
+        router.set_owned(Some(address), HashSet::new());
+
+        // Connecting, sending the preface, and reading the reply all fit in
+        // the runtime's per-hop budget even though the gateway never answers.
+        let hop = |route: String| {
+            tokio::time::timeout(ROUTE_HOP_TIMEOUT, async move {
+                let mut stream = openshell_core::net::connect_tcp_nodelay_best_effort(address)
+                    .await
+                    .unwrap();
+                negotiate_route(&mut stream, &route).await.unwrap()
+            })
+        };
+        assert_eq!(
+            hop(registered).await.expect("reply within the hop budget"),
+            RouteReply::Accept(Some(address))
+        );
+        assert_eq!(
+            hop(new_route_handle())
+                .await
+                .expect("reply within the hop budget"),
+            RouteReply::Unknown
+        );
     }
 
     #[tokio::test]
