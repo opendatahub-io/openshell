@@ -11,7 +11,9 @@ The installer is an interim tool until an OpenShift Operator deploys OpenShell.
 It first ships with RHOAI 3.6 GA. Rerunning it against an existing installation
 works only for installations made with the RHOAI 3.6 GA version or later.
 The installer refuses installations made with earlier development versions,
-or asks for `--adopt-existing`; reinstall those into a new namespace.
+or asks for `--adopt-existing`; reinstall those into a new namespace. To move
+an installation to newer releases, see
+[Upgrade an installation](#upgrade-an-installation).
 
 ## Prerequisites
 
@@ -104,9 +106,12 @@ CA, so a database signed by a private CA cannot use `verify-full` yet;
 
 The database outlives the namespace. The gateway encrypts stored provider
 credentials with the key in the `openshell-credential-storage-key-encryption-key`
-Secret, so back up that Secret together with the database. If you reinstall
-into a recreated namespace against the same database, create the namespace,
-restore the Secret, and run the installer with `--adopt-existing`: the
+Secret, so back up that Secret together with the database (see
+[Upgrade an installation](#upgrade-an-installation)). If you reinstall into a
+recreated namespace with the same name against the same database, create the
+namespace, restore the Secret with
+`oc apply -f "$CONFIG_DIR/key-encryption-key-secret.json"`, and run the
+installer with `--adopt-existing`: the
 restored key counts as existing key material, and deleting it as the
 installer's error suggests makes the chart generate a new key that cannot
 decrypt the stored credentials.
@@ -453,6 +458,69 @@ openshell sandbox create
 The gateway assigns the sandbox a name and opens a shell. Exit with Control+D
 to leave it running; use `openshell sandbox list` and
 `openshell sandbox connect <name>` to return to it.
+
+## Upgrade an installation
+
+To move an installation to newer OpenShell releases, rerun the installer with a
+configuration that pins the new chart versions and images. The installer runs
+`helm upgrade` on both releases and keeps the gateway's TLS, JWT, and
+credential-storage keys. It does not compare the old and new versions, so it
+does not stop a downgrade or an untested version pair; check the release notes
+before you change versions.
+
+Copy your current `config.json` and change only `gateway.chart`,
+`gateway.version`, `dashboard.chart`, `dashboard.version`, and the `images`
+pins, for example from a newer file in `config-examples/`. Keep the namespace,
+hosts, `oidc` settings, `gateway.database.mode`, and the client secret and
+database URI files. The installer refuses a change to the hosts, the OIDC
+issuer, audience, or client ID, or the database backend, and it refuses secret
+files that differ from the Secrets in the namespace.
+
+The new gateway migrates the database schema when it starts, and an older
+gateway cannot start against the migrated schema. Before you upgrade, back up
+the database with your database's tooling, and save the key-encryption key
+Secret, without which the provider credentials in the backup cannot be
+decrypted. This command requires `jq`:
+
+```shell
+umask 077
+oc -n "$NS" get secret openshell-credential-storage-key-encryption-key -o json \
+  | jq 'del(.metadata.uid, .metadata.resourceVersion,
+            .metadata.creationTimestamp, .metadata.managedFields)' \
+  > "$CONFIG_DIR/key-encryption-key-secret.json"
+```
+
+For the development database from
+[Set up PostgreSQL for development](#set-up-postgresql-for-development):
+
+```shell
+oc -n "$NS" exec deployment/openshell-db -- \
+  pg_dump -U openshell openshell > "$CONFIG_DIR/openshell-db.sql"
+```
+
+In SQLite mode the data lives in the gateway's persistent volume claim; back it
+up with your storage tooling instead.
+
+Store the backups somewhere safe; the Secret file contains the key in clear
+text. Then validate and upgrade:
+
+```shell
+./deploy/rhoai/install.py --config "$CONFIG_DIR/config-new.json" --check
+./deploy/rhoai/install.py --config "$CONFIG_DIR/config-new.json" --preflight
+./deploy/rhoai/install.py --config "$CONFIG_DIR/config-new.json"
+```
+
+After the upgrade:
+
+- Install the CLI version that matches the new gateway chart version, as in
+  [After installation](#after-installation-install-the-cli-and-create-a-sandbox).
+- Existing sandboxes keep their supervisor and sandbox images until they are
+  recreated. Create a new sandbox to check the new images, and check that the
+  existing sandboxes still respond.
+
+You cannot roll back in place. To return to the previous versions, restore the
+database backup into an empty database, then rerun the installer with the
+previous configuration.
 
 ## Disconnected clusters
 
