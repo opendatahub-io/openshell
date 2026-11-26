@@ -484,7 +484,9 @@ The new gateway migrates the database schema when it starts, and an older
 gateway cannot start against the migrated schema. Before you upgrade, back up
 the database with your database's tooling, and save the key-encryption key
 Secret, without which the provider credentials in the backup cannot be
-decrypted. This command requires `jq`:
+decrypted. Run the backup and upgrade commands in the kubeconfig context you
+installed into; the installer's `--context` is not remembered. This command
+requires `jq`:
 
 ```shell
 umask 077
@@ -506,9 +508,7 @@ In SQLite mode the data lives in the gateway's persistent volume claim; back it
 up with your storage tooling instead.
 
 Store the backups somewhere safe; the Secret file contains the key in clear
-text. Run the backup and upgrade commands in the kubeconfig context you
-installed into; the installer's `--context` is not remembered. Then validate
-and upgrade:
+text. Then validate and upgrade:
 
 ```shell
 ./deploy/rhoai/install.py --config "$CONFIG_DIR/config-new.json" --check
