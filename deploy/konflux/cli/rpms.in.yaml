@@ -3,7 +3,7 @@
 
 # RPM dependencies for Dockerfile.konflux.cli
 #
-# Only the ubi-minimal-pqc runtime stage installs RPMs; the rust-builder
+# Only the ubi-minimal runtime stage installs RPMs; the rust-builder
 # build stage already ships the toolchain. Resolved with `context.bare: true`
 # so the lockfile pins the full dependency closure; bare guarantees every
 # package is pinned and prefetched regardless of what the runtime base
@@ -19,21 +19,21 @@
 # base image; rpm-lockfile-prototype resolves versions from the CDN and cannot
 # read /etc/yum.repos.d from inside the base image.
 # Conforma allows only arch-qualified repo IDs (known_rpm_repositories.yml).
-# Do not copy section names from the UBI image's ubi.repo: ubi-9-baseos-rpms
+# Do not copy section names from the UBI image's ubi.repo: ubi-10-baseos-rpms
 # omits the architecture and fails rpm_repos.ids_known. $basearch is expanded
-# per package URL in the lockfile. CodeReady Builder is
-# codeready-builder-for-ubi-9-$basearch-rpms.
+# per package URL in the lockfile.
 contentOrigin:
   repos:
-    - repoid: ubi-9-for-$basearch-baseos-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/baseos/os/
-    - repoid: ubi-9-for-$basearch-appstream-rpms
-      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/$basearch/appstream/os/
+    - repoid: ubi-10-for-$basearch-baseos-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/baseos/os/
+    - repoid: ubi-10-for-$basearch-appstream-rpms
+      baseurl: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi10/10/$basearch/appstream/os/
 packages:
   # The build stage installs nothing: the rust-builder image ships rust,
   # cargo, gcc, gcc-c++, make, cmake, openssl-devel and git.
   # Runtime: Git is required for CLI upload filtering.
-  # DEFAULT:PQ comes from the PQC base.
+  # The post-quantum ML-KEM hybrid groups come from RHEL 10's stock
+  # DEFAULT crypto policy.
   - git-core
   - ca-certificates
 arches:

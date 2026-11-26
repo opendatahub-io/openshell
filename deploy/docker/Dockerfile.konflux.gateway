@@ -5,13 +5,12 @@
 
 # Gateway image for RHEL/Konflux (hermetic build).
 #
-# Multi-stage build that compiles openshell-gateway from source on UBI9.
+# Multi-stage build that compiles openshell-gateway from source on UBI10.
 # Requires prefetched dependencies via Hermeto (cargo, rpm). The Rust
-# toolchain comes from the Red Hat rust-builder image, since UBI9 ships
-# rust 1.92.0, below the workspace MSRV.
-# The image ships Rust 1.99.0, newer than the 1.95.0 that rust-toolchain.toml
-# pins and CI tests. The rust-rhel9 1.95.0 tag has not been rebuilt since
-# 2026-05-19, so pinning it would ship builds from a stale base.
+# toolchain comes from the Red Hat rust-builder image, since UBI10's
+# rust-toolset is below the workspace MSRV.
+# The image ships Rust 1.99.1, newer than the 1.95.0 that rust-toolchain.toml
+# pins and CI tests.
 # cargo-auditable is cargo-prefetched from crates.io so the gateway binary
 # embeds crate versions for image CVE scanners. See deploy/konflux/cargo-auditable.
 #
@@ -20,23 +19,25 @@
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
-FROM registry.redhat.io/rust-builder-image/rust-rhel9:1.99.0@sha256:b00aaa63f7d6f5b857c170e4aed9d77f013f507ba97e72ebfcac48a7d3760310 AS builder
+FROM registry.redhat.io/rust-builder-image/rust-rhel10:1.99.1@sha256:a416031b065e20e2eacfa1ec256657b0a9e857618675839b8a6aac99eb27de06 AS builder
 
 # The builder image runs as 1001; cargo install needs root. It already
-# ships gcc, gcc-c++, make, cmake, openssl-devel, clang-devel, git and
-# gcc-toolset-15, so no dnf step.
+# ships gcc, gcc-c++, make, cmake, openssl-devel, clang-devel and git, so
+# no dnf step.
 USER 0
 
-# gcc-toolset-15 provides the C++20 <format> header required by bundled Z3.
-# The builder ships it because clang-libs requires it, and clang already
-# uses it as its GCC installation.
-ENV PATH=/opt/rh/gcc-toolset-15/root/usr/bin:${PATH} \
-    LD_LIBRARY_PATH=/opt/rh/gcc-toolset-15/root/usr/lib64:/opt/rh/gcc-toolset-15/root/usr/lib \
-    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+# RHEL 10's system GCC provides the C++20 <format> header required by
+# bundled Z3, so no gcc-toolset is needed (unlike rust-rhel9, where Z3
+# needed gcc-toolset-15).
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo/ .cargo/
+
+# The image builds only product crates; drop test-only workspace members
+# (tests/policy-conformance) that are not copied into the build context.
+RUN sed -i 's|^members = .*|members = ["crates/*"]|' Cargo.toml
 
 # Install before the sources so application changes do not rebuild it.
 # The published lock's dev-dependencies are not vendored. Strip them and pin
@@ -83,16 +84,19 @@ RUN VER="${OPENSHELL_VERSION#v}" \
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
-# ubi-minimal-pqc already ships DEFAULT:PQ, so this stage does not install
-# crypto-policies-scripts (and the Python stack it pulls).
-FROM registry.redhat.io/ubi9/ubi-minimal-pqc:9.8@sha256:d638f3b49b79575329aacdae2739f954effe2467c12147711e73445c4fc97819
+# RHEL 10 has no PQ crypto subpolicy: its stock DEFAULT policy already
+# enables the post-quantum ML-KEM hybrid key exchange groups, so this stage
+# does not install crypto-policies-scripts (and the Python stack it pulls).
+FROM registry.access.redhat.com/ubi10/ubi-minimal:10.2@sha256:f0c7b9ae9914fcf183e7c36fc46864903c2d2caf3af327421913ae54b3d29e94
 
 RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
         ca-certificates \
     && microdnf clean all
 
-# Fail the build if the PQC base stops shipping DEFAULT:PQ.
-RUN test "$(cat /etc/crypto-policies/config)" = "DEFAULT:PQ"
+# Fail the build if the stock policy stops being DEFAULT or stops enabling
+# the ML-KEM hybrid groups.
+RUN test "$(cat /etc/crypto-policies/config)" = "DEFAULT" \
+    && grep -q MLKEM /etc/crypto-policies/back-ends/opensslcnf.config
 
 COPY --from=builder --chmod=0555 \
     /build/target/release/openshell-gateway \
@@ -101,7 +105,7 @@ COPY --from=builder --chmod=0555 \
 LABEL com.redhat.component="odh-openshell-gateway-container" \
       description="gRPC/HTTP control-plane server for OpenShell sandboxed AI agent runtimes" \
       summary="gRPC/HTTP control-plane server for OpenShell sandboxed AI agent runtimes" \
-      name="rhoai/odh-openshell-gateway-rhel9" \
+      name="rhoai/odh-openshell-gateway-rhel10" \
       maintainer="['managed-open-data-hub@redhat.com']" \
       io.openshift.expose-services="8080:http" \
       io.k8s.display-name="odh-openshell-gateway" \

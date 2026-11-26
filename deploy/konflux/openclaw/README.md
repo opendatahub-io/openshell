@@ -6,6 +6,8 @@
 
 This image is an unsupported reference composition. It is published only on quay.io/opendatahub, it is not RHOAI product content, and it is not the default sandbox workload image. It targets midstream main 4f6b3ad8 (v0.1.2-rhaiv.8 plus 18 commits). Read [Verified vs not verified](#verified-vs-not-verified) before relying on it.
 
+This image deliberately stays on UBI 9 while the other Konflux images move to RHEL 10.2: ubi10/nodejs-24-minimal links RHEL 10's SQLite 3.46.1, which OpenClaw rejects as not WAL-reset-safe (it needs 3.51.3+, 3.50.7+, or a patched 3.44.6+), while ubi9/nodejs-24-minimal ships SQLite 3.54.1. Revisit once RHEL 10 ships a WAL-reset-safe SQLite.
+
 ## What's inside
 
 - Base: `registry.access.redhat.com/ubi9/nodejs-24-minimal:9.8`, pinned by digest (Node 24.22.1, npm 11.19.1), for amd64 and arm64.
