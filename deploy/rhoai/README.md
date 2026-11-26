@@ -580,56 +580,75 @@ Check `oc -n "$NS" get pvc` for leftover sandbox workspace claims.
 
 The installer does not manage an external database or the identity provider:
 drop the OpenShell database with your database's tooling, and remove the OIDC
-clients as described in the
-[Keycloak development guide](keycloak-dev-guide.md#cleanup). Delete
-`$CONFIG_DIR` when you no longer need it; it holds the client secret and the
+clients as described in the [Keycloak development guide](keycloak-dev-guide.md#cleanup).
+
+Delete `$CONFIG_DIR` when you no longer need it; it holds the client secret and the
 database URI.
 
 ## Disconnected clusters
 
-The machine running `install.py` or Helm pulls the charts; cluster nodes pull
-the container images. When that machine can reach `ghcr.io` and `quay.io`, the
-charts do not need to be mirrored. Mirror the images to a registry reachable by
-the cluster, then point the installer config or direct Helm image values at
-that mirror while retaining each image digest. The example includes the
-gateway, supervisor, sandbox runtime, Dashboard, and oauth2-proxy images.
+Skip this section if your cluster nodes can pull from `registry.redhat.io` and
+`registry.access.redhat.com`, and the machine running `install.py` can reach
+`ghcr.io` and `quay.io`.
 
-For example, copy each source image by digest to a tag in your mirror:
+Otherwise, mirror the images with the [`oc-mirror` plugin v2](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/disconnected_environments/about-installing-oc-mirror-v2), which also creates the `ImageDigestMirrorSet` (IDMS) that redirects pulls to your mirror.
+
+IDMS redirects digest references only, so the configuration must pin every image by digest, as the RHOAI example does. `install.py` warns about any rendered image without a digest. Complete this section before installing.
+
+### What to mirror
+
+- The gateway, supervisor, sandbox, and Dashboard images from
+  `registry.redhat.io/rhoai`. If you mirrored OpenShift AI as described in
+  [Deploy OpenShift AI in a disconnected environment](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html-single/installing_and_uninstalling_openshift_ai_self-managed_in_a_disconnected_environment/index#deploying-openshift-ai-in-a-disconnected-environment_install),
+  they are already in your mirror as related images of the operator. To
+  confirm:
+
+  ```shell
+  oc get csv rhods-operator.3.6.0 -n redhat-ods-operator \
+    -o jsonpath='{range .spec.relatedImages[*]}{.image}{"\n"}{end}' | grep openshell
+  ```
+
+- The Dashboard's oauth2-proxy image, `registry.access.redhat.com/hi/oauth2-proxy`.
+  It is not part of OpenShift AI.
+
+- Any other sandbox image that users pass to `openshell sandbox create --from`.
+  Mirror it, make sure an IDMS covers its repository, and reference it by
+  digest, for example `--from quay.io/example/agent@sha256:<digest>`.
+
+Add the images that are not mirrored yet, by digest, to the `additionalImages`
+of your `ImageSetConfiguration`. Then mirror the image set and apply the
+generated cluster resources, as described in the `oc-mirror` guide.
+
+### ImageDigestMirrorSet entries
+
+List the image sources your cluster already redirects:
 
 ```shell
-oc image mirror \
-  registry.redhat.io/rhoai/odh-openshell-gateway-rhel9@sha256:<digest> \
-  registry.example.com/rhoai/odh-openshell-gateway-rhel9:rhoai-3.6
+oc get imagedigestmirrorset \
+  -o jsonpath='{range .items[*].spec.imageDigestMirrors[*]}{.source}{"\n"}{end}' | sort -u
 ```
 
-Repeat for the image repositories and digests in the config. Set the matching
-`registry` and `repository` fields to `registry.example.com` and the mirrored
-repository; `gateway.images.sandbox.repository` is a full image path and should
-also point to the mirror. Keep the digest in the config. `install.py` warns,
-from `--check` onward, about every rendered image that is not pinned by digest,
-including chart defaults such as the oauth2-proxy image. Ensure the cluster can
-authenticate to the mirror. Use the RHOAI operator CSV to get the image digests
-for the build installed in your cluster:
+The list must include `registry.redhat.io/rhoai`,
+`registry.access.redhat.com/hi`, and the repositories of any other sandbox
+images. The Machine Config Operator rolls an IDMS out to every node without
+rebooting it, and also drains the nodes when you change an existing IDMS; see
+[image registry repository mirroring](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/images/image-configuration-classic). Wait until `oc get mcp` shows `UPDATED=True` for every pool before installing. The cluster pull secret must include credentials for the mirror.
 
-```shell
-oc get csv rhods-operator.3.6.0 -n redhat-ods-operator -o yaml | grep -A1 OPENSHELL
-```
+### Agent Sandbox Operator
 
-The Red Hat build of Agent Sandbox installation guide covers OperatorHub
-installation, but does not document disconnected installation. For a
-disconnected cluster, use OpenShift's [Operator Lifecycle Manager guide for
-disconnected environments](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/disconnected_environments/olm-restricted-networks) and [`oc-mirror` v2 ImageSetConfiguration reference](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/disconnected_environments/about-installing-oc-mirror-v2)
-to mirror the Agent Sandbox Operator package and channel from the Red Hat
-Operator catalog matching the cluster's OpenShift version, including its
-bundle and related images. Install the Operator from the generated mirrored
-catalog using **All namespaces on the cluster** and `agent-sandbox-system` as
-the installed namespace, as described in the [Agent Sandbox Operator
-installation procedure](https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.13/html/deploying_red_hat_build_of_agent_sandbox/install-agent-sandbox-overview_agent-sandbox).
+Mirror the Agent Sandbox Operator package from the Red Hat Operator catalog
+for your OpenShift version, as described in
+[Using Operator Lifecycle Manager in disconnected environments](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/disconnected_environments/olm-restricted-networks).
+Then install it from the mirrored catalog with **All namespaces on the
+cluster** and `agent-sandbox-system` as the installed namespace, following the
+[Agent Sandbox Operator installation procedure](https://docs.redhat.com/en/documentation/openshift_sandboxed_containers/1.13/html/deploying_red_hat_build_of_agent_sandbox/install-agent-sandbox-overview_agent-sandbox).
 
-If the machine installing the charts cannot reach the chart registries either,
-mirror both charts and point the installer config or direct Helm commands at
-their mirrored OCI URLs. The host running `install.py` also needs the
-installer's pinned PyYAML dependency available to `uv`. For example:
+### OpenShell Charts
+
+If the machine running `install.py` cannot reach `ghcr.io` and `quay.io`,
+push both charts to an OCI registry it can reach, using the chart versions in
+your configuration, and set `gateway.chart` and `dashboard.chart` to the
+mirrored URLs:
 
 ```shell
 helm pull oci://ghcr.io/nvidia/openshell/helm-chart --version 0.1.3
@@ -638,20 +657,20 @@ helm pull oci://quay.io/ai-openshell/charts/console --version 0.1.5
 helm push console-0.1.5.tgz oci://registry.example.com/charts
 ```
 
-Log the installer machine in to the mirror with
-`helm registry login registry.example.com`. Use the chart versions set in your
-config when pulling the charts.
+Log the installer machine in to the registry with
+`helm registry login registry.example.com`. The machine also needs the
+installer's pinned PyYAML dependency available to `uv`.
 
 ## Troubleshooting
 
-| Symptom                                                              | What to check                                                                                                                                                               |
-| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--check` reports a missing client secret or database URI            | Create the files named by `oidc.client_secret_file` and `gateway.database.uri_file`. Their paths are relative to `config.json`.                                             |
-| Preflight cannot find the Agent Sandbox controller or a StorageClass | Install the operator and confirm a default class is available for workspace volumes.                                                                                        |
-| The gateway is not ready                                             | Inspect `oc -n <namespace> logs deployment/openshell` and check the PostgreSQL URI, credentials, network access, and any egress policy.                                     |
-| OIDC login fails or reports an `x509` error                          | Confirm `oidc.issuer`, the browser callback URL, and the client settings. For a private or self-signed issuer certificate, configure `oidc.ca_file` as described above.     |
-| Pods show `ImagePullBackOff`                                         | Confirm each image is present in the mirror, the config points to the mirror with the correct digest, and the cluster can authenticate to it.                               |
-| Helm cannot pull a chart                                             | The machine running `install.py` or Helm must reach `ghcr.io` and `quay.io`, or the charts must be mirrored and their URLs updated in the installer config or Helm command. |
+| Symptom                                                              | What to check                                                                                                                                                                                                           |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--check` reports a missing client secret or database URI            | Create the files named by `oidc.client_secret_file` and `gateway.database.uri_file`. Their paths are relative to `config.json`.                                                                                         |
+| Preflight cannot find the Agent Sandbox controller or a StorageClass | Install the operator and confirm a default class is available for workspace volumes.                                                                                                                                    |
+| The gateway is not ready                                             | Inspect `oc -n <namespace> logs deployment/openshell` and check the PostgreSQL URI, credentials, network access, and any egress policy.                                                                                 |
+| OIDC login fails or reports an `x509` error                          | Confirm `oidc.issuer`, the browser callback URL, and the client settings. For a private or self-signed issuer certificate, configure `oidc.ca_file` as described above.                                                 |
+| Pods show `ImagePullBackOff`                                         | On a disconnected cluster, confirm the image is in the mirror, an IDMS covers its repository, the configuration pins it by digest, the Machine Config Pool update finished, and the pull secret has mirror credentials. |
+| Helm cannot pull a chart                                             | The machine running `install.py` or Helm must reach `ghcr.io` and `quay.io`, or the charts must be mirrored and their URLs updated in the installer config or Helm command.                                             |
 
 ## Related guide
 

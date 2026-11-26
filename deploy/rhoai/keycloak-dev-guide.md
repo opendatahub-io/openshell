@@ -470,9 +470,9 @@ EOF
 ```
 
 `mirrorSourcePolicy: NeverContactSource` prevents nodes from falling back to
-the public registry. Changing an IDMS starts a Machine Config Pool update and
-may reboot nodes, depending on your OpenShift version. Wait until both pools
-show `UPDATED=True` before deploying:
+the public registry. The Machine Config Operator rolls an IDMS out to every
+node without rebooting it, and also drains the nodes when you change an
+existing IDMS. Wait until both pools show `UPDATED=True` before deploying:
 
 ```shell
 oc get mcp

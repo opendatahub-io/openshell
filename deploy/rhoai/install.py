@@ -504,9 +504,8 @@ def warn_if_images_unpinned(images):
             "On a disconnected cluster the installation may fail with "
             "ImagePullBackOff: an ImageDigestMirrorSet only redirects pulls by "
             "digest, so tag-only images are pulled from their original registry. "
-            "Set images.<component>.digest in the configuration for each image, "
-            "pointing at your mirror (see Disconnected clusters in "
-            "deploy/rhoai/README.md).",
+            "Set images.<component>.digest in the configuration for each image "
+            "(see Disconnected clusters in deploy/rhoai/README.md).",
             "33",
             sys.stderr,
         ),
