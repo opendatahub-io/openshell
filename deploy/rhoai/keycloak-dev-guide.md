@@ -159,8 +159,12 @@ Check whether the namespace already has an OperatorGroup:
 oc get operatorgroup -n "$KEYCLOAK_NS"
 ```
 
+Create one only when the list is empty. In a shared namespace that already has
+an OperatorGroup, a second one makes OLM fail to install the operator:
+
 ```shell
-oc apply -f - <<EOF
+if ! oc get operatorgroup -n "$KEYCLOAK_NS" -o name | grep -q .; then
+  oc apply -f - <<EOF
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
@@ -170,6 +174,7 @@ spec:
   targetNamespaces:
     - ${KEYCLOAK_NS}
 EOF
+fi
 ```
 
 The Subscription installs in the background. Wait for the operator to be ready
@@ -348,7 +353,10 @@ The script:
   API, dashboard, and CLI clients
 - writes the dashboard secret to `${CONFIG_DIR}/dashboard-client-secret.txt`
 - asks for a master realm administrator's username and password and does not
-  store them
+  store them; set `KEYCLOAK_ADMIN_USER` and `KEYCLOAK_ADMIN_PASSWORD` for
+  non-interactive runs
+
+The script requires `curl` and `python3`.
 
 You can run the script again safely. It creates the realm, roles, and clients,
 but not users. Create users in the console, verify their email addresses, and

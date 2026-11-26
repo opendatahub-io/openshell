@@ -397,6 +397,12 @@ class InstallTests(unittest.TestCase):
                 self.config["gateway"]["database"] = database
                 with self.assertRaisesRegex(ValueError, message):
                     self.load()
+        # `database` is optional for gateway alone; keep it rejected elsewhere.
+        with self.subTest(database="dashboard"):
+            self.config = configuration()
+            self.config["dashboard"]["database"] = {"mode": "sqlite"}
+            with self.assertRaisesRegex(ValueError, "Unknown configuration fields"):
+                self.load()
 
     def test_database_uri_validation(self):
         accepted = (
@@ -413,6 +419,15 @@ class InstallTests(unittest.TestCase):
             "postgresql:///openshell": url_error,
             "postgresql://": url_error,
             "postgresql://[::1/openshell": url_error,
+            "postgresql://openshell:secret@db.example.com/openshell\nsecond line": (
+                "must be a single line"
+            ),
+            "postgresql://openshell:secret@db.example.com/openshell\rsecond": (
+                "must be a single line"
+            ),
+            "postgresql://openshell:secret@db.example.com/openshell\tsecond": (
+                "must be a single line"
+            ),
         }
         for uri in accepted:
             with self.subTest(uri=uri):

@@ -4,9 +4,9 @@
 #
 # Create the OpenShell clients in a Keycloak realm.
 #
-# Development helper only. It uses the operator bootstrap admin credentials and
-# verifies the Keycloak Route against a bundle built from the system roots and
-# the ingress CA at "${CONFIG_DIR}/ingress-ca.crt". Do not use it to manage a
+# Development helper only. It prompts for a Keycloak administrator and verifies
+# the Keycloak Route against a bundle built from the system roots and the
+# ingress CA at "${CONFIG_DIR}/ingress-ca.crt". Do not use it to manage a
 # production realm.
 #
 # The script creates the realm and the openshell-admin/openshell-user realm

@@ -33,11 +33,14 @@ an installation to newer releases, see
   client using PKCE S256. The example uses Keycloak and PostgreSQL. For a
   development Keycloak deployment, follow the
   [Keycloak development guide](keycloak-dev-guide.md).
-- Permission to create resources in the target namespace, and cluster-scoped
-  permission to create and patch ClusterRoles and ClusterRoleBindings and to
-  list ConfigMaps in all namespaces. The installer also reads the cluster
-  ingress domain unless you set both hosts explicitly in the config. Preflight
-  verifies these permissions.
+- Permission to create resources in the target namespace. Cluster-scoped
+  permission to create namespaces when the installer creates it, create and
+  patch ClusterRoles and ClusterRoleBindings, list ConfigMaps in all
+  namespaces, and read the Agent Sandbox CRD, the ClusterVersion,
+  StorageClasses, and Nodes. The installer also reads the cluster ingress
+  domain unless you set both hosts explicitly in the config. Preflight checks
+  the write permissions with `oc auth can-i` and fails on a denied cluster-wide
+  read.
 
 The installer does not install the Agent Sandbox Operator, provision a database,
 or deploy an identity provider.
@@ -476,17 +479,28 @@ Copy your current `config.json` and change only `gateway.chart`,
 `gateway.version`, `dashboard.chart`, `dashboard.version`, and the `images`
 pins, for example from a newer file in `config-examples/`. Keep the namespace,
 hosts, `oidc` settings, `gateway.database.mode`, and the client secret and
-database URI files. The installer refuses a change to the hosts, the OIDC
-issuer, audience, or client ID, or the database backend, and it refuses secret
-files that differ from the Secrets in the namespace.
+database URI files. The installer refuses a change to the gateway host, the
+OIDC issuer, audience, or client ID, or the database backend, and it refuses
+secret files that differ from the Secrets in the namespace. It accepts a
+dashboard host change, but re-register the dashboard callback URL with the
+identity provider first.
 
 The new gateway migrates the database schema when it starts, and an older
 gateway cannot start against the migrated schema. Before you upgrade, back up
 the database with your database's tooling, and save the key-encryption key
 Secret, without which the provider credentials in the backup cannot be
 decrypted. Run the backup and upgrade commands in the kubeconfig context you
-installed into; the installer's `--context` is not remembered. This command
-requires `jq`:
+installed into; the installer's `--context` is not remembered.
+
+Set `NS` to the installed namespace and `CONFIG_DIR` to the directory that
+holds your configuration and credential files:
+
+```shell
+export NS=openshell-team
+export CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"
+```
+
+This command requires `jq`:
 
 ```shell
 umask 077
@@ -538,6 +552,14 @@ the key-encryption key Secret first, as described in
 The commands in this section use the current kubeconfig context. Select the
 context you installed into first if you used `--context`; `$NS` can also exist
 in another cluster.
+
+Set `NS` to the installed namespace and `CONFIG_DIR` to the directory that
+holds your configuration and credential files:
+
+```shell
+export NS=openshell-team
+export CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"
+```
 
 While the gateway is still running, delete the sandboxes in each workspace and
 remove the CLI registration:
@@ -676,7 +698,7 @@ installer's pinned PyYAML dependency available to `uv`.
 | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--check` reports a missing client secret or database URI            | Create the files named by `oidc.client_secret_file` and `gateway.database.uri_file`. Their paths are relative to `config.json`.                                                                                         |
 | Preflight cannot find the Agent Sandbox controller or a StorageClass | Install the operator and confirm a default class is available for workspace volumes.                                                                                                                                    |
-| The gateway is not ready                                             | Inspect `oc -n <namespace> logs deployment/openshell` and check the PostgreSQL URI, credentials, network access, and any egress policy.                                                                                 |
+| The gateway is not ready                                             | Inspect `oc -n <namespace> logs deployment/openshell` for PostgreSQL or `statefulset/openshell` for SQLite, and check the PostgreSQL URI, credentials, network access, and any egress policy.                            |
 | OIDC login fails or reports an `x509` error                          | Confirm `oidc.issuer`, the browser callback URL, and the client settings. For a private or self-signed issuer certificate, configure `oidc.ca_file` as described above.                                                 |
 | Pods show `ImagePullBackOff`                                         | On a disconnected cluster, confirm the image is in the mirror, an IDMS covers its repository, the configuration pins it by digest, the Machine Config Pool update finished, and the pull secret has mirror credentials. |
 | Helm cannot pull a chart                                             | The machine running `install.py` or Helm must reach `ghcr.io` and `quay.io`, or the charts must be mirrored and their URLs updated in the installer config or Helm command.                                             |

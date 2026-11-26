@@ -249,6 +249,12 @@ def database_uri_from_file(path):
         text = uri.decode("ascii")
     except UnicodeDecodeError:
         raise ValueError("Database URI must be ASCII") from None
+    # urlsplit() drops tab, CR, and LF before parsing, so an embedded separator
+    # would pass validation while the Secret keeps the raw multi-line bytes.
+    require(
+        not any(separator in text for separator in "\t\r\n"),
+        "Database URI must be a single line",
+    )
     parsed = None
     try:
         parsed = urlsplit(text)
@@ -711,7 +717,7 @@ def next_steps(config, context, config_dir):
         "An administrator must add users to a workspace before they can work there.",
         "The CLI targets the default workspace; pass --workspace <name> or export",
         "OPENSHELL_WORKSPACE=<name> to use the workspace you were added to.",
-        "See deploy/rhoai/README.md#register-the-gateway-and-log-in for details.",
+        "See deploy/rhoai/README.md#after-installation-install-the-cli-and-create-a-sandbox for details.",
     ]
     return "\n".join(lines)
 
