@@ -34,13 +34,14 @@ an installation to newer releases, see
   development Keycloak deployment, follow the
   [Keycloak development guide](keycloak-dev-guide.md).
 - Permission to create resources in the target namespace. Cluster-scoped
-  permission to create namespaces when the installer creates it, create and
-  patch ClusterRoles and ClusterRoleBindings, list ConfigMaps in all
-  namespaces, and read the Agent Sandbox CRD, the ClusterVersion,
-  StorageClasses, and Nodes. The installer also reads the cluster ingress
-  domain unless you set both hosts explicitly in the config. Preflight checks
-  the write permissions with `oc auth can-i` and fails on a denied cluster-wide
-  read.
+  permission to create namespaces when the installer creates it, read the
+  Namespace object, the Agent Sandbox CRD, the ClusterVersion, StorageClasses,
+  and Nodes, create and patch ClusterRoles and ClusterRoleBindings, and list
+  ConfigMaps in all namespaces. When the target namespace already exists,
+  preflight also reads its ConfigMaps and Secrets. The installer also reads the
+  cluster ingress domain unless you set both hosts explicitly in the config.
+  Preflight checks the write permissions with `oc auth can-i` and fails on a
+  denied read.
 
 The installer does not install the Agent Sandbox Operator, provision a database,
 or deploy an identity provider.
@@ -676,9 +677,10 @@ cluster** and `agent-sandbox-system` as the installed namespace, following the
 
 ### OpenShell Charts
 
-If the machine running `install.py` cannot reach `ghcr.io` and `quay.io`,
-push both charts to an OCI registry it can reach, using the chart versions in
-your configuration, and set `gateway.chart` and `dashboard.chart` to the
+If the machine running `install.py` cannot reach `ghcr.io` and `quay.io`, log
+in to the mirror registry with `helm registry login registry.example.com`,
+then push both charts to an OCI registry it can reach, using the chart versions
+in your configuration, and set `gateway.chart` and `dashboard.chart` to the
 mirrored URLs:
 
 ```shell
@@ -688,9 +690,8 @@ helm pull oci://quay.io/ai-openshell/charts/console --version 0.1.5
 helm push console-0.1.5.tgz oci://registry.example.com/charts
 ```
 
-Log the installer machine in to the registry with
-`helm registry login registry.example.com`. The machine also needs the
-installer's pinned PyYAML dependency available to `uv`.
+The machine also needs the installer's pinned PyYAML dependency available to
+`uv`.
 
 ## Troubleshooting
 

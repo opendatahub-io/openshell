@@ -372,6 +372,13 @@ oc -n openshift-config-managed get configmap default-ingress-cert \
 ./deploy/rhoai/keycloak-dev-guide-create-openshell-clients.sh
 ```
 
+Without a terminal, export the administrator variables and pass `--yes` to
+skip the confirmation prompt:
+
+```shell
+./deploy/rhoai/keycloak-dev-guide-create-openshell-clients.sh --yes
+```
+
 ## Disconnected clusters: mirror the images
 
 Skip this section if your cluster nodes can pull directly from
