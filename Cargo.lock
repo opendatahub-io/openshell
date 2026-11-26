@@ -4801,9 +4801,11 @@ dependencies = [
  "prost-types",
  "rcgen",
  "reqwest 0.12.28",
+ "russh",
  "rustls",
  "serde",
  "serde_json",
+ "shell-words",
  "tar",
  "temp-env",
  "tempfile",
@@ -4853,6 +4855,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
@@ -4861,6 +4864,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

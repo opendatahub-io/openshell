@@ -503,10 +503,14 @@ pub(super) fn record_forward_relay(
     sandbox: &Sandbox,
     channel_id: &str,
     target: &relay_open::Target,
+    authenticated_by_principal: bool,
 ) {
     let data = match target {
         relay_open::Target::Tcp(target) => {
             Some(serde_json::json!({ "host": target.host, "port": target.port }))
+        }
+        relay_open::Target::Ssh(_) if authenticated_by_principal => {
+            Some(serde_json::json!({ "target": "ssh", "admission": "gateway_principal" }))
         }
         relay_open::Target::Ssh(_) => None,
     };

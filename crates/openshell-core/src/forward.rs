@@ -7,6 +7,7 @@
 //! start, stop, list, and track background SSH port forwards.
 
 use crate::paths::{create_dir_restricted, xdg_config_dir};
+use crate::ssh_host_key::HostKeyCheck;
 use miette::{IntoDiagnostic, Result, WrapErr};
 use std::borrow::Cow;
 use std::net::TcpListener;
@@ -364,14 +365,13 @@ fn proxy_command_option_present(args: &[&str], proxy_index: usize) -> bool {
 fn proxy_option_takes_value(arg: &str) -> bool {
     matches!(
         arg,
-        "--gateway" | "--workspace" | "--token" | "--gateway-name"
+        "--gateway" | "--workspace" | "--token" | "--gateway-name" | "--server" | "--handoff"
     )
 }
 
 fn proxy_option_has_inline_value(arg: &str) -> bool {
-    ["--gateway=", "--workspace=", "--token=", "--gateway-name="]
-        .iter()
-        .any(|prefix| arg.starts_with(prefix))
+    arg.split_once('=')
+        .is_some_and(|(option, _)| proxy_option_takes_value(option))
 }
 
 fn is_outer_ssh_option_start(arg: &str) -> bool {
@@ -826,6 +826,21 @@ fn lsof_listeners(port: u16) -> Option<String> {
 // SSH utility functions (shared between CLI and TUI)
 // ---------------------------------------------------------------------------
 
+/// An authenticated `GetSandbox` reply advertises tokenless SSH on this gateway.
+pub const DIRECT_SSH_HEADER: &str = "x-openshell-direct-ssh";
+
+pub fn supports_direct_ssh<T>(response: &tonic::Response<T>) -> Result<bool> {
+    let values = response.metadata().get_all(DIRECT_SSH_HEADER);
+    let mut values = values.iter();
+    match (values.next(), values.next()) {
+        (None, None) => Ok(false),
+        (Some(value), None) if value == "1" => Ok(true),
+        _ => Err(miette::miette!(
+            "invalid direct SSH capability in gateway response"
+        )),
+    }
+}
+
 /// Resolve the SSH gateway scheme, host, and port for a sandbox connection.
 ///
 /// If the server-provided gateway host is a loopback address, use the host
@@ -923,28 +938,41 @@ pub fn shell_escape(value: &str) -> String {
     format!("'{escaped}'")
 }
 
-/// Build the SSH `ProxyCommand` string used to tunnel to a sandbox.
-///
-/// Every interpolated argument is shell-escaped so that server-supplied values
-/// (gateway URL, sandbox name, workspace, token, gateway name) cannot inject shell
-/// metacharacters into the command that OpenSSH executes via `/bin/sh -c`.
-pub fn build_proxy_command(
-    exe: &str,
-    gateway_url: &str,
-    sandbox_name: &str,
-    workspace: &str,
-    token: &str,
-    gateway_name: &str,
-) -> String {
+/// Build a one-use proxy command. The handle identifies an owner-only IPC
+/// endpoint. Only the parent and proxy exchange the relay credentials.
+pub fn build_proxy_command(exe: &str, handle: &str, sandbox: &str, workspace: &str) -> String {
     format!(
-        "{} ssh-proxy --gateway {} --sandbox {} --workspace {} --token {} --gateway-name {}",
+        "{} ssh-proxy --sandbox {} --workspace {} --handoff {}",
         shell_escape(exe),
-        shell_escape(gateway_url),
-        shell_escape(sandbox_name),
+        shell_escape(sandbox),
         shell_escape(workspace),
-        shell_escape(token),
-        shell_escape(gateway_name),
+        shell_escape(handle),
     )
+    .replace('%', "%%")
+}
+
+/// The `ProxyCommand` of a sandbox SSH connection, with the host-key decision
+/// it was built with.
+pub struct SandboxProxyCommand {
+    command: String,
+    host_key: HostKeyCheck,
+}
+
+impl SandboxProxyCommand {
+    pub fn new(command: String, host_key: HostKeyCheck) -> Self {
+        Self { command, host_key }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.command
+    }
+
+    /// Present when the user lets a connection whose key cannot be verified
+    /// go ahead.
+    #[must_use]
+    pub fn unverified_warning(&self) -> Option<String> {
+        self.host_key.unverified_warning()
+    }
 }
 
 /// Build the `ssh` options shared by every sandbox session.
@@ -952,27 +980,26 @@ pub fn build_proxy_command(
 /// Every sandbox is addressed as the host `sandbox`, so a user's `ControlMaster`
 /// or `ControlPath` would reuse one sandbox's connection for another. Command
 /// line options beat `ssh_config`, so connection sharing is turned off here.
-pub fn sandbox_ssh_args(proxy_command: &str, log_level: &str) -> Vec<String> {
+pub fn sandbox_ssh_args(proxy: &SandboxProxyCommand, log_level: &str) -> Vec<String> {
+    let host_key_options = proxy
+        .host_key
+        .ssh_options()
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"));
     [
-        format!("ProxyCommand={proxy_command}"),
-        "StrictHostKeyChecking=no".to_string(),
-        "UserKnownHostsFile=/dev/null".to_string(),
-        "GlobalKnownHostsFile=/dev/null".to_string(),
+        format!("ProxyCommand={}", proxy.command),
         format!("LogLevel={log_level}"),
         "ControlMaster=no".to_string(),
         "ControlPath=none".to_string(),
         "ControlPersist=no".to_string(),
     ]
     .into_iter()
+    .chain(host_key_options)
     .flat_map(|option| ["-o".to_string(), option])
     .collect()
 }
 
-/// Error returned when a `CreateSshSessionResponse` fails validation.
-///
-/// The response fields flow into a `ProxyCommand` string executed by
-/// `/bin/sh -c`; any deviation from the documented charset is rejected at the
-/// gRPC trust boundary before escaping is attempted.
+/// Error returned when an SSH session field fails validation.
 #[derive(Debug, thiserror::Error)]
 pub enum SshSessionResponseError {
     #[error("{field} is empty")]
@@ -1012,22 +1039,11 @@ fn is_fingerprint_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b':' | b'+' | b'/' | b'=' | b'-')
 }
 
-/// Validate a `CreateSshSessionResponse` before any of its fields are used to
-/// build a shell command or config file.
-///
-/// This is a belt-and-suspenders pair to [`build_proxy_command`]: escaping
-/// alone is sufficient to prevent injection, but rejecting malformed fields
-/// at the trust boundary fails loudly before the string is assembled and
-/// catches gateway bugs or tampering early.
+/// Check the SSH session response against the gateway protocol's charset and length limits.
 pub fn validate_ssh_session_response(
     resp: &crate::proto::CreateSshSessionResponse,
 ) -> std::result::Result<(), SshSessionResponseError> {
-    validate_field(
-        "sandbox_id",
-        &resp.sandbox_id,
-        MAX_SANDBOX_ID_LEN,
-        is_sandbox_id_byte,
-    )?;
+    validate_ssh_sandbox_id(&resp.sandbox_id)?;
     validate_field("token", &resp.token, MAX_TOKEN_LEN, is_token_byte)?;
     validate_field(
         "gateway_host",
@@ -1056,6 +1072,10 @@ pub fn validate_ssh_session_response(
         }
     }
     Ok(())
+}
+
+pub fn validate_ssh_sandbox_id(id: &str) -> std::result::Result<(), SshSessionResponseError> {
+    validate_field("sandbox_id", id, MAX_SANDBOX_ID_LEN, is_sandbox_id_byte)
 }
 
 fn validate_field(
@@ -1107,7 +1127,28 @@ pub fn build_sandbox_notes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ssh_host_key::KnownHostsPin;
     use crate::test_environment::Environment;
+
+    #[test]
+    fn direct_ssh_requires_one_explicit_capability_value() {
+        let mut response = tonic::Response::new(());
+        assert!(!supports_direct_ssh(&response).unwrap());
+        for value in ["0", "true", "1,1"] {
+            response
+                .metadata_mut()
+                .insert(DIRECT_SSH_HEADER, value.parse().unwrap());
+            assert!(supports_direct_ssh(&response).is_err());
+        }
+        response
+            .metadata_mut()
+            .insert(DIRECT_SSH_HEADER, "1".parse().unwrap());
+        assert!(supports_direct_ssh(&response).unwrap());
+        response
+            .metadata_mut()
+            .append(DIRECT_SSH_HEADER, "1".parse().unwrap());
+        assert!(supports_direct_ssh(&response).is_err());
+    }
 
     #[test]
     fn resolve_ssh_gateway_keeps_non_loopback() {
@@ -1351,11 +1392,9 @@ mod tests {
         // Attacker-controlled values in every escapable position.
         let cmd = build_proxy_command(
             "/usr/local/bin/openshell",
-            "https://gw:443/connect",
+            "handle",
             "x$(touch /tmp/pwn)x",
             "ws; touch /tmp/pwn",
-            "tok`id`",
-            "gw-name",
         );
 
         // The `$` / backtick must only appear inside single-quoted regions.
@@ -1373,30 +1412,36 @@ mod tests {
     fn build_proxy_command_empty_values_quote_rather_than_vanish() {
         // An empty value must become `''` rather than disappearing — otherwise
         // downstream argv splitting would misalign.
-        let cmd = build_proxy_command("exe", "gw", "", "", "tok", "name");
+        let cmd = build_proxy_command("exe", "handle", "", "");
         assert!(cmd.contains("--sandbox ''"));
         assert!(cmd.contains("--workspace ''"));
     }
 
     #[test]
-    fn build_proxy_command_safe_values_pass_through_unquoted() {
-        let cmd = build_proxy_command(
-            "/usr/local/bin/openshell",
-            "gw",
-            "sb-123",
-            "workspace-1",
-            "tok.456",
-            "name_1",
-        );
+    fn build_proxy_command_contains_only_handle_and_sandbox_identity() {
+        let cmd = build_proxy_command("/opt/My %h/bin", "opaque", "sb-123", "workspace-1");
         assert_eq!(
             cmd,
-            "/usr/local/bin/openshell ssh-proxy --gateway gw --sandbox sb-123 --workspace workspace-1 --token tok.456 --gateway-name name_1"
+            "'/opt/My %%h/bin' ssh-proxy --sandbox sb-123 --workspace workspace-1 --handoff opaque"
         );
+    }
+
+    const HOST_KEY_FINGERPRINT: &str = "SHA256:ZkAslGjFiUHdGf/WUL8rQvkib4PTvQatUV0OUQSncCA";
+
+    fn sandbox_proxy(exe: &str, known_hosts: &std::path::Path) -> SandboxProxyCommand {
+        let pin = KnownHostsPin::at(known_hosts.to_path_buf(), "sbx-1", "team-a").unwrap();
+        let host_key = HostKeyCheck::for_relay(HOST_KEY_FINGERPRINT.parse().unwrap(), pin).unwrap();
+        SandboxProxyCommand::new(
+            build_proxy_command(exe, "handle", "sbx-1", "team-a"),
+            host_key,
+        )
     }
 
     #[test]
     fn sandbox_ssh_args_disable_connection_sharing() {
-        let args = sandbox_ssh_args("openshell ssh-proxy", "DEBUG");
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = sandbox_proxy("openshell", &dir.path().join("pin"));
+        let args = sandbox_ssh_args(&proxy, "DEBUG");
         let options: Vec<&str> = args
             .chunks(2)
             .map(|pair| {
@@ -1404,7 +1449,7 @@ mod tests {
                 pair[1].as_str()
             })
             .collect();
-        assert!(options.contains(&"ProxyCommand=openshell ssh-proxy"));
+        assert!(options[0].starts_with("ProxyCommand=openshell ssh-proxy "));
         assert!(options.contains(&"LogLevel=DEBUG"));
         for option in ["ControlMaster=no", "ControlPath=none", "ControlPersist=no"] {
             assert!(options.contains(&option), "missing {option}");
@@ -1787,6 +1832,29 @@ mod tests {
             Some("team-a"),
             Some("sbx-1"),
             Some("id-2")
+        ));
+    }
+
+    #[test]
+    fn ssh_forward_command_matches_generated_host_key_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let proxy = sandbox_proxy("/path/openshell", &dir.path().join("pin"));
+        let mut argv = vec!["/usr/bin/ssh".to_string()];
+        argv.extend(sandbox_ssh_args(&proxy, "ERROR"));
+        argv.extend(["-N", "-L", "80:127.0.0.1:80", "sandbox"].map(str::to_string));
+        let line = argv.join(" ");
+
+        assert!(command_matches_ssh_forward(
+            &line,
+            80,
+            Some("team-a"),
+            Some("sbx-1")
+        ));
+        assert!(!command_matches_ssh_forward(
+            &line,
+            80,
+            Some("team-b"),
+            Some("sbx-1")
         ));
     }
 

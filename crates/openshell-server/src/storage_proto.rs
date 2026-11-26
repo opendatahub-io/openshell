@@ -252,7 +252,7 @@ mod tests {
     // The service backend HTTP version is part of both schemas. Legacy
     // endpoint records omit it and continue to use HTTP/1.1.
     const PUBLIC_RPC_SCHEMA_SHA256: &str =
-        "3c1c932ec40e0c29a8c844f84d936178c19aec8f233ae0fcb2f7980dc13a70a0";
+        "edfc80ad192e77e1a9d1e1d6e3342280e4438f8bf7cb49969f580060df9a056a";
     // The storage.v2 refresh root adds retired handles and the first mint's
     // provider revision. All fields from the prior root retain their wire tags.
     const DURABLE_SCHEMA_SHA256: &str =

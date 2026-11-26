@@ -14,10 +14,12 @@ This page describes how the CLI resolves a gateway, authenticates with it, and w
 
 When any CLI command needs to talk to the gateway, it resolves the target through a priority chain:
 
-1. `--gateway-endpoint <URL>` flag (direct URL).
+1. `--gateway-endpoint <URL>` flag or `OPENSHELL_GATEWAY_ENDPOINT` environment variable (direct URL).
 2. `-g <NAME>` flag.
 3. `OPENSHELL_GATEWAY` environment variable.
 4. Active gateway from `~/.config/openshell/active_gateway`, falling back to `/etc/openshell/active_gateway` when no user selection exists.
+
+If you specify a profile on the command line and inherit an endpoint from the environment, or vice versa, the CLI uses credentials registered for the endpoint. To use a profile through a different address, such as a local tunnel, pass both `--gateway <name>` and `--gateway-endpoint <URL>` together.
 
 The CLI loads gateway metadata from `~/.config/openshell/gateways/<name>/metadata.json` first and falls back to `/etc/openshell/gateways/<name>/metadata.json` when no user entry exists.
 

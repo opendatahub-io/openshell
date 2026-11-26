@@ -11,6 +11,8 @@
 
 use crate::ServerState;
 use crate::auth::authenticator::{AuthFailureReason, AuthMechanism, AuthRejection};
+use crate::auth::authz::AuthzPolicy;
+use crate::auth::identity::IdentityProvider;
 use crate::auth::workspace_authz::{
     AuthorizedWorkspaceScope, MinWorkspaceRole, authorize_list_workspace_selector,
     authorize_sandbox_workspace, authorize_workspace,
@@ -24,6 +26,7 @@ use crate::persistence::{
 use crate::tracing_bus::CursoredEvent;
 use crate::watch_cursor::WatchCursor;
 use futures::future;
+use openshell_core::forward::{DIRECT_SSH_HEADER, validate_ssh_sandbox_id};
 use openshell_core::net::set_tcp_nodelay_best_effort;
 use openshell_core::proto::datamodel::v1::ObjectMeta;
 use openshell_core::proto::{
@@ -1048,6 +1051,33 @@ fn owner_requested<T>(request: &Request<T>) -> bool {
         .contains_key(openshell_core::replica_routing::OWNER_REQUEST_HEADER)
 }
 
+/// Direct admission replaces the grant lifecycle only for verified user
+/// credentials and when no gateway extension observes or controls that lifecycle.
+fn direct_ssh_available(
+    state: &ServerState,
+    principal: &crate::auth::principal::Principal,
+) -> bool {
+    use crate::auth::principal::Principal;
+    const CREATE_SSH: &str = "/openshell.v1.OpenShell/CreateSshSession";
+    const REVOKE_SSH: &str = "/openshell.v1.OpenShell/RevokeSshSession";
+    let authorized = match principal {
+        Principal::Operator(_) => true,
+        Principal::User(user) => {
+            user.identity.provider != IdentityProvider::LocalDev
+                && state.config.oidc.as_ref().is_none_or(|oidc| {
+                    AuthzPolicy::from(oidc)
+                        .check(&user.identity, CREATE_SSH)
+                        .is_ok()
+                })
+        }
+        _ => false,
+    };
+    authorized
+        && state.gateway_interceptors.as_ref().is_none_or(|hooks| {
+            !hooks.should_intercept_path(CREATE_SSH) && !hooks.should_intercept_path(REVOKE_SSH)
+        })
+}
+
 pub(super) async fn handle_get_sandbox(
     state: &Arc<ServerState>,
     request: Request<GetSandboxRequest>,
@@ -1078,6 +1108,12 @@ pub(super) async fn handle_get_sandbox(
         response
             .metadata_mut()
             .insert(openshell_core::replica_routing::OWNER_REPLICA_HEADER, value);
+    }
+    if direct_ssh_available(state, &principal) {
+        response.metadata_mut().insert(
+            DIRECT_SSH_HEADER,
+            tonic::metadata::MetadataValue::from_static("1"),
+        );
     }
     Ok(response)
 }
@@ -2931,7 +2967,12 @@ pub(super) async fn handle_forward_tcp(
     )
     .await
     .map_err(|e| Status::unavailable(format!("supervisor relay failed: {e}")))?;
-    super::mutation_audit::record_forward_relay(&sandbox, &channel_id, &target);
+    super::mutation_audit::record_forward_relay(
+        &sandbox,
+        &channel_id,
+        &target,
+        connection_guard.token.is_none(),
+    );
 
     let (tx, rx) = mpsc::channel::<Result<TcpForwardFrame, Status>>(256);
     let sandbox_id = sandbox.object_id().to_string();
@@ -3006,16 +3047,9 @@ impl Drop for ForwardConnectionGuard {
     }
 }
 
-/// Reserve a relay slot for one `ForwardTcp` stream.
-///
-/// `target.tcp` streams are authorized by the caller's gateway principal, which
-/// `handle_forward_tcp` has already checked against the sandbox's workspace, so
-/// they carry no session token and touch no store: the only per-connection
-/// state is the in-memory per-sandbox connection count, kept in a budget apart
-/// from SSH relays (see [`RelayBudget`]). `target.ssh` streams
-/// keep requiring the `CreateSshSession` token because the process that opens
-/// them is an ssh `ProxyCommand` that holds nothing else. A token supplied with
-/// a TCP target (older clients) is still validated and counted per token.
+/// Reserve a relay slot after authorizing the sandbox's workspace. Each SSH
+/// transport draws from the same SSH budget. Clients using a session token
+/// also draw from its per-token budget, including older TCP forward clients.
 async fn acquire_forward_connection_guard(
     state: &Arc<ServerState>,
     principal: &crate::auth::principal::Principal,
@@ -3025,36 +3059,47 @@ async fn acquire_forward_connection_guard(
     let sandbox_id = sandbox.object_id().to_string();
     let budget = RelayBudget::of(init);
     let token = init.authorization_token.trim();
-    if token.is_empty() {
-        if budget == RelayBudget::Ssh {
-            return Err(crate::auth::audit::reject_credential(
-                Some(principal),
-                AuthRejection::new(
-                    AuthMechanism::SshSessionToken,
-                    AuthFailureReason::MissingCredential,
-                    Status::unauthenticated("authorization_token is required for SSH targets"),
-                ),
+    if let Some(tcp_forward_init::Target::DirectSshSandboxId(expected)) = &init.target {
+        if !direct_ssh_available(state, principal) {
+            return Err(crate::auth::audit::deny(
+                principal,
+                crate::auth::audit::AuthzDenial::MethodNotPermitted,
+                "direct SSH admission is unavailable for this request",
             ));
         }
-        acquire_sandbox_connection_slot(state, budget, &sandbox_id)?;
-        return Ok(ForwardConnectionGuard {
-            state: state.clone(),
-            token: None,
-            budget,
-            sandbox_id,
-        });
+        if *expected != sandbox_id {
+            return Err(Status::failed_precondition(
+                "sandbox was replaced before opening the SSH relay",
+            ));
+        }
+    } else if budget == RelayBudget::Ssh && token.is_empty() {
+        return Err(crate::auth::audit::reject_credential(
+            Some(principal),
+            AuthRejection::new(
+                AuthMechanism::SshSessionToken,
+                AuthFailureReason::MissingCredential,
+                Status::unauthenticated("authorization_token is required for SSH targets"),
+            ),
+        ));
     }
-
-    let session = validate_ssh_forward_token(state, token, &sandbox_id)
-        .await
-        .map_err(|rejection| crate::auth::audit::reject_credential(Some(principal), rejection))?;
-    super::mutation_audit::record_ssh_session(session.object_name());
-    crate::auth::audit::emit_ssh_session_logon(&state.logons, principal, token);
-    acquire_ssh_connection_slots(state, budget, token, &sandbox_id)?;
+    let token = if token.is_empty() {
+        acquire_sandbox_connection_slot(state, budget, &sandbox_id)?;
+        None
+    } else {
+        let session = validate_ssh_forward_token(state, token, &sandbox_id)
+            .await
+            .map_err(|rejection| {
+                crate::auth::audit::reject_credential(Some(principal), rejection)
+            })?;
+        super::mutation_audit::record_ssh_session(session.object_name());
+        crate::auth::audit::emit_ssh_session_logon(&state.logons, principal, token);
+        acquire_ssh_connection_slots(state, budget, token, &sandbox_id)?;
+        Some(token.to_string())
+    };
 
     Ok(ForwardConnectionGuard {
         state: state.clone(),
-        token: Some(token.to_string()),
+        token,
         budget,
         sandbox_id,
     })
@@ -3174,6 +3219,14 @@ fn validate_tcp_forward_init(init: &TcpForwardInit) -> Result<relay_open::Target
     if let Some(target) = init.target.as_ref() {
         return match target {
             tcp_forward_init::Target::Ssh(_) => {
+                Ok(relay_open::Target::Ssh(SshRelayTarget::default()))
+            }
+            tcp_forward_init::Target::DirectSshSandboxId(id) => {
+                if validate_ssh_sandbox_id(id).is_err() || !init.authorization_token.is_empty() {
+                    return Err(Status::invalid_argument(
+                        "direct SSH requires a valid sandbox ID and an empty authorization_token",
+                    ));
+                }
                 Ok(relay_open::Target::Ssh(SshRelayTarget::default()))
             }
             tcp_forward_init::Target::Tcp(target) => Ok(relay_open::Target::Tcp(
@@ -4937,6 +4990,60 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn direct_ssh_requires_a_verified_user_with_ssh_scope() {
+        use crate::auth::principal::Principal;
+        let mut state = test_server_state().await;
+        Arc::get_mut(&mut state).unwrap().config.oidc = Some(serde_json::from_value(
+            serde_json::json!({ "issuer": "https://issuer.example", "audience": "test", "scopes_claim": "scope" })
+        ).unwrap());
+        let Principal::User(mut user) = forward_caller() else {
+            panic!("expected user")
+        };
+        user.identity.scopes = vec!["sandbox:read".into()];
+        assert!(!direct_ssh_available(
+            &state,
+            &Principal::User(user.clone())
+        ));
+        user.identity.scopes.push("sandbox:write".into());
+        for provider in [
+            IdentityProvider::Oidc,
+            IdentityProvider::Mtls,
+            IdentityProvider::LocalDev,
+        ] {
+            user.identity.provider = provider;
+            assert_eq!(
+                direct_ssh_available(&state, &Principal::User(user.clone())),
+                provider != IdentityProvider::LocalDev
+            );
+        }
+        assert!(!direct_ssh_available(&state, &Principal::Anonymous));
+        assert!(!direct_ssh_available(
+            &state,
+            &crate::auth::principal::test_support::sandbox("sandbox-fwd")
+        ));
+    }
+
+    #[test]
+    fn direct_ssh_rejects_missing_identity_and_any_session_token() {
+        for (id, token) in [
+            ("", ""),
+            (" ", ""),
+            (" sandbox-fwd", ""),
+            ("sandbox-fwd", " "),
+            ("sandbox-fwd", "legacy-token"),
+        ] {
+            let init = forward_init(
+                tcp_forward_init::Target::DirectSshSandboxId(id.into()),
+                token,
+            );
+            assert_eq!(
+                validate_tcp_forward_init(&init).unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            );
+        }
+    }
+
     fn sandbox_connection_count(state: &ServerState, budget: RelayBudget, sandbox_id: &str) -> u32 {
         budget
             .counts(state)
@@ -5282,7 +5389,7 @@ mod tests {
             "sandbox service forward connection limit reached"
         );
 
-        let _ssh = acquire(ssh("canary-ssh-token-a"))
+        let ssh_guard = acquire(ssh("canary-ssh-token-a"))
             .await
             .expect("open forwards leave the SSH budget alone");
         let err = acquire(ssh("canary-ssh-token-b"))
@@ -5291,6 +5398,25 @@ mod tests {
             .expect("SSH budget spent");
         assert_eq!(err.code(), tonic::Code::ResourceExhausted);
         assert_eq!(err.message(), "sandbox SSH connection limit reached");
+        let direct = forward_init(
+            tcp_forward_init::Target::DirectSshSandboxId(sandbox.object_id().into()),
+            "",
+        );
+        assert_eq!(
+            acquire(direct.clone()).await.err().unwrap().code(),
+            tonic::Code::ResourceExhausted
+        );
+        drop(ssh_guard);
+        let direct_guard = acquire(direct).await.unwrap();
+        assert!(direct_guard.token.is_none());
+        assert_eq!(
+            acquire(ssh("canary-ssh-token-a"))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::ResourceExhausted
+        );
         assert_eq!(
             sandbox_connection_count(&state, RelayBudget::Ssh, sandbox.object_id()),
             1
@@ -5299,6 +5425,8 @@ mod tests {
             sandbox_connection_count(&state, RelayBudget::Service, sandbox.object_id()),
             2
         );
+        drop(direct_guard);
+        assert!(acquire(ssh("canary-ssh-token-a")).await.is_ok());
     }
 
     #[test]

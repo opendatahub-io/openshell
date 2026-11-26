@@ -324,8 +324,7 @@ pub struct CreateSandboxForm {
     /// When the create animation started (for pacman timing).
     pub anim_start: Option<Instant>,
     /// Buffered create result — held until min display time elapses.
-    /// `Ok((name, workspace))` or `Err(message)`.
-    pub create_result: Option<Result<(String, String), String>>,
+    pub create_result: Option<Result<openshell_core::ssh_handoff::SshTarget, String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +604,7 @@ pub struct App {
     // Active gateway connection
     pub gateway_name: String,
     pub endpoint: String,
+    pub gateway_insecure: bool,
     pub client: OpenShellClient<InterceptedService<Channel, EdgeAuthInterceptor>>,
     pub status_text: String,
 
@@ -997,6 +997,7 @@ impl App {
             splash_start: Some(Instant::now()),
             gateway_name,
             endpoint,
+            gateway_insecure: false,
             client,
             status_text: String::from("connecting..."),
             gateways: Vec::new(),

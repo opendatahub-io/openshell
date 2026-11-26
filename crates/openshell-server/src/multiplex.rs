@@ -328,11 +328,7 @@ impl MultiplexService {
             self.state.gateway_interceptors.clone(),
             Some(self.state.clone()),
         );
-        let authz_policy = self.state.config.oidc.as_ref().map(|oidc| AuthzPolicy {
-            admin_role: oidc.admin_role.clone(),
-            user_role: oidc.user_role.clone(),
-            scopes_enabled: !oidc.scopes_claim.is_empty(),
-        });
+        let authz_policy = self.state.config.oidc.as_ref().map(AuthzPolicy::from);
         let authenticator_chain = build_authenticator_chain(&self.state);
         let grpc_service = AuthGrpcRouter::with_peer_identity(
             GrpcRouter::new(openshell, reflection)
@@ -1723,7 +1719,8 @@ mod tests {
     use tower::Service;
 
     #[derive(Clone)]
-    struct PostCommitTestInterceptor;
+    struct PostCommitTestInterceptor(&'static str);
+    const CREATE_SANDBOX_RPC: &str = "openshell.v1.OpenShell/CreateSandbox";
 
     #[tonic::async_trait]
     impl GatewayInterceptor for PostCommitTestInterceptor {
@@ -1737,7 +1734,7 @@ mod tests {
                 bindings: vec![InterceptorBinding {
                     id: "audit-create-sandbox".to_string(),
                     selector: Some(InterceptorSelector {
-                        rpc: "openshell.v1.OpenShell/CreateSandbox".to_string(),
+                        rpc: self.0.to_string(),
                         service: String::new(),
                         method: String::new(),
                     }),
@@ -1781,13 +1778,16 @@ mod tests {
         Bytes::from(frame)
     }
 
-    async fn post_commit_test_runtime() -> (GatewayInterceptorRuntime, tokio::task::JoinHandle<()>)
-    {
+    async fn post_commit_test_runtime(
+        rpc: &'static str,
+    ) -> (GatewayInterceptorRuntime, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(GatewayInterceptorServer::new(PostCommitTestInterceptor))
+                .add_service(GatewayInterceptorServer::new(PostCommitTestInterceptor(
+                    rpc,
+                )))
                 .serve_with_incoming(TcpListenerStream::new(listener))
                 .await
                 .unwrap();
@@ -1801,6 +1801,66 @@ mod tests {
         .unwrap()
         .unwrap();
         (runtime, task)
+    }
+
+    #[tokio::test]
+    async fn direct_ssh_preserves_ssh_session_interceptor_bindings() {
+        use openshell_core::forward::DIRECT_SSH_HEADER;
+        use openshell_core::proto::{
+            GetSandboxRequest, Sandbox, SandboxPhase, TcpForwardFrame, TcpForwardInit,
+            datamodel::v1::ObjectMeta, open_shell_client::OpenShellClient, tcp_forward_frame,
+            tcp_forward_init, workspace_selector,
+        };
+        for rpc in [
+            "openshell.v1.OpenShell/CreateSshSession",
+            "openshell.v1.OpenShell/RevokeSshSession",
+            CREATE_SANDBOX_RPC,
+        ] {
+            let (runtime, task) = post_commit_test_runtime(rpc).await;
+            let mut state = crate::grpc::test_support::test_server_state().await;
+            Arc::get_mut(&mut state).unwrap().gateway_interceptors = Some(runtime);
+            let mut sandbox = Sandbox {
+                metadata: Some(ObjectMeta {
+                    id: "sb-1".into(),
+                    name: "agent".into(),
+                    workspace: "default".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            sandbox.set_phase(SandboxPhase::Ready as i32);
+            state.store.put_message(&sandbox).await.unwrap();
+            let mut client = OpenShellClient::new(OpenShellServer::with_interceptor(
+                OpenShellService::new(state),
+                crate::test_support::authenticate_as_dev_user,
+            ));
+            let lookup = GetSandboxRequest {
+                name: "agent".into(),
+                workspace_scope: Some(workspace_selector("default")),
+            };
+            let response = client.get_sandbox(lookup).await.unwrap();
+            assert_eq!(
+                response.metadata().contains_key(DIRECT_SSH_HEADER),
+                rpc == CREATE_SANDBOX_RPC,
+                "{rpc}"
+            );
+            if rpc != CREATE_SANDBOX_RPC {
+                let frame = TcpForwardFrame {
+                    payload: Some(tcp_forward_frame::Payload::Init(TcpForwardInit {
+                        workspace: "default".into(),
+                        sandbox: "agent".into(),
+                        target: Some(tcp_forward_init::Target::DirectSshSandboxId("sb-1".into())),
+                        ..Default::default()
+                    })),
+                };
+                let denied = client
+                    .forward_tcp(tokio_stream::iter([frame]))
+                    .await
+                    .unwrap_err();
+                assert_eq!(denied.code(), tonic::Code::PermissionDenied, "{rpc}");
+            }
+            task.abort();
+        }
     }
 
     #[test]
@@ -2002,7 +2062,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_commit_decode_failure_preserves_committed_response() {
-        let (runtime, interceptor_task) = post_commit_test_runtime().await;
+        let (runtime, interceptor_task) = post_commit_test_runtime(CREATE_SANDBOX_RPC).await;
         let committed = Arc::new(AtomicUsize::new(0));
         let committed_for_service = committed.clone();
         let committed_body = Bytes::from_static(b"malformed committed gRPC response");
@@ -2050,7 +2110,7 @@ mod tests {
             &self,
             request: tonic::Request<DescribeRequest>,
         ) -> Result<tonic::Response<InterceptorManifest>, tonic::Status> {
-            let mut manifest = PostCommitTestInterceptor
+            let mut manifest = PostCommitTestInterceptor(CREATE_SANDBOX_RPC)
                 .describe(request)
                 .await?
                 .into_inner();
@@ -2108,7 +2168,7 @@ mod tests {
             &self,
             request: tonic::Request<ProviderProfileSnapshotRequest>,
         ) -> Result<tonic::Response<ProviderProfileSnapshot>, tonic::Status> {
-            PostCommitTestInterceptor
+            PostCommitTestInterceptor(CREATE_SANDBOX_RPC)
                 .snapshot_provider_profiles(request)
                 .await
         }

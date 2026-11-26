@@ -58,6 +58,8 @@ fn selected_workspace(
     }
 }
 
+const PUBLISHED_HOST_KEY: &str = "SHA256:ZkAslGjFiUHdGf/WUL8rQvkib4PTvQatUV0OUQSncCA";
+
 #[derive(Clone, Default)]
 struct SandboxState {
     /// Make `ListProviderProfiles` fail while every other RPC keeps working,
@@ -105,7 +107,10 @@ struct SandboxState {
     provisional_container_exit_sent: Arc<Notify>,
     ssh_session_failures_remaining: Arc<AtomicUsize>,
     ssh_session_requests: Arc<AtomicUsize>,
+    ssh_requests_with_cached_bearer: Arc<AtomicUsize>,
+    replace_after_first_ssh_revoke: Arc<AtomicBool>,
     ssh_session_revocations: Arc<AtomicUsize>,
+    revoked_ssh_tokens: Arc<Mutex<Vec<String>>>,
     /// Reject token-less `ForwardTcp` inits the way a gateway that predates
     /// principal-authorized TCP forwards does.
     forward_requires_session_token: Arc<AtomicBool>,
@@ -119,6 +124,17 @@ struct SandboxState {
     template_get_requests: Arc<Mutex<Vec<GetSandboxTemplateRequest>>>,
     template_list_requests: Arc<Mutex<Vec<ListSandboxTemplatesRequest>>>,
     template_delete_requests: Arc<Mutex<Vec<DeleteSandboxTemplateRequest>>>,
+}
+
+impl SandboxState {
+    fn ssh_sandbox_id(&self, name: &str) -> String {
+        if self.replace_after_first_ssh_revoke.load(Ordering::SeqCst)
+            && self.ssh_session_revocations.load(Ordering::SeqCst) > 0
+        {
+            return format!("replacement-{name}");
+        }
+        format!("id-{name}")
+    }
 }
 
 #[derive(Clone, Default)]
@@ -294,7 +310,9 @@ impl OpenShell for TestOpenShell {
             Some(GetSandboxOutcome::Missing) => {
                 return Err(Status::not_found("sandbox not found"));
             }
-            Some(GetSandboxOutcome::Phase(phase)) => (phase, Some(format!("id-{name}"))),
+            Some(GetSandboxOutcome::Phase(phase)) => {
+                (phase, Some(self.state.ssh_sandbox_id(&name)))
+            }
             Some(GetSandboxOutcome::Holder { id, phase }) => (phase, Some(id.to_string())),
             Some(GetSandboxOutcome::NoMetadata(phase)) => (phase, None),
             None => {
@@ -309,7 +327,7 @@ impl OpenShell for TestOpenShell {
                     .await
                     .pop_front()
                     .unwrap_or(SandboxPhase::Ready);
-                (phase, Some(format!("id-{name}")))
+                (phase, Some(self.state.ssh_sandbox_id(&name)))
             }
         };
         let mut sandbox = Sandbox {
@@ -323,6 +341,7 @@ impl OpenShell for TestOpenShell {
                 workspace: String::new(),
                 deletion_time: None,
             }),
+            host_key_fingerprint: PUBLISHED_HOST_KEY.to_string(),
             ..Sandbox::default()
         };
         sandbox.set_phase(phase as i32);
@@ -514,6 +533,16 @@ impl OpenShell for TestOpenShell {
         &self,
         request: tonic::Request<CreateSshSessionRequest>,
     ) -> Result<Response<CreateSshSessionResponse>, Status> {
+        if request
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            == Some("Bearer cached-access-token")
+        {
+            self.state
+                .ssh_requests_with_cached_bearer
+                .fetch_add(1, Ordering::SeqCst);
+        }
         self.state
             .ssh_session_requests
             .fetch_add(1, Ordering::SeqCst);
@@ -528,10 +557,10 @@ impl OpenShell for TestOpenShell {
             return Err(Status::failed_precondition("sandbox is not ready"));
         }
         let request = request.into_inner();
-        let sandbox_id = format!("id-{}", request.sandbox);
+        let sandbox_id = self.state.ssh_sandbox_id(&request.sandbox);
         Ok(Response::new(CreateSshSessionResponse {
+            token: format!("token-{sandbox_id}"),
             sandbox_id,
-            token: "test-token".to_string(),
             gateway_scheme: "https".to_string(),
             gateway_host: "localhost".to_string(),
             gateway_port: 443,
@@ -583,8 +612,13 @@ impl OpenShell for TestOpenShell {
 
     async fn revoke_ssh_session(
         &self,
-        _request: tonic::Request<RevokeSshSessionRequest>,
+        request: tonic::Request<RevokeSshSessionRequest>,
     ) -> Result<Response<RevokeSshSessionResponse>, Status> {
+        self.state
+            .revoked_ssh_tokens
+            .lock()
+            .await
+            .push(request.into_inner().token);
         self.state
             .ssh_session_revocations
             .fetch_add(1, Ordering::SeqCst);
@@ -972,7 +1006,9 @@ impl OpenShell for TestOpenShell {
                     "authorization_token is required for ForwardTcp",
                 ));
             }
-        } else if init.authorization_token != "test-token" {
+        } else if init.authorization_token
+            != format!("token-{}", self.state.ssh_sandbox_id(&init.sandbox))
+        {
             return Err(Status::unauthenticated("SSH session token not found"));
         }
 
@@ -1066,6 +1102,22 @@ fn install_executable_script(
 
 fn install_fake_ssh(dir: &TempDir) -> std::path::PathBuf {
     install_executable_script(dir, "ssh", "#!/bin/sh\nexit 0\n")
+}
+
+/// A fake `ssh` that answers the workspace probe and records its arguments,
+/// one per line, in the returned file. Also installs a fake `code`.
+fn install_recording_ssh(dir: &TempDir) -> std::path::PathBuf {
+    let arguments = dir.path().join("ssh-arguments");
+    install_executable_script(
+        dir,
+        "ssh",
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '/sandbox\\n'\n",
+            arguments.display()
+        ),
+    );
+    install_executable_script(dir, "code", "#!/bin/sh\nexit 0\n");
+    arguments
 }
 
 fn install_fake_pgrep_no_match(dir: &TempDir) -> std::path::PathBuf {
@@ -1257,8 +1309,8 @@ fi
 
 helper='@HELPER_PATH@'
 echo "$$" > '@PID_PATH@'
-printf '%s\n' "ssh -N -o ProxyCommand=/tmp/openshell ssh-proxy --gateway https://127.0.0.1:9443 --sandbox $sandbox_name --workspace $workspace --token test-token --gateway-name test-gateway -o ExitOnForwardFailure=yes -o SetEnv=OPENSHELL_FORWARD_SANDBOX_ID=$immutable_id -L $forward sandbox" > '@COMMAND_PATH@'
-exec env OPENSHELL_FAKE_FORWARD_MODE=listen "$helper" -N -o "ProxyCommand=/tmp/openshell ssh-proxy --gateway https://127.0.0.1:9443 --sandbox $sandbox_name --workspace $workspace --token test-token --gateway-name test-gateway" -o ExitOnForwardFailure=yes -o "SetEnv=OPENSHELL_FORWARD_SANDBOX_ID=$immutable_id" -L "$forward" sandbox
+printf '%s\n' "ssh -N -o ProxyCommand=/tmp/openshell ssh-proxy --sandbox $sandbox_name --workspace $workspace --handoff test-handle -o ExitOnForwardFailure=yes -o SetEnv=OPENSHELL_FORWARD_SANDBOX_ID=$immutable_id -L $forward sandbox" > '@COMMAND_PATH@'
+exec env OPENSHELL_FAKE_FORWARD_MODE=listen "$helper" -N -o "ProxyCommand=/tmp/openshell ssh-proxy --sandbox $sandbox_name --workspace $workspace --handoff test-handle" -o ExitOnForwardFailure=yes -o "SetEnv=OPENSHELL_FORWARD_SANDBOX_ID=$immutable_id" -L "$forward" sandbox
 "#
         .replace("@PID_PATH@", &pid_path.display().to_string())
         .replace("@COMMAND_PATH@", &command_path.display().to_string())
@@ -1331,7 +1383,7 @@ fi
 
 helper='@HELPER_PATH@'
 echo "$$" > '@PID_PATH@'
-exec env OPENSHELL_FAKE_FORWARD_MODE=sleep "$helper" -N -o "ProxyCommand=/tmp/openshell ssh-proxy --gateway https://127.0.0.1:9443 --sandbox $sandbox_id --token test-token --gateway-name test-gateway" -o ExitOnForwardFailure=yes -L "$forward" sandbox >'@LOG_PATH@' 2>&1
+exec env OPENSHELL_FAKE_FORWARD_MODE=sleep "$helper" -N -o "ProxyCommand=/tmp/openshell ssh-proxy --sandbox $sandbox_id --handoff test-handle" -o ExitOnForwardFailure=yes -L "$forward" sandbox >'@LOG_PATH@' 2>&1
 "#
         .replace("@LOG_PATH@", &log_path.display().to_string())
         .replace("@PID_PATH@", &pid_path.display().to_string())
@@ -3056,6 +3108,253 @@ async fn service_expose_requires_gateway_confirmation_for_http2() {
 }
 
 #[tokio::test]
+async fn create_upload_keeps_the_id_from_the_create_response() {
+    let server = run_server().await;
+    let state = &server.openshell.state;
+    // The name already points at a replacement when the first upload starts.
+    state.ssh_session_revocations.store(1, Ordering::SeqCst);
+    state
+        .replace_after_first_ssh_revoke
+        .store(true, Ordering::SeqCst);
+    let source = helpers::tempdir().unwrap();
+    let file = source.path().join("payload");
+    fs::write(&file, b"for the original sandbox").unwrap();
+    let output = run_cli_sandbox_create(
+        &server,
+        "upload-target",
+        &[
+            "--detach",
+            "--no-git-ignore",
+            "--upload",
+            file.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("sandbox was replaced"));
+    assert_eq!(state.ssh_session_requests.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn copy_retry_refuses_and_revokes_a_same_name_replacement() {
+    let bin = helpers::tempdir().unwrap();
+    let xdg = helpers::tempdir().unwrap();
+    test_env(&bin, &xdg)
+        .run_async(async {
+            install_executable_script(&bin, "ssh", "#!/bin/sh\nexit 255\n");
+            let file = xdg.path().join("payload");
+            fs::write(&file, b"original data").unwrap();
+            for upload in [true, false] {
+                let server = run_server().await;
+                let state = &server.openshell.state;
+                state
+                    .replace_after_first_ssh_revoke
+                    .store(true, Ordering::SeqCst);
+                let tls = test_tls(&server);
+                let result = if upload {
+                    run::sandbox_sync_up(
+                        &server.endpoint,
+                        "copy",
+                        &file,
+                        Some("/target/"),
+                        &tls,
+                        "default",
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    run::sandbox_sync_down(
+                        &server.endpoint,
+                        "copy",
+                        "payload",
+                        file.to_str().unwrap(),
+                        &tls,
+                        "default",
+                    )
+                    .await
+                };
+                let err = result.unwrap_err();
+                assert!(
+                    err.chain()
+                        .any(|cause| cause.to_string().contains("sandbox was replaced")),
+                    "{err:?}"
+                );
+                assert_eq!(state.ssh_session_requests.load(Ordering::SeqCst), 2);
+                assert_eq!(
+                    *state.revoked_ssh_tokens.lock().await,
+                    ["token-id-copy", "token-replacement-copy"]
+                );
+                assert_eq!(fs::read(&file).unwrap(), b"original data");
+            }
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn ssh_profile_credentials_follow_the_selected_endpoint() {
+    let server = run_server().await;
+    let xdg = helpers::tempdir().unwrap();
+    prepare_cli_xdg(&server, &xdg, "openshell");
+    write_oidc_test_credentials(&server, &xdg, "https://unused.invalid", 4_102_444_800);
+    let cli = || {
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_openshell"));
+        command
+            .env_remove("OPENSHELL_GATEWAY")
+            .env_remove("OPENSHELL_GATEWAY_ENDPOINT")
+            .env("XDG_CONFIG_HOME", xdg.path())
+            // The saved profiles below name no known-hosts file.
+            .env("OPENSHELL_SSH_REQUIRE_HOST_KEY", "0")
+            .env("OPENSHELL_TELEMETRY_ENABLED", "false");
+        command
+    };
+    let state = &server.openshell.state;
+    state
+        .ssh_session_failures_remaining
+        .store(3, Ordering::SeqCst);
+    for args in [
+        vec!["ssh-proxy", "--gateway-name", "openshell", "--name", "demo"],
+        vec!["ssh-proxy", "--gateway", "openshell", "--name", "demo"],
+        vec![
+            "--gateway",
+            "openshell",
+            "ssh-proxy",
+            "--server",
+            &server.endpoint,
+            "--name",
+            "demo",
+        ],
+    ] {
+        let output = cli()
+            .args(args)
+            .env("OPENSHELL_GATEWAY_ENDPOINT", "http://127.0.0.1:1")
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("sandbox is not ready"));
+    }
+    assert_eq!(
+        state.ssh_requests_with_cached_bearer.load(Ordering::SeqCst),
+        3
+    );
+
+    // --server selects B's mTLS identity even if the shell exports profile A.
+    let other = run_server().await;
+    prepare_cli_xdg(&other, &xdg, "other");
+    fs::write(
+        xdg.path().join("openshell/gateways/other/metadata.json"),
+        serde_json::to_vec(&openshell_bootstrap::GatewayMetadata {
+            name: "other".into(),
+            gateway_endpoint: other.endpoint.clone(),
+            ..openshell_bootstrap::GatewayMetadata::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let other_state = &other.openshell.state;
+    other_state
+        .ssh_session_failures_remaining
+        .store(3, Ordering::SeqCst);
+    let status = cli()
+        .args(["-g", "openshell", "status", "--output", "json"])
+        .env("OPENSHELL_GATEWAY_ENDPOINT", &other.endpoint)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["server"], other.endpoint);
+    assert_eq!(status["gateway"], "other");
+    assert_eq!(status["status"], "connected");
+
+    let connect = cli()
+        .args(["-g", "openshell", "sandbox", "connect", "demo"])
+        .env("OPENSHELL_GATEWAY_ENDPOINT", &other.endpoint)
+        .output()
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&connect.stderr).contains("sandbox is not ready"));
+    for flag in ["--server", "--gateway-endpoint"] {
+        let output = cli()
+            .args(["ssh-proxy", flag, &other.endpoint, "--name", "demo"])
+            .env("OPENSHELL_GATEWAY", "openshell")
+            .output()
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stderr).contains("sandbox is not ready"));
+    }
+    assert_eq!(other_state.ssh_session_requests.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        other_state
+            .ssh_requests_with_cached_bearer
+            .load(Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn selected_ssh_profile_wins_over_an_active_profile_on_the_same_host() {
+    let server = run_server().await;
+    let xdg = helpers::tempdir().unwrap();
+    prepare_cli_xdg(&server, &xdg, "openshell");
+    write_oidc_test_credentials(&server, &xdg, "https://unused.invalid", 4_102_444_800);
+    let endpoint = server.endpoint.replace("localhost", "LOCALHOST");
+    let profiles = xdg.path().join("openshell");
+    prepare_cli_xdg(&server, &xdg, "other");
+    fs::write(profiles.join("active_gateway"), "other").unwrap();
+    fs::write(
+        profiles.join("gateways/other/metadata.json"),
+        serde_json::to_vec(&openshell_bootstrap::GatewayMetadata {
+            name: "other".into(),
+            gateway_endpoint: endpoint.clone(),
+            ..Default::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let state = &server.openshell.state;
+    state
+        .ssh_session_failures_remaining
+        .store(3, Ordering::SeqCst);
+    for (request, args) in [
+        &["-g", "openshell", "sandbox", "connect", "demo"][..],
+        &["ssh-proxy", "--server", &endpoint, "--name", "demo"],
+        &[
+            "ssh-proxy",
+            "--gateway-endpoint",
+            &endpoint,
+            "--name",
+            "demo",
+        ],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_openshell"))
+            .args(args)
+            .env("OPENSHELL_GATEWAY", "openshell")
+            .env("OPENSHELL_GATEWAY_ENDPOINT", &endpoint)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            // The saved profiles above name no known-hosts file.
+            .env("OPENSHELL_SSH_REQUIRE_HOST_KEY", "0")
+            .env("OPENSHELL_TELEMETRY_ENABLED", "false")
+            .output()
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stderr).contains("sandbox is not ready"));
+        assert_eq!(
+            state.ssh_requests_with_cached_bearer.load(Ordering::SeqCst),
+            request + 1,
+            "{args:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn sandbox_forward_background_tracks_owned_child_when_pid_discovery_fails() {
     let server = run_server().await;
     let fake_ssh_dir = helpers::tempdir().unwrap();
@@ -3074,6 +3373,24 @@ async fn sandbox_forward_background_tracks_owned_child_when_pid_discovery_fails(
             result.expect(
                 "background forward should track the owned SSH child without PID discovery",
             );
+            // The fake openssh opened the listener without collecting its grant.
+            // A successful background handoff must still revoke before the CLI exits.
+            assert_eq!(
+                server
+                    .openshell
+                    .state
+                    .ssh_session_requests
+                    .load(Ordering::SeqCst),
+                1
+            );
+            assert_eq!(
+                server
+                    .openshell
+                    .state
+                    .ssh_session_revocations
+                    .load(Ordering::SeqCst),
+                1
+            );
             let record =
                 openshell_core::forward::read_forward_pid("default", "owned-forward", forward_port)
                     .expect("owned background forward should write a PID file");
@@ -3087,6 +3404,38 @@ async fn sandbox_forward_background_tracks_owned_child_when_pid_discovery_fails(
                 wait_for_process_exit(record.pid, Duration::from_secs(2)).await,
                 "tracked fake forward process should exit after stop"
             );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn editor_connect_makes_ssh_trust_only_the_pin_of_the_sandbox() {
+    let server = run_server().await;
+    let fake_ssh_dir = helpers::tempdir().unwrap();
+    let xdg_dir = helpers::tempdir().unwrap();
+
+    test_env(&fake_ssh_dir, &xdg_dir)
+        .run_async(async {
+            let tls = test_tls(&server);
+            let ssh_arguments = install_recording_ssh(&fake_ssh_dir);
+            let pin = xdg_dir
+                .path()
+                .join("openshell/known_hosts/openshell/openshell-pinned.default");
+
+            run::sandbox_connect_editor(
+                &server.endpoint,
+                "openshell",
+                "pinned",
+                run::Editor::Vscode,
+                &tls,
+                "default",
+            )
+            .await
+            .unwrap();
+
+            let ssh_arguments = fs::read_to_string(ssh_arguments).unwrap();
+            let expected = format!("\nUserKnownHostsFile=\"{}\"\n", pin.display());
+            assert!(ssh_arguments.contains(&expected), "{ssh_arguments}");
         })
         .await;
 }
@@ -3260,8 +3609,12 @@ async fn sandbox_create_env_rejects_invalid_key_name() {
     );
 }
 
-fn prepare_cli_xdg(server: &TestServer, xdg_dir: &TempDir) {
-    let tls_dir = xdg_dir.path().join("openshell/gateways/openshell/mtls");
+fn prepare_cli_xdg(server: &TestServer, xdg_dir: &TempDir, profile: &str) {
+    let tls_dir = xdg_dir
+        .path()
+        .join("openshell/gateways")
+        .join(profile)
+        .join("mtls");
     fs::create_dir_all(&tls_dir).unwrap();
     for filename in ["ca.crt", "tls.crt", "tls.key"] {
         fs::copy(server.dir.path().join(filename), tls_dir.join(filename)).unwrap();
@@ -3316,7 +3669,7 @@ async fn run_cli_sandbox_create(
     extra_args: &[&str],
 ) -> std::process::Output {
     let xdg_dir = helpers::tempdir().unwrap();
-    prepare_cli_xdg(server, &xdg_dir);
+    prepare_cli_xdg(server, &xdg_dir, "openshell");
     run_cli_sandbox_create_with_xdg(server, &xdg_dir, name, extra_args).await
 }
 
@@ -3404,7 +3757,11 @@ async fn sandbox_create_upload_warns_and_reaches_ssh_outside_git_repository() {
     let xdg_dir = helpers::tempdir().unwrap();
     test_env(&fake_ssh_dir, &xdg_dir)
         .run_async(async {
-            install_executable_script(&fake_ssh_dir, "ssh", "#!/bin/sh\nexit 7\n");
+            install_executable_script(
+                &fake_ssh_dir,
+                "ssh",
+                "#!/bin/sh\n: > \"$0.called\"\nexit 7\n",
+            );
             let source = tempfile::tempdir().unwrap();
             fs::write(source.path().join("marker.txt"), "dummy content").unwrap();
             let args = ["--detach", "--upload", source.path().to_str().unwrap()];
@@ -3427,12 +3784,7 @@ async fn sandbox_create_upload_warns_and_reaches_ssh_outside_git_repository() {
             assert!(stderr.contains("openshell sandbox delete"), "{stderr}");
             assert_eq!(create_requests(&server).await.len(), 1);
             assert!(
-                server
-                    .openshell
-                    .state
-                    .ssh_session_requests
-                    .load(Ordering::SeqCst)
-                    > 0,
+                fake_ssh_dir.path().join("ssh.called").is_file(),
                 "an upload outside a repository must reach the SSH transport",
             );
         })
@@ -3446,7 +3798,7 @@ async fn run_cli_sandbox_create_with_env(
     environment: &[(&str, &str)],
 ) -> std::process::Output {
     let xdg_dir = helpers::tempdir().unwrap();
-    prepare_cli_xdg(server, &xdg_dir);
+    prepare_cli_xdg(server, &xdg_dir, "openshell");
     run_cli_sandbox_create_with_xdg_and_env(server, &xdg_dir, name, extra_args, environment).await
 }
 
@@ -3613,7 +3965,7 @@ async fn sandbox_create_fails_before_mutation_when_expired_oidc_refresh_is_rejec
     let server = run_server().await;
     let issuer = run_rejected_oidc_refresh_server().await;
     let xdg_dir = helpers::tempdir().unwrap();
-    prepare_cli_xdg(&server, &xdg_dir);
+    prepare_cli_xdg(&server, &xdg_dir, "openshell");
 
     write_oidc_test_credentials(&server, &xdg_dir, &issuer, 0);
 
@@ -3649,7 +4001,7 @@ async fn sandbox_create_continues_with_unexpired_cached_token_when_refresh_fails
     let server = run_server().await;
     let issuer = run_rejected_oidc_refresh_server().await;
     let xdg_dir = helpers::tempdir().unwrap();
-    prepare_cli_xdg(&server, &xdg_dir);
+    prepare_cli_xdg(&server, &xdg_dir, "openshell");
     let expires_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -4011,7 +4363,7 @@ async fn service_forward_falls_back_to_session_tokens_once_for_a_legacy_gateway(
     echo_through_local_forward(&forward, port, b"first connection").await;
     wait_for_count(&state.ssh_session_revocations, 1, "revocation").await;
     let inits = state.forward_inits.lock().await.clone();
-    assert_eq!(forward_tokens(&inits), vec!["", "test-token"]);
+    assert_eq!(forward_tokens(&inits), vec!["", "token-id-svc-sandbox"]);
     assert_eq!(state.forward_token_rejections.load(Ordering::SeqCst), 1);
     assert_eq!(state.ssh_session_requests.load(Ordering::SeqCst), 1);
 
@@ -4020,7 +4372,10 @@ async fn service_forward_falls_back_to_session_tokens_once_for_a_legacy_gateway(
     echo_through_local_forward(&forward, port, b"second connection").await;
     wait_for_count(&state.ssh_session_revocations, 2, "revocations").await;
     let inits = state.forward_inits.lock().await.clone();
-    assert_eq!(forward_tokens(&inits), vec!["", "test-token", "test-token"]);
+    assert_eq!(
+        forward_tokens(&inits),
+        vec!["", "token-id-svc-sandbox", "token-id-svc-sandbox"]
+    );
     assert_eq!(state.forward_token_rejections.load(Ordering::SeqCst), 1);
     assert_eq!(state.ssh_session_requests.load(Ordering::SeqCst), 2);
     assert!(

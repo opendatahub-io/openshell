@@ -908,9 +908,16 @@ gateway, and supervisor must use the matching OpenShell release. Older
 runtimes can return an empty fingerprint; an empty value cannot verify an
 SSH server's identity.
 
-The CLI and TUI continue to use their existing SSH connection settings.
-Exposing the fingerprint does not enable automatic host-key verification in
-those clients.
+The CLI, the TUI, and generated SSH config entries check the sandbox's host
+key against this fingerprint on every SSH connection they open. They read the
+fingerprint from the gateway for each connection, so a sandbox recreated under
+the same name is checked against its new key. When the SSH server presents a
+different key, they stop before authentication and report
+`SSH host key mismatch`.
+
+They cannot verify a sandbox that has no published fingerprint, and refuse to
+connect to it. If the gateway predates sandbox SSH identities, upgrade it.
+Otherwise stop and start the sandbox so the gateway assigns it a key.
 
 Generate an SSH config entry for a sandbox so tools like VS Code Remote-SSH can connect directly:
 
@@ -919,6 +926,34 @@ openshell sandbox ssh-config my-sandbox
 ```
 
 Append the output to `~/.ssh/config` or use `--editor` on `sandbox create`/`sandbox connect` for automatic setup.
+If the gateway URL contains credentials, a path, a query, or a fragment, register it under a gateway name and use that name when generating the SSH config.
+
+SSH config entries that an earlier release generated accept any host key, so
+connections through them are refused. Using `--editor` on
+`sandbox create` or `sandbox connect` replaces that sandbox's entry, and every
+other `openshell-<sandbox>.<workspace>` entry in the OpenShell-managed SSH
+include file (`~/.config/openshell/ssh_config`) that you did not edit.
+
+To repair an entry that is still refused:
+
+- For an entry you edited, use `--editor` on `sandbox connect` for that
+  sandbox, then add your options to the new entry.
+- For an entry named `openshell-<sandbox>`, with no workspace, delete it from
+  the include file, then use `--editor` on `sandbox connect` for that sandbox.
+  The new entry is named `openshell-<sandbox>.<workspace>`.
+- For an entry you pasted into `~/.ssh/config`, replace it with new
+  `openshell sandbox ssh-config` output.
+
+A replaced entry runs the `openshell` executable that replaced it. If you had
+changed that path, change it again. After a downgrade, replaced entries stop
+connecting, because earlier releases do not accept `--known-hosts`. Use
+`--editor` on `sandbox connect` with the downgraded CLI for each sandbox.
+
+To connect without verification, to a sandbox with no published fingerprint
+or through such an entry, set `OPENSHELL_SSH_REQUIRE_HOST_KEY` to `0`, `false`,
+`no`, `n`, or `off`. The connection then goes ahead and prints a warning. Set
+it in the environment of the program that runs `ssh`: the shell that runs
+`openshell`, or the editor.
 
 ## Transfer Files
 

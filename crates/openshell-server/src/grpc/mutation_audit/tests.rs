@@ -1676,6 +1676,56 @@ async fn ssh_session_and_forward_records_name_the_session_but_never_its_token() 
 }
 
 #[tokio::test]
+async fn direct_ssh_checks_the_selected_sandbox_and_audits_the_admitted_connection() {
+    use openshell_core::forward::DIRECT_SSH_HEADER;
+    use openshell_core::proto::GetSandboxRequest;
+    let mut state = test_server_state().await;
+    Arc::get_mut(&mut state).unwrap().admin_role = "openshell-admin".into();
+    let mut supervisor = ready_sandbox(&state).await;
+    let service = OpenShellService::new(state);
+    let selected = service
+        .get_sandbox(authed_request(GetSandboxRequest {
+            name: "agent-01".into(),
+            workspace_scope: Some(workspace_selector("default")),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(selected.metadata().get(DIRECT_SSH_HEADER).unwrap(), "1");
+    let forward = |id: &str| {
+        authed_request(client_stream(&[TcpForwardFrame {
+            payload: Some(tcp_forward_frame::Payload::Init(TcpForwardInit {
+                sandbox: "agent-01".into(),
+                workspace: "default".into(),
+                target: Some(tcp_forward_init::Target::DirectSshSandboxId(id.into())),
+                ..Default::default()
+            })),
+        }]))
+    };
+    let id = selected.into_inner().sandbox.unwrap().metadata.unwrap().id;
+    for expected in [&id[..], "old-instance"] {
+        let mut request = forward(expected);
+        request
+            .extensions_mut()
+            .insert(crate::auth::principal::test_support::user("outsider"));
+        let result = service.forward_tcp(request).await;
+        assert_eq!(result.err().unwrap().code(), Code::NotFound);
+    }
+    let result = service.forward_tcp(forward("old-instance")).await;
+    assert_eq!(result.err().unwrap().code(), Code::FailedPrecondition);
+    assert!(supervisor.try_recv().is_err());
+
+    let (result, event) = record("ForwardTcp", service.forward_tcp(forward(&id))).await;
+    result.unwrap();
+    assert_eq!(
+        event["resources"],
+        json!([
+            default_workspace(), agent_sandbox(),
+            { "type": "forward", "uid": relay_channel(&mut supervisor), "data": {"target":"ssh","admission":"gateway_principal"} }
+        ])
+    );
+}
+
+#[tokio::test]
 async fn revoking_an_unknown_ssh_session_names_nothing() {
     let service = OpenShellService::new(test_server_state().await);
     let revoke = |allow_missing| {

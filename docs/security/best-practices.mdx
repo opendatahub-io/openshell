@@ -290,13 +290,15 @@ Gateway transport uses TLS, with client certificate checks available where the d
 
 ### SSH Tunnel Authentication
 
-SSH connections to sandboxes travel through the gateway over the sandbox supervisor's authenticated control path. Each SSH connect call also carries a short-lived session token scoped to a specific sandbox. The sandbox never exposes an SSH port on the network. Its SSH daemon listens on a local Unix socket that only the sandbox's own supervisor process can reach.
+SSH connections travel through the gateway and the supervisor's authenticated control path. When the gateway advertises direct SSH, the CLI opens the relay with its gateway credentials and the immutable ID of the selected sandbox. The gateway checks SSH access, workspace membership and sandbox identity on each connection. A refusal ends the attempt.
+
+Older gateways, local-development identities and deployments that intercept SSH session creation or revocation use sandbox-scoped session tokens. Older clients can continue to use those tokens on a new gateway. Both modes share the per-sandbox SSH connection limit. The sandbox SSH daemon listens on a local Unix socket accessible to its supervisor.
 
 Service forwards (`openshell forward`) use the same relay path but carry no session token. The gateway authorizes each forwarded connection against the caller's gateway identity and workspace membership, and the per-sandbox service forward limit applies.
 
 | Aspect | Detail |
 |---|---|
-| Default | Session tokens expire after 24 hours. Concurrent connections are limited to 3 per token, 20 SSH relays per sandbox, and 20 service forwards per sandbox. |
+| Default | Concurrent connections are limited to 20 SSH relays and 20 service forwards per sandbox. Where session tokens are used, they expire after 24 hours and allow 3 concurrent connections per token. |
 | What you can change | Configure `ssh_session_ttl_secs` (set to 0 for no expiry), `max_ssh_connections_per_sandbox`, and `max_service_connections_per_sandbox`. |
 | Risk if relaxed | Longer TTLs or no expiry increase the window for stolen token reuse. Higher connection limits increase the blast radius of a compromised token. |
 | Recommendation | Keep the 24-hour default. Monitor connection counts through the TUI. |

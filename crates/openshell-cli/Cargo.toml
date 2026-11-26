@@ -27,6 +27,7 @@ openshell-supervisor-middleware-builtins = { path = "../openshell-supervisor-mid
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yml = { workspace = true }
+shell-words = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 
@@ -95,6 +96,7 @@ futures = { workspace = true }
 openshell-server = { path = "../openshell-server", features = ["test-support"] }
 rcgen = { workspace = true }
 reqwest = { workspace = true }
+russh = "0.65.0"
 serde_json = { workspace = true }
 temp-env = "0.3"
 tokio-stream = { workspace = true }
