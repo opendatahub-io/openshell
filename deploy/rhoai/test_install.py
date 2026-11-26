@@ -1253,8 +1253,11 @@ class InstallTests(unittest.TestCase):
             args = call.args[0]
             self.assertEqual(args[args.index("--namespace") + 1], "render-project")
 
-    def check_render(self, extra=()):
-        """Run --check with local source charts and return rendered value files."""
+    def check_render(self, extra=(), manifest=""):
+        """Run --check with local source charts and return rendered value files.
+
+        Each chart renders as ``manifest``; stderr is kept in self.check_errors.
+        """
         path = self.root / "config.json"
         path.write_text(json.dumps(self.config))
         for chart in ("gateway", "dashboard"):
@@ -1268,7 +1271,7 @@ class InstallTests(unittest.TestCase):
             rendered.append(
                 json.loads(Path(args[args.index("--values") + 1]).read_text())
             )
-            return ""
+            return manifest
 
         argv = [
             "install.py",
@@ -1281,7 +1284,7 @@ class InstallTests(unittest.TestCase):
             str(self.root / "dashboard"),
             *extra,
         ]
-        output = io.StringIO()
+        output, errors = io.StringIO(), io.StringIO()
         with (
             patch("sys.argv", argv),
             patch.object(installer.shutil, "which", return_value="helm"),
@@ -1297,8 +1300,10 @@ class InstallTests(unittest.TestCase):
                 side_effect=AssertionError("--check accessed the cluster"),
             ),
             redirect_stdout(output),
+            redirect_stderr(errors),
         ):
             installer.main()
+        self.check_errors = errors.getvalue()
         return rendered, output.getvalue()
 
     def test_example_configs_omit_context_and_hosts(self):
@@ -1652,6 +1657,63 @@ class InstallTests(unittest.TestCase):
         self.config = configuration(with_hosts=False)
         _, output = self.check_render(["--apps-domain", "apps.cluster.example.com"])
         self.assertNotIn("rendered hosts are derived from", output)
+
+    def test_unpinned_images_reads_container_and_gateway_config_images(self):
+        pinned = "registry.example.com/rhoai/gateway@sha256:" + "a" * 64
+        manifest = (
+            "kind: ConfigMap\n"
+            "data:\n"
+            "  gateway.toml: |\n"
+            f'    supervisor_image = "{pinned}"\n'
+            '    default_image = "quay.io/example/sandbox:v1"\n'
+            '    supervisor_image_pull_policy = "if_not_present"\n'
+            "---\n"
+            "kind: Deployment\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            f'        - image: "{pinned}"\n'
+            "          imagePullPolicy: IfNotPresent\n"
+            "        - name: proxy\n"
+            "          image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0\n"
+        )
+        self.assertEqual(
+            installer.unpinned_images(manifest),
+            [
+                "quay.io/example/sandbox:v1",
+                "quay.io/oauth2-proxy/oauth2-proxy:v7.6.0",
+            ],
+        )
+
+    def test_check_warns_about_images_without_digest(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - image: quay.io/opendatahub/odh-openshell-gateway:v0.1.7\n"
+        )
+        _, output = self.check_render(manifest=manifest)
+        self.assertIn("Both charts rendered successfully.", output)
+        self.assertIn("1 rendered image(s) are not pinned by digest", self.check_errors)
+        self.assertIn(
+            "- quay.io/opendatahub/odh-openshell-gateway:v0.1.7", self.check_errors
+        )
+        self.assertIn("disconnected cluster", self.check_errors)
+
+    def test_check_does_not_warn_when_every_image_has_a_digest(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - image: registry.example.com/gateway@sha256:" + "b" * 64 + "\n"
+        )
+        self.check_render(manifest=manifest)
+        self.assertNotIn("not pinned by digest", self.check_errors)
 
     def test_colorize_keeps_ansi_out_of_non_tty_output(self):
         class Tty(io.StringIO):

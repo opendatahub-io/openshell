@@ -542,7 +542,9 @@ oc image mirror \
 Repeat for the image repositories and digests in the config. Set the matching
 `registry` and `repository` fields to `registry.example.com` and the mirrored
 repository; `gateway.images.sandbox.repository` is a full image path and should
-also point to the mirror. Keep the digest in the config. Ensure the cluster can
+also point to the mirror. Keep the digest in the config. `install.py` warns,
+from `--check` onward, about every rendered image that is not pinned by digest,
+including chart defaults such as the oauth2-proxy image. Ensure the cluster can
 authenticate to the mirror. Use the RHOAI operator CSV to get the image digests
 for the build installed in your cluster:
 

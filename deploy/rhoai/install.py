@@ -479,6 +479,42 @@ def warn_if_dashboard_user_role_missing(manifest, role, chart_version):
     )
 
 
+# Image references in rendered manifests: container `image:` fields and the
+# `*_image = "..."` settings of the gateway TOML ConfigMap.
+RENDERED_IMAGE = re.compile(
+    r"""^\s*(?:-\s+)?image:\s*["']?([^"'\s]+)|\b\w+_image\s*=\s*"([^"]+)\"""",
+    re.MULTILINE,
+)
+
+
+def unpinned_images(manifest):
+    """Return rendered image references that are not pinned by digest."""
+    images = {a or b for a, b in RENDERED_IMAGE.findall(manifest)}
+    return sorted(image for image in images if "@sha256:" not in image)
+
+
+def warn_if_images_unpinned(images):
+    if not images:
+        return
+    listed = "".join(f"\n  - {image}" for image in images)
+    print(
+        colorize(
+            f"Warning: {len(images)} rendered image(s) are not pinned by digest:"
+            f"{listed}\n"
+            "On a disconnected cluster the installation may fail with "
+            "ImagePullBackOff: an ImageDigestMirrorSet only redirects pulls by "
+            "digest, so tag-only images are pulled from their original registry. "
+            "Set images.<component>.digest in the configuration for each image, "
+            "pointing at your mirror (see Disconnected clusters in "
+            "deploy/rhoai/README.md).",
+            "33",
+            sys.stderr,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def chart_values(config):
     ns, oidc = config["namespace"], config["oidc"]
     require(
@@ -1454,7 +1490,7 @@ def main():
     step(1, total_steps, "Rendering the gateway and dashboard charts")
     with tempfile.TemporaryDirectory(prefix="openshell-install-") as temporary:
         root = Path(temporary)
-        charts, files = [], []
+        charts, files, unpinned = [], [], set()
         for index, (name, values, local) in enumerate(
             zip(
                 ("gateway", "dashboard"),
@@ -1510,6 +1546,7 @@ def main():
                 warn_if_dashboard_user_role_missing(
                     manifest, config["oidc"]["user_role"], config[name]["version"]
                 )
+            unpinned.update(unpinned_images(manifest))
             charts.append(chart)
             files.append(value_file)
         print(
@@ -1517,6 +1554,7 @@ def main():
             "This does not verify cluster or API compatibility.",
             flush=True,
         )
+        warn_if_images_unpinned(sorted(unpinned))
         if args.preflight:
             step(2, total_steps, "Running cluster preflight")
             installer.preflight()
