@@ -241,6 +241,30 @@ def resolve_main_hosts(config, check, apps_domain, cluster_domain):
     return False
 
 
+def database_uri_from_file(path):
+    """Read and validate the PostgreSQL URI shared by --check and install."""
+    uri = Path(path).read_bytes().rstrip(b"\r\n")
+    require(uri, "Database URI file contains no URI")
+    try:
+        text = uri.decode("ascii")
+    except UnicodeDecodeError:
+        raise ValueError("Database URI must be ASCII") from None
+    parsed = None
+    try:
+        parsed = urlsplit(text)
+        hostname = parsed.hostname
+    except ValueError:
+        hostname = None
+    require(
+        parsed is not None
+        and parsed.scheme in ("postgresql", "postgres")
+        and hostname
+        and not parsed.fragment,
+        "Database URI must be a postgresql:// or postgres:// URL with a host",
+    )
+    return uri
+
+
 def load_config(path, namespace=None):
     config = json.loads(path.read_text())
     if namespace is not None:
@@ -359,6 +383,7 @@ def load_config(path, namespace=None):
                     source.is_file() and source.stat().st_size > 0,
                     "Missing or empty gateway.database.uri_file",
                 )
+                database_uri_from_file(source)
                 database["uri_file"] = str(source)
             database["mode"] = mode
             item["database"] = database
@@ -1186,26 +1211,7 @@ class Installer:
         database = self.config["gateway"]["database"]
         if database["mode"] != "postgresql":
             return None
-        uri = Path(database["uri_file"]).read_bytes().rstrip(b"\r\n")
-        require(uri, "Database URI file contains no URI")
-        try:
-            text = uri.decode("ascii")
-        except UnicodeDecodeError:
-            raise ValueError("Database URI must be ASCII") from None
-        parsed = None
-        try:
-            parsed = urlsplit(text)
-            hostname = parsed.hostname
-        except ValueError:
-            hostname = None
-        require(
-            parsed is not None
-            and parsed.scheme in ("postgresql", "postgres")
-            and hostname
-            and not parsed.fragment,
-            "Database URI must be a postgresql:// or postgres:// URL with a host",
-        )
-        return uri
+        return database_uri_from_file(database["uri_file"])
 
     def database(self, check_only=False, *, namespace_exists=True):
         require(
@@ -1248,7 +1254,8 @@ class Installer:
         require(
             base64.b64decode(data["uri"]) == uri,
             f"Database URI differs from Secret {DB_SECRET}; rotate the Secret "
-            "explicitly before rerunning",
+            "explicitly, restart the gateway workload so it reads the new URI, "
+            "then rerun the installer",
         )
 
     def credentials(self, check_only=False, *, namespace_exists=True):

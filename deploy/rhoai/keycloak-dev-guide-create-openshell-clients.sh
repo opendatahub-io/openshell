@@ -136,7 +136,7 @@ else
   printf 'Keycloak master realm admin username: ' >&2
   read -r AU || AU=""
   printf 'Keycloak master realm admin password: ' >&2
-  read -rs AP || AP=""
+  IFS= read -rs AP || AP=""
   printf '\n' >&2
 fi
 if [ -z "$AU" ] || [ -z "$AP" ]; then

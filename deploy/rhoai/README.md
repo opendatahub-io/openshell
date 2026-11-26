@@ -33,8 +33,11 @@ an installation to newer releases, see
   client using PKCE S256. The example uses Keycloak and PostgreSQL. For a
   development Keycloak deployment, follow the
   [Keycloak development guide](keycloak-dev-guide.md).
-- Permission to create resources in the target namespace and read the cluster
-  ingress domain, unless you set both hosts explicitly in the config.
+- Permission to create resources in the target namespace, and cluster-scoped
+  permission to create and patch ClusterRoles and ClusterRoleBindings and to
+  list ConfigMaps in all namespaces. The installer also reads the cluster
+  ingress domain unless you set both hosts explicitly in the config. Preflight
+  verifies these permissions.
 
 The installer does not install the Agent Sandbox Operator, provision a database,
 or deploy an identity provider.
@@ -503,7 +506,9 @@ In SQLite mode the data lives in the gateway's persistent volume claim; back it
 up with your storage tooling instead.
 
 Store the backups somewhere safe; the Secret file contains the key in clear
-text. Then validate and upgrade:
+text. Run the backup and upgrade commands in the kubeconfig context you
+installed into; the installer's `--context` is not remembered. Then validate
+and upgrade:
 
 ```shell
 ./deploy/rhoai/install.py --config "$CONFIG_DIR/config-new.json" --check
@@ -529,6 +534,10 @@ Uninstalling deletes the sandboxes, the gateway's keys, and in SQLite mode the
 gateway data. To reinstall later with the same data, back up the database and
 the key-encryption key Secret first, as described in
 [Upgrade an installation](#upgrade-an-installation).
+
+The commands in this section use the current kubeconfig context. Select the
+context you installed into first if you used `--context`; `$NS` can also exist
+in another cluster.
 
 While the gateway is still running, delete the sandboxes in each workspace and
 remove the CLI registration:
@@ -652,7 +661,7 @@ mirrored URLs:
 
 ```shell
 helm pull oci://ghcr.io/nvidia/openshell/helm-chart --version 0.1.3
-helm push openshell-0.1.3.tgz oci://registry.example.com/charts
+helm push helm-chart-0.1.3.tgz oci://registry.example.com/charts
 helm pull oci://quay.io/ai-openshell/charts/console --version 0.1.5
 helm push console-0.1.5.tgz oci://registry.example.com/charts
 ```

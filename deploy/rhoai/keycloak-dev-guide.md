@@ -375,11 +375,14 @@ redirects digest references only, so this guide pins PostgreSQL by digest (see
 before Part 1.
 
 The examples use `registry.example.com:8443` as the private registry. Replace
-it with your registry, then log in to both registries before copying images:
+it with your registry, then log in to each registry before copying images.
+`registry.redhat.io` requires a Red Hat account; the Keycloak images below are
+pulled from it:
 
 ```shell
 export MIRROR=registry.example.com:8443
 skopeo login registry.access.redhat.com
+skopeo login registry.redhat.io
 skopeo login "$MIRROR"
 ```
 
@@ -387,19 +390,21 @@ skopeo login "$MIRROR"
 
 You need two groups of images:
 
-- The PostgreSQL image. Copy it by tag. `--all` preserves its multi-architecture
-  index, so the mirror has the same digest and Part 1 pulls the same build:
+- The PostgreSQL image. Copy it by digest. `--all` preserves its
+  multi-architecture index, so the mirror has the same digest and Part 1 pulls
+  the same build:
 
   ```shell
   skopeo copy --all \
-    docker://registry.access.redhat.com/hi/postgresql:18.4 \
+    docker://registry.access.redhat.com/hi/postgresql@sha256:67599d73c3dae0e8685c2f9ba31c11028477816bbc254cf862543cfb11c2dc3f \
     docker://$MIRROR/hi/postgresql:18.4
   ```
 
-  To pin or update the image, check the tag's current digest:
-  `skopeo inspect --format '{{.Digest}}'
-  docker://registry.access.redhat.com/hi/postgresql:18.4`. Red Hat may update
-  the image behind the `18.4` tag.
+  The destination tag keeps the image addressable in the mirror. To use a newer
+  build, check the tag's current digest with
+  `skopeo inspect --format '{{.Digest}}' docker://registry.access.redhat.com/hi/postgresql:18.4`,
+  then update that digest in Part 1 and in this command. Red Hat may update the
+  image behind the `18.4` tag.
 
 - The three Red Hat build of Keycloak images used by the operator. Print the
   image list for the channel you plan to install:
@@ -450,9 +455,10 @@ oc get imagedigestmirrorset \
 ```
 
 This guide needs `registry.access.redhat.com/hi` and `registry.redhat.io/rhbk`.
-Add only sources that are missing. If an oc-mirror set already covers a source,
-reuse or extend it. Do not create a second set for the same source. To create a
-set with only the missing entries:
+Add only sources that are missing from the list above, and include just those
+entries in the new set. If an oc-mirror set already covers a source, reuse or
+extend it; do not create a second set for the same source. For example, when
+neither source is covered yet:
 
 ```shell
 oc apply -f - <<'EOF'
@@ -465,6 +471,10 @@ spec:
     - source: registry.access.redhat.com/hi
       mirrors:
         - registry.example.com:8443/hi
+      mirrorSourcePolicy: NeverContactSource
+    - source: registry.redhat.io/rhbk
+      mirrors:
+        - registry.example.com:8443/rhbk
       mirrorSourcePolicy: NeverContactSource
 EOF
 ```
@@ -524,9 +534,11 @@ oc -n openshift-operator-lifecycle-manager rollout restart deployment catalog-op
 
 ## Cleanup
 
-Remove Keycloak and PostgreSQL with these commands. They delete only the
-resources created by this guide, so you can use them in a shared or existing
-`KEYCLOAK_NS` namespace:
+Remove Keycloak and PostgreSQL with these commands. They assume this guide
+created the listed objects, so before you run them in a shared or existing
+`KEYCLOAK_NS` namespace, confirm each object came from this guide and omit the
+ones it did not create. In particular, `keycloak-db-data` may be a claim that
+already existed, and the `app=keycloak-db` selector may match other workloads:
 
 ```shell
 oc delete keycloak keycloak -n "$KEYCLOAK_NS"

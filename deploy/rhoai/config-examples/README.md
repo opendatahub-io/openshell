@@ -23,7 +23,7 @@ Paths in `oidc.client_secret_file`, `oidc.ca_file`, and
 the client secret file before `--check`; the installer validates that the file
 exists and is not empty. The Keycloak examples also set
 `"ca_file": "ingress-ca.crt"`, so create that file with the command in
-[../README.md](../README.md#oidc-issuer-certificate) before running `--check`.
+[../README.md](../README.md#configure) before running `--check`.
 
 The examples omit the hosts. The installer targets the current kubeconfig
 context (`--context` selects another one) and derives
@@ -48,6 +48,7 @@ When `gateway.database` is omitted, the installer uses PostgreSQL and reads
 `0600` before `--check`:
 
 ```shell
+export CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/openshell-rhoai"
 umask 077
 printf 'Database URI: '
 IFS= read -rs DB_URI

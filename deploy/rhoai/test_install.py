@@ -419,11 +419,23 @@ class InstallTests(unittest.TestCase):
                 self.config = configuration()
                 self.database_config(uri=uri)
                 self.assertEqual(self.cluster().database_uri(), uri.encode())
+        # --check renders charts without calling preflight, so load_config must
+        # reject a bad URI before the install would.
         for uri, message in rejected.items():
             with self.subTest(uri=uri):
                 self.config = configuration()
                 self.database_config(uri=uri)
-                cluster = self.cluster()
+                with self.assertRaisesRegex(ValueError, re.escape(message)):
+                    self.load()
+        # The file can change between load and install; the install path
+        # validates it again.
+        self.config = configuration()
+        self.database_config()
+        cluster = self.cluster()
+        uri_path = Path(cluster.config["gateway"]["database"]["uri_file"])
+        for uri, message in rejected.items():
+            with self.subTest(phase="install", uri=uri):
+                uri_path.write_text(uri)
                 with self.assertRaisesRegex(ValueError, re.escape(message)):
                     cluster.database_uri()
 
