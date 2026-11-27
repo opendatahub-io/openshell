@@ -663,6 +663,11 @@ helm pull oci://quay.io/ai-openshell/charts/console --version 0.1.5
 helm push console-0.1.5.tgz oci://registry.example.com/charts
 ```
 
+If the mirror registry requires authentication, run
+`helm registry login registry.example.com` on the machine that runs
+`install.py` before installing. Helm stores registry credentials per machine,
+so the login on the copying machine does not apply.
+
 The machine also needs Python 3.12 and the installer's pinned PyYAML dependency
 available to `uv`.
 
