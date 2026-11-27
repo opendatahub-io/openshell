@@ -349,7 +349,9 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(config["gateway"]["database"]["mode"], "postgresql")
         self.assertEqual(
             config["gateway"]["database"]["uri_file"],
-            str(self.root / installer.DB_URI_FILE),
+            # load_config() resolves the path, which differs from the TMPDIR
+            # alias on macOS (/var/folders -> /private/var/folders).
+            str((self.root / installer.DB_URI_FILE).resolve()),
         )
         gateway, _ = installer.chart_values(config)
         self.assertEqual(gateway["workload"], {"kind": "deployment"})
