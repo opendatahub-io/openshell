@@ -20,9 +20,9 @@ To move an OpenShell  installation to newer releases, see [Upgrade an installati
 - OpenShift 4.20 or newer on amd64 nodes, with the Red Hat Build of Agent
   Sandbox Operator installed and the default OVN-Kubernetes network plugin.
 - A default StorageClass for sandbox workspace volumes.
-- `uv`, Helm 3.17.3 or newer, and `kubectl` on the machine running
-  the installer. That machine needs access to the OpenShift API and to the
-  gateway and Dashboard chart registries, `ghcr.io` and `quay.io`.
+- `uv`, `oc`, `openssl`, Helm 3.17.3 or newer, and `kubectl` on the machine
+  running the installer. That machine needs access to the OpenShift API and to
+  the gateway and Dashboard chart registries, `ghcr.io` and `quay.io`.
 - Cluster nodes must be able to pull the configured images. RHOAI images from
   `registry.redhat.io` require cluster pull credentials. For disconnected
   clusters, see [Disconnected clusters](#disconnected-clusters) for image mirroring guidance.
@@ -35,7 +35,7 @@ To move an OpenShell  installation to newer releases, see [Upgrade an installati
   Namespace object, the Agent Sandbox CRD, the ClusterVersion, StorageClasses,
   and Nodes, create and patch ClusterRoles and ClusterRoleBindings, and list
   ConfigMaps in all namespaces.
-- When the target namespace already exists, preflight also reads its ConfigMaps and Secrets. The installer also reads the cluster ingress domain unless you set both hosts explicitly in the config. Preflight checks the write permissions with `oc auth can-i` and fails on a denied read.
+- When the target namespace already exists, preflight also reads its ConfigMaps and Secrets. The installer also reads the cluster ingress domain unless you set both hosts explicitly in the config. Preflight checks the write permissions with `kubectl auth can-i` and fails on a denied read.
 
 The installer does not install the Agent Sandbox Operator, provision a database,
 or deploy an identity provider.
@@ -649,11 +649,12 @@ cluster** and `agent-sandbox-system` as the installed namespace, following the
 
 ### OpenShell Charts
 
-If the machine running `install.py` cannot reach `ghcr.io` and `quay.io`, log
-in to the mirror registry with `helm registry login registry.example.com`,
-then push both charts to an OCI registry it can reach, using the chart versions
-in your configuration, and set `gateway.chart` and `dashboard.chart` to the
-mirrored URLs:
+If the machine running `install.py` cannot reach `ghcr.io` and `quay.io`, copy
+both charts to an OCI registry it can reach. On a machine that can reach both
+the public registries and the mirror registry, log in with
+`helm registry login registry.example.com`, then pull and push each chart,
+using the chart versions in your configuration. Set `gateway.chart` and
+`dashboard.chart` to the mirrored URLs:
 
 ```shell
 helm pull oci://ghcr.io/nvidia/openshell/helm-chart --version 0.1.3
@@ -662,8 +663,8 @@ helm pull oci://quay.io/ai-openshell/charts/console --version 0.1.5
 helm push console-0.1.5.tgz oci://registry.example.com/charts
 ```
 
-The machine also needs the installer's pinned PyYAML dependency available to
-`uv`.
+The machine also needs Python 3.12 and the installer's pinned PyYAML dependency
+available to `uv`.
 
 ## Troubleshooting
 
