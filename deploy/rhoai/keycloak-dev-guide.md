@@ -342,8 +342,7 @@ mapper.
 
 ### Create the realm, roles, and clients with a helper script
 
-Use the [helper script](keycloak-dev-guide-create-openshell-clients.sh) for
-development only. It is not supported for production realms.
+Use the [helper script](keycloak-dev-guide-create-openshell-clients.sh) for development only. It is not supported for production realms.
 
 The script:
 

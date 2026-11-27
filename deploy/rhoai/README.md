@@ -11,10 +11,9 @@ The installer is an interim tool until an OpenShift Operator deploys OpenShell.
 It first ships with RHOAI 3.6 GA. Rerunning it against an existing installation
 works only for installations made with the RHOAI 3.6 GA version or later.
 The installer refuses installations made with earlier development versions,
-or asks for `--adopt-existing`; reinstall those into a new namespace. To move
-an installation to newer releases, see
-[Upgrade an installation](#upgrade-an-installation); to remove it, see
-[Uninstall](#uninstall).
+or asks for `--adopt-existing`; reinstall those into a new namespace.
+
+To move an OpenShell  installation to newer releases, see [Upgrade an installation](#upgrade-an-installation); to remove it, see [Uninstall](#uninstall).
 
 ## Prerequisites
 
@@ -26,22 +25,17 @@ an installation to newer releases, see
   gateway and Dashboard chart registries, `ghcr.io` and `quay.io`.
 - Cluster nodes must be able to pull the configured images. RHOAI images from
   `registry.redhat.io` require cluster pull credentials. For disconnected
-  clusters, see [Disconnected clusters](#disconnected-clusters) for image
-  mirroring guidance.
+  clusters, see [Disconnected clusters](#disconnected-clusters) for image mirroring guidance.
 - A PostgreSQL database reachable from the OpenShell namespace, and an OIDC
   provider reachable from the workloads and users, with a confidential browser
   client using PKCE S256. The example uses Keycloak and PostgreSQL. For a
-  development Keycloak deployment, follow the
-  [Keycloak development guide](keycloak-dev-guide.md).
+  development Keycloak deployment, follow the [Keycloak development guide](keycloak-dev-guide.md).
 - Permission to create resources in the target namespace. Cluster-scoped
   permission to create namespaces when the installer creates it, read the
   Namespace object, the Agent Sandbox CRD, the ClusterVersion, StorageClasses,
   and Nodes, create and patch ClusterRoles and ClusterRoleBindings, and list
-  ConfigMaps in all namespaces. When the target namespace already exists,
-  preflight also reads its ConfigMaps and Secrets. The installer also reads the
-  cluster ingress domain unless you set both hosts explicitly in the config.
-  Preflight checks the write permissions with `oc auth can-i` and fails on a
-  denied read.
+  ConfigMaps in all namespaces.
+- When the target namespace already exists, preflight also reads its ConfigMaps and Secrets. The installer also reads the cluster ingress domain unless you set both hosts explicitly in the config. Preflight checks the write permissions with `oc auth can-i` and fails on a denied read.
 
 The installer does not install the Agent Sandbox Operator, provision a database,
 or deploy an identity provider.
@@ -103,9 +97,7 @@ unset DB_URI
 chmod 600 "$CONFIG_DIR/gateway-db-uri.txt"
 ```
 
-Use a URI such as
-`postgresql://user:password@host:5432/database?sslmode=verify-full`. Keep the
-database password out of `config.json`. Without `sslmode`, the gateway uses
+Use a URI such as `postgresql://user:password@host:5432/database?sslmode=verify-full`. Keep the database password out of `config.json`. Without `sslmode`, the gateway uses
 TLS only when the server offers it and does not verify the certificate. With
 `verify-full`, the server certificate must chain to a CA in the gateway
 image's system trust store. The installer does not mount a separate database
@@ -114,14 +106,9 @@ CA, so a database signed by a private CA cannot use `verify-full` yet;
 
 The database outlives the namespace. The gateway encrypts stored provider
 credentials with the key in the `openshell-credential-storage-key-encryption-key`
-Secret, so back up that Secret together with the database (see
-[Upgrade an installation](#upgrade-an-installation)). If you reinstall into a
-recreated namespace with the same name against the same database, create the
-namespace, restore the Secret with
+Secret, so back up that Secret together with the database (see [Upgrade an installation](#upgrade-an-installation)). If you reinstall into a recreated namespace with the same name against the same database, create the namespace, restore the Secret with
 `oc apply -f "$CONFIG_DIR/key-encryption-key-secret.json"`, and run the
-installer with `--adopt-existing`: the
-restored key counts as existing key material, and deleting it as the
-installer's error suggests makes the chart generate a new key that cannot
+installer with `--adopt-existing`: the restored key counts as existing key material, and deleting it as the installer's error suggests makes the chart generate a new key that cannot
 decrypt the stored credentials.
 
 The Keycloak development guide uses the cluster's default ingress certificate.
@@ -151,8 +138,7 @@ fi
 
 The label marks the new, empty namespace as created for the installer, so
 reruns do not need `--adopt-existing`. Do not add it to a namespace that
-already existed; see
-[Reinstalling into an existing namespace](#reinstalling-into-an-existing-namespace).
+already existed; see [Reinstalling into an existing namespace](#reinstalling-into-an-existing-namespace).
 
 Create a password Secret and a persistent volume claim:
 
@@ -187,10 +173,12 @@ oc -n "$NS" new-app \
 
 oc -n "$NS" patch deployment/openshell-db --type=json -p \
   '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"POSTGRES_PASSWORD","valueFrom":{"secretKeyRef":{"name":"openshell-db-secret","key":"password"}}}}]'
+
 oc -n "$NS" set volume deployment/openshell-db \
   --add --overwrite --name=openshell-db-volume-1 \
   --type=persistentVolumeClaim --claim-name=openshell-db-data \
   --mount-path=/var/lib/postgresql
+
 oc -n "$NS" rollout status deployment/openshell-db
 ```
 
@@ -208,9 +196,7 @@ unset DB_PASSWORD
 chmod 600 "$CONFIG_DIR/gateway-db-uri.txt"
 ```
 
-The installer copies this URI into its gateway Secret; it does not create or
-validate the database. If the namespace has default-deny egress policies, allow
-the gateway to reach the database Service on port 5432.
+The installer copies this URI into its gateway Secret; it does not create or validate the database. If the namespace has default-deny egress policies, allow the gateway to reach the database Service on port 5432.
 
 ### Run the installer
 
@@ -234,22 +220,9 @@ gateway with the OpenShell CLI.
 
 ### Reinstalling into an existing namespace
 
-When the namespace already exists and holds installer state (the
-`openshell-installer` ConfigMap) or gateway key material
-(`openshell-server-tls`, `openshell-client-tls`, `openshell-jwt-keys`,
-`openshell-credential-storage-key-encryption-key`, `openshell-dashboard-oidc`),
-the installer reuses it only when the namespace proves the installer created
-the deployment: the Namespace carries the `openshell.ai/installer:
-odh-dashboard` label and the installer state is present. The installer sets the
-label when it creates the namespace. Namespace editors cannot set it on a
-namespace they do not administer, so the installer does not trust the ConfigMap
-label alone.
+When the namespace already exists and holds installer state (the `openshell-installer` ConfigMap) or gateway key material (`openshell-server-tls`, `openshell-client-tls`, `openshell-jwt-keys`, `openshell-credential-storage-key-encryption-key`, `openshell-dashboard-oidc`), the installer reuses it only when the namespace proves the installer created the deployment: the Namespace carries the `openshell.ai/installer:odh-dashboard` label and the installer state is present. The installer sets the label when it creates the namespace. Namespace editors cannot set it on a namespace they do not administer, so the installer does not trust the ConfigMap label alone.
 
-Do not add the label to a namespace that other users could already write to,
-such as an existing Data Science Project: anyone with edit access could have
-planted these objects, and the gateway would reuse their keys. Instead, inspect
-the listed objects and pass `--adopt-existing` only if they come from a
-previous installation of this gateway; otherwise delete them first.
+Do not add the label to a namespace that other users could already write to, such as an existing Data Science Project: anyone with edit access could have planted these objects, and the gateway would reuse their keys. Instead, inspect the listed objects and pass `--adopt-existing` only if they come from a previous installation of this gateway; otherwise delete them first.
 
 ## Install directly with Helm
 
@@ -397,8 +370,7 @@ helm upgrade --install openshell-dashboard \
 The values shown target the example's chart versions and namespace. If you
 change either version or the namespace, update the chart versions, image pins,
 OIDC identifiers, Service URL, and certificate DNS names together. For other
-chart options, see the [gateway chart values](../helm/openshell/values.yaml)
-and inspect the Dashboard chart values with
+chart options, see the [gateway chart values](../helm/openshell/values.yaml) and inspect the Dashboard chart values with
 `helm show values oci://quay.io/ai-openshell/charts/console --version 0.1.5`.
 
 ## After installation: install the CLI and create a sandbox
@@ -699,7 +671,7 @@ The machine also needs the installer's pinned PyYAML dependency available to
 | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--check` reports a missing client secret or database URI            | Create the files named by `oidc.client_secret_file` and `gateway.database.uri_file`. Their paths are relative to `config.json`.                                                                                         |
 | Preflight cannot find the Agent Sandbox controller or a StorageClass | Install the operator and confirm a default class is available for workspace volumes.                                                                                                                                    |
-| The gateway is not ready                                             | Inspect `oc -n <namespace> logs deployment/openshell` for PostgreSQL or `statefulset/openshell` for SQLite, and check the PostgreSQL URI, credentials, network access, and any egress policy.                            |
+| The gateway is not ready                                             | Inspect `oc -n <namespace> logs deployment/openshell` for PostgreSQL or `statefulset/openshell` for SQLite, and check the PostgreSQL URI, credentials, network access, and any egress policy.                           |
 | OIDC login fails or reports an `x509` error                          | Confirm `oidc.issuer`, the browser callback URL, and the client settings. For a private or self-signed issuer certificate, configure `oidc.ca_file` as described above.                                                 |
 | Pods show `ImagePullBackOff`                                         | On a disconnected cluster, confirm the image is in the mirror, an IDMS covers its repository, the configuration pins it by digest, the Machine Config Pool update finished, and the pull secret has mirror credentials. |
 | Helm cannot pull a chart                                             | The machine running `install.py` or Helm must reach `ghcr.io` and `quay.io`, or the charts must be mirrored and their URLs updated in the installer config or Helm command.                                             |
