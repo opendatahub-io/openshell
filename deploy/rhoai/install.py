@@ -649,23 +649,34 @@ def next_steps(config, context, config_dir):
     cli_client = cli_client_id(config)
     gateway_dir = f"${{XDG_CONFIG_HOME:-$HOME/.config}}/openshell/gateways/{ns}/mtls"
     gateway_url = f"https://{config['gateway']['host']}:443"
+
+    def heading(text):
+        return colorize(text, "1;36")
+
+    def command(*texts):
+        return [colorize(text, "32") for text in texts]
+
     lines = [
-        colorize("Next steps:", "1"),
+        heading("Next steps:"),
         "",
-        "1. Install the OpenShell CLI that matches this gateway release:",
-        f"   curl -LsSf {CLI_INSTALL_URL} \\",
-        f"     | OPENSHELL_VERSION=v{config['gateway']['version']} sh",
+        heading("1. Install the OpenShell CLI that matches this gateway release:"),
+        *command(
+            f"   curl -LsSf {CLI_INSTALL_URL} \\",
+            f"     | OPENSHELL_VERSION=v{config['gateway']['version']} sh",
+        ),
         "",
         "   Note: the upstream installer also deploys and starts a local",
         "   gateway on this workstation (a user service on Linux, a Homebrew",
         "   service on macOS). This is a limitation of the upstream installer;",
         "   this guide uses only the CLI. See the README for details.",
         "",
-        "2. Register the gateway with the OpenShell CLI:",
-        f'   mkdir -p "{gateway_dir}"',
-        f"   kubectl --context {shlex.quote(context)} -n {ns} get secret openshell-client-tls \\",
-        "     -o jsonpath='{.data.ca\\.crt}' | base64 -d \\",
-        f'     > "{gateway_dir}/ca.crt"',
+        heading("2. Register the gateway with the OpenShell CLI:"),
+        *command(
+            f'   mkdir -p "{gateway_dir}"',
+            f"   kubectl --context {shlex.quote(context)} -n {ns} get secret openshell-client-tls \\",
+            "     -o jsonpath='{.data.ca\\.crt}' | base64 -d \\",
+            f'     > "{gateway_dir}/ca.crt"',
+        ),
     ]
     if oidc.get("ca_file"):
         bundle = system_ca_bundle()
@@ -680,13 +691,15 @@ def next_steps(config, context, config_dir):
                 "   your platform's path below.",
             ]
         lines += [
-            f"   mkdir -p {shlex.quote(str(config_dir))}",
-            f"   cat {bundle or '<system-ca-bundle>'} \\",
-            f"     {shlex.quote(oidc['ca_file'])} \\",
-            f"     > {shlex.quote(str(bundle_file))}.tmp",
-            f"   mv {shlex.quote(str(bundle_file))}.tmp \\",
-            f"     {shlex.quote(str(bundle_file))}",
-            f"   export SSL_CERT_FILE={shlex.quote(str(bundle_file))}",
+            *command(
+                f"   mkdir -p {shlex.quote(str(config_dir))}",
+                f"   cat {bundle or '<system-ca-bundle>'} \\",
+                f"     {shlex.quote(oidc['ca_file'])} \\",
+                f"     > {shlex.quote(str(bundle_file))}.tmp",
+                f"   mv {shlex.quote(str(bundle_file))}.tmp \\",
+                f"     {shlex.quote(str(bundle_file))}",
+                f"   export SSL_CERT_FILE={shlex.quote(str(bundle_file))}",
+            ),
             "",
             "   Platform paths: "
             + ", ".join(f"{label} {path}" for label, path in SYSTEM_CA_BUNDLES)
@@ -694,12 +707,14 @@ def next_steps(config, context, config_dir):
         ]
     lines += [
         "",
-        "   openshell gateway add \\",
-        f"     --name {ns} \\",
-        f"     --oidc-issuer {shlex.quote(oidc['issuer'])} \\",
-        f"     --oidc-client-id {shlex.quote(cli_client)} \\",
-        f"     --oidc-audience {shlex.quote(oidc['audience'])} \\",
-        f'     "{gateway_url}"',
+        *command(
+            "   openshell gateway add \\",
+            f"     --name {ns} \\",
+            f"     --oidc-issuer {shlex.quote(oidc['issuer'])} \\",
+            f"     --oidc-client-id {shlex.quote(cli_client)} \\",
+            f"     --oidc-audience {shlex.quote(oidc['audience'])} \\",
+            f'     "{gateway_url}"',
+        ),
         "",
         f"   Use your provider's CLI client ID if it is not {cli_client}.",
         "",
@@ -708,11 +723,11 @@ def next_steps(config, context, config_dir):
         f"   ({oidc['user_role']}). The gateway rejects API calls from a",
         "   user with neither role.",
         "",
-        "3. Check the connection:",
-        "   openshell status",
+        heading("3. Check the connection:"),
+        *command("   openshell status"),
         "",
-        "4. Create a sandbox:",
-        "   openshell sandbox create",
+        heading("4. Create a sandbox:"),
+        *command("   openshell sandbox create"),
         "",
         "An administrator must add users to a workspace before they can work there.",
         "The CLI targets the default workspace; pass --workspace <name> or export",
