@@ -653,6 +653,52 @@ test_no_deploy_rejects_multiple_phases() {
 }
 run_test "Deployment disabled rejects multiple gateway modes" test_no_deploy_rejects_multiple_phases
 
+test_ha_phase_by_default() {
+	setup; setup_rhoai_csv
+	local tier="$1" expected_phases="$2" expected_order="$3"
+	run_script 0 "${ENTRYPOINT}" "${tier}"
+	assert_count "${expected_phases}" '^deploy|deploy '
+	assert_count "${expected_phases}" '^deploy|teardown '
+	assert_count "${expected_phases}" '^phase|'
+	[[ "$(awk '/^phase\|/ { print $2 }' "${WORK_DIR}/calls")" == "${expected_order}" ]]
+	grep -Fq 'deploy|deploy --yes --mode ha|' "${WORK_DIR}/calls"
+	grep -Fq "phase|${tier} ha " "${WORK_DIR}/calls"
+	grep -Fq 'name="ha"' "${OPENSHELL_E2E_RESULTS_DIR}/e2e-odh-${tier}-xunit.xml"
+}
+run_test "Tier 3 runs shared then HA without an opt-in" test_ha_phase_by_default tier3 2 $'shared\nha'
+run_test "ODH runs shared, managed, then HA without an opt-in" test_ha_phase_by_default odh 3 $'shared\nmanaged\nha'
+run_test "Full runs shared, managed, then HA without an opt-in" test_ha_phase_by_default full 3 $'shared\nmanaged\nha'
+
+test_tier3_no_deploy() {
+	setup
+	export OPENSHELL_E2E_DEPLOY_GATEWAY=0
+	run_script 2 "${ENTRYPOINT}" tier3
+	grep -Fq 'only supports single-phase tiers' "${WORK_DIR}/stderr"
+	[[ ! -s "${WORK_DIR}/calls" ]]
+}
+run_test "Tier 3 rejects no-deploy before cluster access" test_tier3_no_deploy
+
+test_direct_ha_phase() {
+	setup
+	cat > "${WORK_DIR}/bin/cargo" <<'FAKECARGO'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'cargo|%s|mode=%s\n' "$*" "${OPENSHELL_E2E_GATEWAY_MODE}" >> "${FAKE_OC_WORK_DIR}/calls"
+printf '<testsuite name="ha"><testcase name="failover"/></testsuite>\n' > "${OPENSHELL_E2E_RESULTS_DIR}/e2e-odh.xml"
+FAKECARGO
+	chmod +x "${WORK_DIR}/bin/cargo"
+	export OPENSHELL_E2E_KUBE_CONTEXT_ACTIVE=fake-context
+	local report="${OPENSHELL_E2E_RESULTS_DIR}/e2e-odh-tier3-ha.xml"
+	run_script 0 "${ROOT}/e2e/rust/tests/odh/run-odh-test-tier.sh" tier3 ha "${report}"
+	assert_count 0 '^oc|'
+	assert_count 0 '^deploy|'
+	grep -Fq -- '--run-ignored all' "${WORK_DIR}/calls"
+	grep -Fq 'test(~tier3::gateway_failover::)' "${WORK_DIR}/calls"
+	grep -Fq '|mode=ha' "${WORK_DIR}/calls"
+	[[ -f "${report}" ]]
+}
+run_test "Direct HA phase runs ignored failover coverage without deployment" test_direct_ha_phase
+
 test_discovery_failure_prevents_deployment() {
 	setup; setup_rhoai_csv
 	configure_error "$1" Forbidden 99

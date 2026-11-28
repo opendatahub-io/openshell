@@ -14,6 +14,9 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 # Relative to the profile store dir (`e2e/rust/target/nextest/e2e-odh/`).
 [profile.e2e-odh.junit]
 path = "../../../../../results/e2e-odh.xml"
+# Keep ignored destructive ODH tests visible to Jenkins as skipped rather than
+# silently omitting them from the report.
+report-skipped = "ignored"
 
 # serial_test's in-process locks do not span nextest's test processes.
 # Match names so this config also works without these test binaries.
@@ -23,6 +26,14 @@ path = "../../../../../results/e2e-odh.xml"
 filter = "test(~tier2::managed_identity::)"
 test-group = "@tool:odh:gateway-lifecycle"
 slow-timeout = { period = "60s", terminate-after = 15 }
+
+[[profile.e2e-odh.overrides]]
+filter = "test(~tier3::gateway_failover::)"
+test-group = "@tool:odh:gateway-lifecycle"
+# Configured budgets total about 51 minutes: 10 for preflight and tunnels,
+# 7 for create/recovery, 24 for failover, and 10 for cleanup/verification.
+# Leave time for subprocess teardown before nextest terminates the test.
+slow-timeout = { period = "60s", terminate-after = 60 }
 
 [[profile.e2e-odh.overrides]]
 filter = """

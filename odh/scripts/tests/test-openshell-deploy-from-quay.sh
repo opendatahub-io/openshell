@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Exercise image-digest plumbing without a cluster. The deploy script must
-# forward each component digest to Helm, retain the corresponding immutable
-# reference in its evidence, reject malformed or conflicting input before
-# Helm runs, and keep Helm map separators out of --set-string values.
+# Exercise image-digest plumbing and HA fixture setup without a cluster.
+# The deploy script must forward each component digest to Helm, retain the
+# immutable reference in its evidence, reject malformed or conflicting input
+# before Helm runs, and keep Helm map separators out of --set-string values.
 
 set -euo pipefail
 
@@ -14,6 +14,7 @@ DEPLOY="${ROOT}/odh/scripts/openshell-deploy-from-quay.sh"
 WORKDIR="$(mktemp -d)"
 MOCK_BIN="${WORKDIR}/bin"
 HELM_LOG="${WORKDIR}/helm.log"
+OC_LOG="${WORKDIR}/oc.log"
 
 # Tests below set their own image overrides. Do not let caller state change
 # which validation path a negative fixture exercises.
@@ -34,6 +35,7 @@ cat > "${MOCK_BIN}/oc" <<'OC'
 set -euo pipefail
 args=("$@")
 joined=" ${args[*]} "
+printf '%s\n' "$*" >> "${ODH_TEST_OC_LOG}"
 if [[ "${joined}" == *" whoami "* ]]; then
 	if [[ "${joined}" == *" --show-server "* ]]; then echo https://api.example.test; else echo test-user; fi
 	exit 0
@@ -46,6 +48,15 @@ if [[ "${joined}" == *" get runtimeclass "* ]]; then
 fi
 if [[ "${joined}" == *" get ingresses.config/cluster "* ]]; then echo apps.example.test; exit 0; fi
 if [[ "${joined}" == *" get namespace "* ]]; then exit 0; fi
+if [[ "${joined}" == *" get secret openshell-e2e-postgres-credentials -o jsonpath={.data.password} "* ]]; then
+	printf 'Zml4dHVyZS1wYXNzd29yZA=='
+	exit 0
+fi
+if [[ "${joined}" == *" create secret generic openshell-ha-pg "* ]]; then
+	printf 'kind: Secret\nmetadata:\n  name: openshell-ha-pg\n'
+	exit 0
+fi
+if [[ "${joined}" == *" apply -f - "* ]]; then cat >> "${ODH_TEST_OC_LOG}"; exit 0; fi
 if [[ "${joined}" == *" get secret openshell-client-tls "* ]]; then printf 'Y2VydA==\n'; exit 0; fi
 if [[ "${joined}" == *" create namespace "* ]]; then printf 'apiVersion: v1\nkind: Namespace\n'; exit 0; fi
 if [[ "${joined}" == *" label --local "* || "${joined}" == *" create -f - "* ]]; then cat; exit 0; fi
@@ -59,22 +70,24 @@ cat > "${MOCK_BIN}/helm" <<'HELM'
 set -euo pipefail
 printf '%s\n' "$*" >> "${ODH_TEST_HELM_LOG}"
 if [[ "${1:-}" == get ]]; then
-	printf '{"gatewayConfig":{"openshell.gateway.auth":{"allow_unauthenticated_users":false},"openshell.drivers.kubernetes":{"workspace_mode":"shared","image_pull_policy":"IfNotPresent","sandbox_runtime_image_pull_policy":"IfNotPresent","supervisor_image_pull_policy":"IfNotPresent"}}}\n'
+	printf '{'
+	if [[ "${ODH_TEST_MODE}" == ha ]]; then
+		printf '"replicaCount":2,"workload":{"kind":"deployment"},"server":{"externalDbSecret":"openshell-ha-pg"},'
+	fi
+	printf '"gatewayConfig":{"openshell.gateway.auth":{"allow_unauthenticated_users":false},"openshell.drivers.kubernetes":{"workspace_mode":"shared","image_pull_policy":"IfNotPresent","sandbox_runtime_image_pull_policy":"IfNotPresent","supervisor_image_pull_policy":"IfNotPresent"}}}\n'
 fi
 HELM
 chmod +x "${MOCK_BIN}/helm"
 
 cat > "${MOCK_BIN}/openshell" <<'OPENSH'
 #!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == gateway && "${2:-}" == add ]]; then
+	[[ -d "${OPENSHELL_LOCAL_TLS_DIR:-}" && -z "$(ls -A "${OPENSHELL_LOCAL_TLS_DIR}")" ]]
+fi
 exit 0
 OPENSH
 chmod +x "${MOCK_BIN}/openshell"
-
-cat > "${MOCK_BIN}/base64" <<'BASE64'
-#!/usr/bin/env bash
-cat
-BASE64
-chmod +x "${MOCK_BIN}/base64"
 
 # The deploy script probes that the Route rejects unauthenticated gRPC calls
 # before registering the gateway. Answer as an mTLS-enforcing endpoint would:
@@ -106,11 +119,12 @@ run_deploy() {
 	env -u ROUTE_HOST -u OPENSHELL_E2E_RUN_ID -u OPENSHELL_E2E_DEPLOY_STATE_DIR \
 		PATH="${MOCK_BIN}:${PATH}" HOME="${WORKDIR}/home" \
 		XDG_CONFIG_HOME="${WORKDIR}/config" ODH_TEST_HELM_LOG="${HELM_LOG}" \
+		ODH_TEST_OC_LOG="${OC_LOG}" ODH_TEST_MODE="${1:-shared}" \
 		OPENSHELL_BIN="${MOCK_BIN}/openshell" \
 		PYTHON_BIN="${PYTHON_BIN_REAL}" \
 		IMAGE_TAG="${IMAGE_TAG:-test-tag}" NAMESPACE=openshell-digest-test RELEASE=openshell-digest-test \
 		GATEWAY_NAME=openshell-digest-test \
-		"${DEPLOY}" deploy --yes
+		"${DEPLOY}" deploy --yes --mode "${1:-shared}"
 }
 
 # Resolve a real interpreter path before the mocked environment replaces
@@ -435,4 +449,28 @@ grep -Fq 'GATEWAY_IMAGE must carry a valid sha256 digest without Helm separators
 	|| { echo "FAIL: inline digest validation error was not clear" >&2; exit 1; }
 [[ ! -s "${HELM_LOG}" ]] || { echo "FAIL: Helm ran with an invalid inline digest" >&2; exit 1; }
 
-echo "ODH deploy image-digest checks passed"
+: > "${HELM_LOG}"
+: > "${OC_LOG}"
+echo ">> HA mode installs PostgreSQL and applies the gateway connection Secret"
+run_deploy ha > "${WORKDIR}/ha.log" 2>&1 || {
+	cat "${WORKDIR}/ha.log" >&2
+	exit 1
+}
+fixture_uri='postgresql://openshell:fixture-password@openshell-e2e-postgres.openshell-digest-test.svc.cluster.local:5432/openshell'
+for expected in \
+	"-n openshell-digest-test apply -f ${ROOT}/e2e/kubernetes/postgres-fixture.yaml" \
+	"-n openshell-digest-test rollout status deployment/openshell-e2e-postgres --timeout=120s" \
+	"-n openshell-digest-test get secret openshell-e2e-postgres-credentials -o jsonpath={.data.password}" \
+	"-n openshell-digest-test create secret generic openshell-ha-pg --from-literal=uri=${fixture_uri} --dry-run=client -o yaml" \
+	"  name: openshell-ha-pg"; do
+	grep -Fxq -- "${expected}" "${OC_LOG}" || {
+		echo "FAIL: HA deployment did not record ${expected}" >&2
+		exit 1
+	}
+done
+grep -Fq -- 'values-high-availability.yaml' "${HELM_LOG}" || {
+	echo "FAIL: HA deployment did not pass the HA values to Helm" >&2
+	exit 1
+}
+
+echo "ODH deploy contract checks passed"

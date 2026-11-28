@@ -25,10 +25,47 @@ pub async fn sandbox_pod_selector(namespace: &str, sandbox_name: &str) -> Option
         "json",
     ])
     .await;
+    sandbox_pod_selector_from_json(&sandboxes)
+}
+
+fn sandbox_pod_selector_from_json(sandboxes: &Value) -> Option<String> {
     sandboxes
         .get("items")
         .and_then(Value::as_array)
-        .and_then(|items| items.first())
+        .and_then(|items| (items.len() == 1).then(|| &items[0]))
         .and_then(|sandbox| sandbox["status"]["selector"].as_str())
         .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::sandbox_pod_selector_from_json;
+
+    #[test]
+    fn resolves_selector_from_exactly_one_sandbox() {
+        let sandboxes = json!({
+            "items": [{"status": {"selector": "agents.x-k8s.io/sandbox-name-hash=abc"}}]
+        });
+
+        assert_eq!(
+            sandbox_pod_selector_from_json(&sandboxes),
+            Some("agents.x-k8s.io/sandbox-name-hash=abc".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_ambiguous_sandboxes() {
+        assert_eq!(sandbox_pod_selector_from_json(&json!({"items": []})), None);
+        assert_eq!(
+            sandbox_pod_selector_from_json(&json!({
+                "items": [
+                    {"status": {"selector": "one"}},
+                    {"status": {"selector": "two"}}
+                ]
+            })),
+            None
+        );
+    }
 }

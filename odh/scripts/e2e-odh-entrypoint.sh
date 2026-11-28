@@ -196,6 +196,10 @@ fi
 
 plan_json="$("${PYTHON_BIN}" "${PLAN_RESOLVER}" "${TIER}" "${TIERS_FILE}")"
 phase_lines="$(printf '%s' "${plan_json}" | "${PYTHON_BIN}" -c 'import json,sys; print(chr(10).join(p["name"]+"|"+p["mode"]+"|"+",".join(p["runners"]) for p in json.load(sys.stdin)["phases"]))')"
+[[ -n "${phase_lines}" ]] || {
+	echo "ERROR: ${TIER} did not resolve the required phase" >&2
+	exit 1
+}
 phase_count=0
 while IFS= read -r _; do ((phase_count+=1)); done <<< "${phase_lines}"
 has_python_runner=0
@@ -591,6 +595,8 @@ if [[ "${report_available}" == 1 ]]; then
 		echo "ERROR: failed to merge ODH phase reports" >&2
 		[[ "${status}" != 0 ]] || status="${merge_status}"
 	}
+else
+	echo "WARNING: no phase reports were produced; skipping report merge" >&2
 fi
 if [[ -f "${merged_report}" ]]; then
 	if command -v xsltproc >/dev/null 2>&1; then
