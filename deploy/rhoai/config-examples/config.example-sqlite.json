@@ -2,56 +2,54 @@
   "namespace": "openshell-team",
   "gateway": {
     "chart": "oci://ghcr.io/nvidia/openshell/helm-chart",
-    "version": "0.1.7",
+    "version": "REPLACE_WITH_EXACT_GATEWAY_VERSION",
     "values_files": [],
+    "database": {
+      "mode": "sqlite"
+    },
     "images": {
       "gateway": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-gateway",
-        "tag": "v0.1.7-rhaiv.0"
+        "digest": "REPLACE_WITH_VERIFIED_GATEWAY_IMAGE_DIGEST"
       },
       "supervisor": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-supervisor",
-        "tag": "v0.1.7-rhaiv.0"
+        "digest": "REPLACE_WITH_VERIFIED_SUPERVISOR_IMAGE_DIGEST"
       },
       "sandboxRuntime": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-sandbox",
-        "tag": "v0.1.7-rhaiv.0"
+        "digest": "REPLACE_WITH_VERIFIED_SANDBOX_RUNTIME_IMAGE_DIGEST"
       },
       "sandbox": {
         "repository": "quay.io/opendatahub/odh-openshell-sandbox",
-        "tag": "v0.1.7-rhaiv.0"
+        "digest": "REPLACE_WITH_VERIFIED_SANDBOX_IMAGE_DIGEST"
       }
     }
   },
   "dashboard": {
     "chart": "oci://quay.io/ai-openshell/charts/console",
-    "version": "0.1.5",
+    "version": "REPLACE_WITH_EXACT_DASHBOARD_VERSION",
     "values_files": [],
     "images": {
       "dashboard": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-dashboard",
-        "digest": "sha256:cfb3b592c5909c7c1a5d5622f98a20bf8c503554d53b3441abb189140254450b"
+        "digest": "REPLACE_WITH_VERIFIED_DASHBOARD_IMAGE_DIGEST"
       }
     }
   },
   "oidc": {
-    "provider": "keycloak-oidc",
-    "issuer": "https://keycloak.apps.example.com/realms/openshell",
+    "provider": "oidc",
+    "issuer": "https://identity.example.com/realms/customer",
     "client_id": "openshell-dashboard-openshell-team",
     "client_secret_file": "dashboard-client-secret.txt",
-    "ca_file": "ingress-ca.crt",
     "audience": "openshell-api-openshell-team",
-    "roles_claim": "realm_access.roles",
+    "roles_claim": "roles",
     "admin_role": "openshell-admin",
     "user_role": "openshell-user",
-    "allowed_roles": [
-      "openshell-admin",
-      "openshell-user"
-    ],
-    "scope": "openid email profile"
+    "allowed_groups": []
   }
 }

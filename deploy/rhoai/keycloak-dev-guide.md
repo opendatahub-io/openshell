@@ -1,14 +1,14 @@
 # Install Keycloak for OpenShell development on OpenShift
 
-This guide is for development only. It is not a production Keycloak
-deployment: it runs one PostgreSQL instance and one Keycloak instance with
-bootstrap credentials, and the client helper verifies the Keycloak Route
-against the cluster ingress CA.
+This guide sets up Keycloak for development on OpenShift. It is not for
+production: it runs one PostgreSQL instance and one Keycloak instance, uses
+temporary bootstrap credentials, and the client setup helper checks the
+Keycloak Route against the cluster's ingress CA.
 
-This guide deploys and removes a development Keycloak instance only. Use
-[README.md](README.md) to install OpenShell and the OpenShell Dashboard admin UI.
-Follow this guide first when you need a local identity provider; skip it when
-your cluster already has an OIDC provider.
+Use [README.md](README.md) to install OpenShell and the OpenShell Dashboard
+admin UI. Follow this guide if you need a local identity provider. Skip it if
+your cluster already has an OIDC provider. If your cluster cannot reach public
+registries, first follow the [disconnected-cluster instructions](#disconnected-clusters-mirror-the-images).
 
 Set the environment used throughout the guide:
 
@@ -25,20 +25,21 @@ export KC_URL="https://keycloak.${APPS_DOMAIN}"
 export CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/openshell-rhoai"
 ```
 
-The client IDs are namespace-qualified and match the example configurations, so
-the commands work unchanged for the default namespace. `DASH_URL` also matches
-the host the installer derives from the namespace and ingress domain, so the
-example configurations need no host changes. Changing `NS` changes the client
-IDs, `DASH_URL`, and both derived hosts; update the OIDC identifiers in the
-OpenShell configuration from [README.md](README.md) and re-register
-`https://<new-dashboard-host>/oauth2/callback` with Keycloak. If the
-configuration sets explicit hosts, register that dashboard URL instead.
+These namespace-qualified client IDs match the examples, so the commands work
+with the default namespace. `DASH_URL` also matches the host the installer
+builds from the namespace and ingress domain.
 
-Realm roles are realm-wide. In a shared realm, a user with `openshell-admin` is
-an administrator for every gateway in that realm, regardless of the client IDs.
-Use one realm per trust boundary when gateways serve different teams.
+If you change `NS`, update the OIDC identifiers in the OpenShell configuration
+from [README.md](README.md), then register the new dashboard callback URL
+(`https://<new-dashboard-host>/oauth2/callback`) in Keycloak. If your
+configuration sets a dashboard host directly, register that URL instead.
 
-## Part 1 — PostgreSQL and Keycloak
+Realm roles apply to the whole realm. Anyone with `openshell-admin` can
+administer every gateway in that realm, whatever the client IDs are. Use a
+separate realm for each group of gateways that should have its own access
+boundary.
+
+## Part 1: PostgreSQL and Keycloak
 
 ### Create the namespace and database secret
 
@@ -49,8 +50,7 @@ openssl rand -base64 24 | tr -d '\n' | \
     --from-literal=username=keycloak --from-file=password=/dev/stdin
 ```
 
-Reading the generated password from stdin keeps it out of the process argument
-list.
+Passing the generated password through stdin keeps it out of the process list.
 
 ### Deploy PostgreSQL with persistent storage
 
@@ -71,29 +71,36 @@ spec:
 EOF
 ```
 
-Deploy PostgreSQL from the Red Hat hardened image. `PGDATA` points to a
-subdirectory to avoid the `lost+found` conflict at the mount point:
+Deploy PostgreSQL from Red Hat's hardened image and pin it by digest. The image
+is public. To use a newer build, get the current digest for the `18.4` tag:
 
 ```shell
-oc -n "$KEYCLOAK_NS" new-app registry.access.redhat.com/hi/postgresql:18.4 \
+skopeo inspect --format '{{.Digest}}' \
+  docker://registry.access.redhat.com/hi/postgresql:18.4
+oc -n "$KEYCLOAK_NS" new-app registry.access.redhat.com/hi/postgresql@sha256:67599d73c3dae0e8685c2f9ba31c11028477816bbc254cf862543cfb11c2dc3f \
   -e POSTGRES_USER=keycloak \
   -e POSTGRES_DATABASE=keycloak \
   -e PGDATA=/var/lib/postgresql/data/pgdata \
   --name=keycloak-db
 ```
 
-Do not pass the database password through `oc new-app`: it would appear in the
-process table and as a literal Deployment value. Add the reference from
-`keycloak-db-secret` instead:
+Use the digest form on disconnected clusters. An `ImageDigestMirrorSet` can
+redirect digest pulls to your mirror, but tag pulls still go to the original
+registry and fail.
+
+Keep the database password out of the `oc new-app` command. Otherwise it can
+appear in the process list and as plain text in the Deployment. Add a reference
+to `keycloak-db-secret` instead:
 
 ```shell
 oc -n "$KEYCLOAK_NS" patch deployment/keycloak-db --type=json -p \
   '[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"POSTGRES_PASSWORD","valueFrom":{"secretKeyRef":{"name":"keycloak-db-secret","key":"password"}}}}]'
 ```
 
-Replace the image's emptyDir volume with the claim. The image names its volume
-`keycloak-db-volume-1` at `/var/lib/postgresql`; inspect the Deployment if the
-name differs in your image version:
+Use the claim instead of the image's temporary `emptyDir` volume. The image
+usually names its volume `keycloak-db-volume-1` and mounts it at
+`/var/lib/postgresql`. Check the Deployment if your image uses a different
+volume name:
 
 ```shell
 oc -n "$KEYCLOAK_NS" set volume deployment/keycloak-db \
@@ -106,29 +113,29 @@ oc -n "$KEYCLOAK_NS" rollout status deployment/keycloak-db
 
 ### Install the Red Hat build of Keycloak Operator
 
-Use either the console or a Subscription. In the console, open
-**Operators** → **OperatorHub**, search for **Red Hat build of Keycloak**,
-install it in the `keycloak` namespace or all namespaces, and wait until the
-operator pod is ready:
+Install the operator from the OpenShift console or with a Subscription. In the
+console, go to **Operators** → **OperatorHub**, search for **Red Hat build of
+Keycloak**, and install it in the `keycloak` namespace or in all namespaces.
+Then wait for the operator to start:
 
 ```shell
 oc -n "$KEYCLOAK_NS" rollout status deployment/rhbk-operator
 ```
 
-If you installed the operator for all namespaces, its Deployment runs in
-`openshift-operators`; use `-n openshift-operators` for that command instead.
+If you installed it for all namespaces, the Deployment is in
+`openshift-operators`. Use `-n openshift-operators` in the command above.
 
-To install with a Subscription instead, first list the channels your cluster
-offers and pick a version channel from the output:
+To install with a Subscription, first list the available channels and choose
+one from the output:
 
 ```shell
 oc get packagemanifest rhbk-operator -n openshift-marketplace \
   -o jsonpath='{.status.channels[*].name}'
 ```
 
-The manifests below use `stable-v26.6` and expand `KEYCLOAK_NS`. Channel names
-change with operator releases, so substitute a channel from the command output
-when needed.
+The example uses `stable-v26.6` and the `KEYCLOAK_NS` value you set earlier.
+Channel names can change between releases, so replace the example channel if
+your cluster lists a different one.
 
 ```shell
 oc apply -f - <<EOF
@@ -146,14 +153,18 @@ spec:
 EOF
 ```
 
-Apply an OperatorGroup only when the namespace does not already have one:
+Check whether the namespace already has an OperatorGroup:
 
 ```shell
 oc get operatorgroup -n "$KEYCLOAK_NS"
 ```
 
+Create one only when the list is empty. In a shared namespace that already has
+an OperatorGroup, a second one makes OLM fail to install the operator:
+
 ```shell
-oc apply -f - <<EOF
+if ! oc get operatorgroup -n "$KEYCLOAK_NS" -o name | grep -q .; then
+  oc apply -f - <<EOF
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
@@ -163,11 +174,12 @@ spec:
   targetNamespaces:
     - ${KEYCLOAK_NS}
 EOF
+fi
 ```
 
-The Subscription installs asynchronously, and the Keycloak CRD may not exist
-yet when the next command runs. Wait for the operator Deployment to become
-ready before creating the instance:
+The Subscription installs in the background. Wait for the operator to be ready
+before creating the Keycloak instance; otherwise, the Keycloak custom resource
+may not be available yet:
 
 ```shell
 oc -n "$KEYCLOAK_NS" rollout status deployment/rhbk-operator
@@ -203,9 +215,9 @@ EOF
 oc -n "$KEYCLOAK_NS" get keycloak keycloak -w
 ```
 
-The `hostname` field makes the operator create and own an edge-terminated
-Route for that host. Do not create a Route yourself; a manual Route collides
-with the operator-managed hostname.
+The `hostname` setting tells the operator to create and manage an
+edge-terminated Route for this host. Do not create a Route yourself, or it will
+conflict with the operator's Route.
 
 ### Get the admin credentials
 
@@ -216,24 +228,23 @@ echo "username: $(oc -n "$KEYCLOAK_NS" get secret keycloak-initial-admin -o json
 echo "password: $(oc -n "$KEYCLOAK_NS" get secret keycloak-initial-admin -o jsonpath='{.data.password}' | base64 -d)"
 ```
 
-The operator names the bootstrap administrator `temp-admin`, not `admin`. Log
-in to the master realm with those credentials and create a permanent
-administrator afterwards; the bootstrap credentials are temporary.
+The bootstrap administrator is named `temp-admin`. Sign in to the master realm
+with these credentials, then create a permanent administrator. The bootstrap
+account is temporary.
 
-After the permanent administrator can log in, delete the bootstrap user:
-**Users** → `temp-admin` → **Delete**. Leaving it in place keeps a well-known
-development credential valid for the lifetime of the realm.
+Once the permanent administrator can sign in, delete the bootstrap user:
+**Users** → `temp-admin` → **Delete**. This prevents the shared development
+credentials from staying valid for the life of the realm.
 
-## Part 2 — Realm configuration
+## Part 2: Realm configuration
 
-Perform these steps in the Keycloak admin console unless a section says
-otherwise. The command-line script in this part creates the realm, roles, and
-clients; create the users in the console. When a Keycloak administrator already
-created the registrations, use their values instead and skip the sections you
-do not need.
+Unless noted otherwise, do these steps in the Keycloak admin console. The helper
+script later in this part can create the realm, roles, and clients, but you must
+create users in the console. If an administrator already created some of these
+items, use their values and skip those steps.
 
-The Keycloak console does not expand shell variables. Print the literal values
-and enter them verbatim:
+The Keycloak console cannot expand shell variables. Print the values, then copy
+them into the console:
 
 ```shell
 echo "API audience:            ${API_ID}"
@@ -244,10 +255,11 @@ echo "Redirect URI:            ${DASH_URL}/oauth2/callback"
 echo "Post logout URI:         ${DASH_URL}/*"
 ```
 
-Replace each whole template in the console steps — `openshell-api-${NS}`,
-`openshell-dashboard-${NS}`, `openshell-cli-${NS}`, and `${DASH_URL}` — with
-the printed value. Keep the `/oauth2/callback` and `/*` suffixes. Do not
-replace only `${NS}`: the printed client IDs already include their prefixes.
+In the console steps, replace each full template (`openshell-api-${NS}`,
+`openshell-dashboard-${NS}`, `openshell-cli-${NS}`, and `${DASH_URL}`) with its
+printed value. Keep the `/oauth2/callback` and `/*` endings. The printed client
+IDs already include their prefixes, so replace the whole template rather than
+just `${NS}`.
 
 ### Create the realm and roles
 
@@ -257,7 +269,7 @@ replace only `${NS}`: the printed client IDs already include their prefixes.
 
 ### Create users
 
-Create two users in the `openshell` realm, for example `administrator` and
+Create two users in the `openshell` realm, such as `administrator` and
 `regular-user`:
 
 - **Users** → **Create user** → set the username and email; enable
@@ -268,20 +280,20 @@ Create two users in the `openshell` realm, for example `administrator` and
 
 ### Create the API audience client
 
-The gateway acts as an OAuth 2.0 resource server: it accepts an access token
-only when the token's `aud` (audience) claim names the gateway, and the
-installer checks it against `oidc.audience`. Keycloak sets `aud` to the client
-that requested the token, so this client provides a stable identifier,
-`openshell-api-${NS}`, for the gateway API. The dashboard and CLI clients add
-it to their tokens with the audience mapper described below.
+The gateway accepts an access token only if its `aud` (audience) claim names
+the gateway. The installer checks this value against `oidc.audience`. Keycloak
+normally sets `aud` to the client that requested the token, so create this
+client to give the gateway a stable audience ID: `openshell-api-${NS}`. The
+dashboard and CLI clients add this ID to their tokens with the audience mapper
+below.
 
 - **Clients** → **Create client**
 - **Client ID**: `openshell-api-${NS}`
 - **Client authentication**: Off
 - **Authentication flow**: disable all flows
 
-No redirect URIs are needed because nobody signs in as this client; it exists
-only to be named in tokens.
+No redirect URIs are needed. Users do not sign in with this client; tokens only
+refer to its ID.
 
 ### Create the dashboard browser client
 
@@ -304,19 +316,19 @@ only to be named in tokens.
 
 ### Create the CLI client
 
-The `openshell` CLI logs in with the Authorization Code + PKCE flow using a
-public client.
+The `openshell` CLI uses a public client and the Authorization Code + PKCE
+login flow.
 
 - **Clients** → **Create client**
 - **Client ID**: `openshell-cli-${NS}`
 - **Client authentication**: Off
 - **Authentication flow**: Standard flow. For headless login
   (`OPENSHELL_NO_BROWSER=1`), also enable **OAuth 2.0 Device Authorization
-  Grant**. The helper leaves it off because the grant allows device-code
-  phishing on a public client.
+  Grant**. The helper leaves this off because device codes on a public client
+  can be used for phishing.
 - **Valid redirect URIs**: `http://127.0.0.1/*` and optionally
-  `http://localhost/*`. The CLI binds `127.0.0.1` on a random port with path
-  `/callback`, so the wildcard port is required.
+  `http://localhost/*`. The CLI listens on `127.0.0.1` at a random port and
+  uses the `/callback` path, so the port must be a wildcard.
 - **Require PKCE**: On, and **PKCE Method**: `S256`.
 - **Client scopes** → `openshell-cli-${NS}-dedicated` → **Add mapper** →
   **Audience**:
@@ -324,28 +336,33 @@ public client.
   - Included Client Audience: `openshell-api-${NS}`
   - Add to access token: On
 
-The audience mapper is required because the gateway validates
-`aud == openshell-api-${NS}`, and Keycloak emits that claim only through a
+The mapper is required. The gateway checks for
+`aud == openshell-api-${NS}`, and Keycloak adds that audience only through a
 mapper.
 
-### Create the realm, roles, and clients from the command line
+### Create the realm, roles, and clients with a helper script
 
-[`keycloak-dev-guide-create-openshell-clients.sh`](keycloak-dev-guide-create-openshell-clients.sh)
-creates the realm when missing, the `openshell-admin` and `openshell-user`
-realm roles, and the API, dashboard, and CLI clients through the admin REST
-API. It writes the dashboard secret to
-`${CONFIG_DIR}/dashboard-client-secret.txt`, so you can skip the console steps
-for the realm, roles, and clients. Create the users in the console; they need
-passwords and verified email addresses. The script is idempotent: rerunning
-keeps existing objects and reconciles the dashboard client redirect settings
-with `DASH_URL`. The script prints the target and asks for confirmation before
-changing anything; pass `--yes` to skip the prompt. It requires `oc`, `curl`,
-and `python3`, and reads the environment variables set at the top of this guide.
-It verifies the Keycloak Route against a bundle built from the system roots and
-`${CONFIG_DIR}/ingress-ca.crt`, and exits if that file is missing.
+Use the [helper script](keycloak-dev-guide-create-openshell-clients.sh) for development only. It is not supported for production realms.
 
-Export the ingress CA, then run the script from the repository root after the
-Keycloak instance is ready:
+The script:
+
+- takes its configuration from the environment variables defined at the top of
+  this guide
+- creates the realm, the `openshell-admin` and `openshell-user` roles, and the
+  API, dashboard, and CLI clients
+- writes the dashboard secret to `${CONFIG_DIR}/dashboard-client-secret.txt`
+- asks for a master realm administrator's username and password and does not
+  store them; set `KEYCLOAK_ADMIN_USER` and `KEYCLOAK_ADMIN_PASSWORD` for
+  non-interactive runs
+
+The script requires `curl` and `python3`.
+
+You can run the script again safely. It creates the realm, roles, and clients,
+but not users. Create users in the console, verify their email addresses, and
+assign the `openshell-admin` or `openshell-user` role as described in
+[Create users](#create-users).
+
+Export the ingress CA, then run the script from the repository root:
 
 ```shell
 mkdir -p "$CONFIG_DIR"
@@ -354,24 +371,155 @@ oc -n openshift-config-managed get configmap default-ingress-cert \
 ./deploy/rhoai/keycloak-dev-guide-create-openshell-clients.sh
 ```
 
+Without a terminal, export the administrator variables and pass `--yes` to
+skip the confirmation prompt:
+
+```shell
+./deploy/rhoai/keycloak-dev-guide-create-openshell-clients.sh --yes
+```
+
+## Disconnected clusters: mirror the images
+
+Skip this section if your cluster nodes can pull directly from
+`registry.redhat.io` and `registry.access.redhat.com`. Otherwise, copy every
+image used by this guide to a private registry the nodes can reach, and
+configure an `ImageDigestMirrorSet` (IDMS) to redirect pulls there. IDMS
+redirects digest references only, so this guide pins PostgreSQL by digest (see
+[PostgreSQL deployment section](#deploy-postgresql-with-persistent-storage)). Complete this section
+before Part 1.
+
+The examples use `registry.example.com:8443` as the private registry. Replace
+it with your registry, then log in to each registry before copying images.
+`registry.redhat.io` requires a Red Hat account; the Keycloak images below are
+pulled from it:
+
+```shell
+export MIRROR=registry.example.com:8443
+skopeo login registry.access.redhat.com
+skopeo login registry.redhat.io
+skopeo login "$MIRROR"
+```
+
+### What to mirror
+
+You need two groups of images:
+
+- The PostgreSQL image. Copy it by digest. `--all` preserves its
+  multi-architecture index, so the mirror has the same digest and Part 1 pulls
+  the same build:
+
+  ```shell
+  skopeo copy --all \
+    docker://registry.access.redhat.com/hi/postgresql@sha256:67599d73c3dae0e8685c2f9ba31c11028477816bbc254cf862543cfb11c2dc3f \
+    docker://$MIRROR/hi/postgresql:18.4
+  ```
+
+  The destination tag keeps the image addressable in the mirror. To use a newer
+  build, check the tag's current digest with
+  `skopeo inspect --format '{{.Digest}}' docker://registry.access.redhat.com/hi/postgresql:18.4`,
+  then update that digest in Part 1 and in this command. Red Hat may update the
+  image behind the `18.4` tag.
+
+- The three Red Hat build of Keycloak images used by the operator. Print the
+  image list for the channel you plan to install:
+
+  ```shell
+  oc get packagemanifest rhbk-operator -n openshift-marketplace \
+    -o jsonpath='{.status.channels[?(@.name=="stable-v26.6")].currentCSVDesc.relatedImages}'
+  ```
+
+  The output lists `registry.redhat.io/rhbk/keycloak-operator-bundle`,
+  `keycloak-rhel9-operator`, and `keycloak-rhel9`, each with a digest. Copy each
+  image and give it any tag in the mirror, such as the CSV version:
+
+  ```shell
+  skopeo copy --all \
+    docker://registry.redhat.io/rhbk/keycloak-rhel9@sha256:<digest> \
+    docker://$MIRROR/rhbk/keycloak-rhel9:v26.6.9
+  ```
+
+Push each image to a tag in the mirror, not to a bare digest. Quay and some
+other registries may accept a digest-only push but fail to serve it later,
+causing `manifest unknown` errors. The tag does not change the image; the
+cluster still pulls it by digest.
+
+### Operator catalog
+
+The Subscription in the [operator installation section](#install-the-red-hat-build-of-keycloak-operator)
+gets operator manifests from a CatalogSource. Check that the package is in your cluster's
+catalogs:
+
+```shell
+oc get packagemanifest rhbk-operator -n openshift-marketplace
+```
+
+If it is missing, your catalog mirror does not include the RHBK operator. Add
+the package with
+[oc-mirror](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/disconnected_environments/olm-restricted-networks)
+and wait for the updated catalog. If your CatalogSource has a different name,
+use that name in the Subscription's `source` field.
+
+### ImageDigestMirrorSet entries
+
+List the image sources your cluster already redirects:
+
+```shell
+oc get imagedigestmirrorset \
+  -o jsonpath='{range .items[*].spec.imageDigestMirrors[*]}{.source}{"\n"}{end}' | sort -u
+```
+
+This guide needs `registry.access.redhat.com/hi` and `registry.redhat.io/rhbk`.
+Add only sources that are missing from the list above, and include just those
+entries in the new set. If an oc-mirror set already covers a source, reuse or
+extend it; do not create a second set for the same source. For example, when
+neither source is covered yet:
+
+```shell
+oc apply -f - <<'EOF'
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: hi-mirror
+spec:
+  imageDigestMirrors:
+    - source: registry.access.redhat.com/hi
+      mirrors:
+        - registry.example.com:8443/hi
+      mirrorSourcePolicy: NeverContactSource
+    - source: registry.redhat.io/rhbk
+      mirrors:
+        - registry.example.com:8443/rhbk
+      mirrorSourcePolicy: NeverContactSource
+EOF
+```
+
+`mirrorSourcePolicy: NeverContactSource` prevents nodes from falling back to
+the public registry. The Machine Config Operator rolls an IDMS out to every
+node without rebooting it, and also drains the nodes when you change an
+existing IDMS. Wait until both pools show `UPDATED=True` before deploying:
+
+```shell
+oc get mcp
+```
+
 ## Troubleshooting
 
 ### "Client not found"
 
-The browser redirected with a client ID that does not exist in the realm.
-Confirm `openshell-dashboard-${NS}` exists and matches `oidc.client_id`. The
-API client is only a token audience and does not produce this page.
+The browser was redirected with a client ID that Keycloak cannot find. Check
+that `openshell-dashboard-${NS}` exists and matches `oidc.client_id`. The API
+client is only used as a token audience, so it does not cause this error.
 
 ### Login fails because the email is not verified
 
-oauth2-proxy rejects ID tokens with `email_verified: false`. Enable **Email
-verified** for the user in the console and save. The change applies on the next
+oauth2-proxy rejects ID tokens when `email_verified` is `false`. In the console,
+enable **Email verified** for the user and save. It takes effect at the next
 login.
 
 ### The operator is not ready
 
 Check the Subscription channel from Part 1, the installed CSV, and the operator
-pod:
+pod status:
 
 ```shell
 oc -n "$KEYCLOAK_NS" get subscription rhbk-operator
@@ -379,11 +527,32 @@ oc -n "$KEYCLOAK_NS" get csv
 oc -n "$KEYCLOAK_NS" get pods
 ```
 
+### `ImagePullBackOff` or `BundleUnpackFailed` on a disconnected cluster
+
+The mirror may be missing the image or operator manifest, or the
+`ImageDigestMirrorSet` may not redirect its registry. Using a tag where a digest
+is required causes the same error. Compare the failing pod's image and the IDMS
+sources with the [disconnected-cluster instructions](#disconnected-clusters-mirror-the-images).
+
+OLM keeps failed unpack results in `openshift-marketplace`. After fixing the
+mirror or IDMS, delete the failed Job and the ConfigMap with the same name.
+Then restart the catalog operator in
+`openshift-operator-lifecycle-manager`:
+
+```shell
+oc -n openshift-marketplace get jobs
+oc -n openshift-marketplace delete job <failed-unpack-job>
+oc -n openshift-marketplace delete configmap <failed-unpack-job>
+oc -n openshift-operator-lifecycle-manager rollout restart deployment catalog-operator
+```
+
 ## Cleanup
 
-Remove Keycloak and PostgreSQL. These commands delete only the resources this
-guide creates, so they are safe when `KEYCLOAK_NS` is a shared or pre-existing
-namespace:
+Remove Keycloak and PostgreSQL with these commands. They assume this guide
+created the listed objects, so before you run them in a shared or existing
+`KEYCLOAK_NS` namespace, confirm each object came from this guide and omit the
+ones it did not create. In particular, `keycloak-db-data` may be a claim that
+already existed, and the `app=keycloak-db` selector may match other workloads:
 
 ```shell
 oc delete keycloak keycloak -n "$KEYCLOAK_NS"
@@ -395,11 +564,14 @@ oc delete pvc keycloak-db-data -n "$KEYCLOAK_NS"
 oc delete secret keycloak-db-secret -n "$KEYCLOAK_NS"
 ```
 
-Optionally delete the namespace as well. This is a separate step because it
-deletes every workload, PersistentVolumeClaim, and resource in `KEYCLOAK_NS`,
-not only the Keycloak resources. Run it only when the namespace was created
-for this guide; skip it when the namespace is shared or already existed:
+You can also delete the namespace, but that removes everything in
+`KEYCLOAK_NS`, including workloads and persistent volume claims. Do this only
+if you created the namespace for this guide. Skip it for a shared or existing
+namespace:
 
 ```shell
 oc delete namespace "$KEYCLOAK_NS"
 ```
+
+These commands leave mirrored images and `ImageDigestMirrorSet` entries in
+place because other workloads may use them.

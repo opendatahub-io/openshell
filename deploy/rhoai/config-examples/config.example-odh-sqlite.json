@@ -2,39 +2,42 @@
   "namespace": "openshell-team",
   "gateway": {
     "chart": "oci://ghcr.io/nvidia/openshell/helm-chart",
-    "version": "REPLACE_WITH_EXACT_GATEWAY_VERSION",
+    "version": "0.1.7",
     "values_files": [],
+    "database": {
+      "mode": "sqlite"
+    },
     "images": {
       "gateway": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-gateway",
-        "digest": "REPLACE_WITH_VERIFIED_GATEWAY_IMAGE_DIGEST"
+        "tag": "v0.1.7-rhaiv.0"
       },
       "supervisor": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-supervisor",
-        "digest": "REPLACE_WITH_VERIFIED_SUPERVISOR_IMAGE_DIGEST"
+        "tag": "v0.1.7-rhaiv.0"
       },
       "sandboxRuntime": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-sandbox",
-        "digest": "REPLACE_WITH_VERIFIED_SANDBOX_RUNTIME_IMAGE_DIGEST"
+        "tag": "v0.1.7-rhaiv.0"
       },
       "sandbox": {
         "repository": "quay.io/opendatahub/odh-openshell-sandbox",
-        "digest": "REPLACE_WITH_VERIFIED_SANDBOX_IMAGE_DIGEST"
+        "tag": "v0.1.7-rhaiv.0"
       }
     }
   },
   "dashboard": {
     "chart": "oci://quay.io/ai-openshell/charts/console",
-    "version": "REPLACE_WITH_EXACT_DASHBOARD_VERSION",
+    "version": "0.1.5",
     "values_files": [],
     "images": {
       "dashboard": {
         "registry": "quay.io",
         "repository": "opendatahub/odh-openshell-dashboard",
-        "digest": "REPLACE_WITH_VERIFIED_DASHBOARD_IMAGE_DIGEST"
+        "digest": "sha256:cfb3b592c5909c7c1a5d5622f98a20bf8c503554d53b3441abb189140254450b"
       }
     }
   },

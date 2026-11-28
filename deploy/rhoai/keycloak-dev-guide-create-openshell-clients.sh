@@ -4,9 +4,9 @@
 #
 # Create the OpenShell clients in a Keycloak realm.
 #
-# Development helper only. It uses the operator bootstrap admin credentials and
-# verifies the Keycloak Route against a bundle built from the system roots and
-# the ingress CA at "${CONFIG_DIR}/ingress-ca.crt". Do not use it to manage a
+# Development helper only. It prompts for a Keycloak administrator and verifies
+# the Keycloak Route against a bundle built from the system roots and the
+# ingress CA at "${CONFIG_DIR}/ingress-ca.crt". Do not use it to manage a
 # production realm.
 #
 # The script creates the realm and the openshell-admin/openshell-user realm
@@ -16,8 +16,13 @@
 # users separately; they need passwords and verified email addresses.
 #
 # Requires the environment variables set by the Keycloak development guide:
-#   KC_URL, KEYCLOAK_NS, REALM, API_ID, DASH_ID, CLI_ID, DASH_URL, CONFIG_DIR
+#   KC_URL, REALM, API_ID, DASH_ID, CLI_ID, DASH_URL, CONFIG_DIR
 # CONFIG_DIR must contain ingress-ca.crt, the CA bundle for the Keycloak Route.
+#
+# The script authenticates to the master realm as an administrator. It prompts
+# for that administrator's username and password at run time and never reads or
+# writes them on disk, so it never depends on the operator bootstrap user. For
+# non-interactive runs, set KEYCLOAK_ADMIN_USER and KEYCLOAK_ADMIN_PASSWORD.
 #
 # Usage: keycloak-dev-guide-create-openshell-clients.sh [-y|--yes]
 #   -y, --yes  Skip the confirmation prompt.
@@ -29,13 +34,23 @@ set -euo pipefail
 umask 077
 
 : "${KC_URL:?set KC_URL, for example https://keycloak.apps.example.com}"
-: "${KEYCLOAK_NS:?set KEYCLOAK_NS, for example keycloak}"
 : "${REALM:?set REALM, for example openshell}"
 : "${API_ID:?set API_ID, for example openshell-api-openshell-team}"
 : "${DASH_ID:?set DASH_ID, for example openshell-dashboard-openshell-team}"
 : "${CLI_ID:?set CLI_ID, for example openshell-cli-openshell-team}"
 : "${DASH_URL:?set DASH_URL, for example https://dashboard-openshell-team.apps.example.com}"
 : "${CONFIG_DIR:?set CONFIG_DIR, for example ${HOME}/.config/openshell-rhoai}"
+
+# Both URLs carry credentials or register OAuth origins, so refuse cleartext.
+for name in KC_URL DASH_URL; do
+  case "${!name}" in
+    https://?*) ;;
+    *)
+      echo "error: ${name} must be an https:// URL." >&2
+      exit 1
+      ;;
+  esac
+done
 
 assume_yes=false
 case "${1:-}" in
@@ -47,12 +62,18 @@ case "${1:-}" in
     ;;
 esac
 
+if [ -n "${KEYCLOAK_ADMIN_USER:-}" ] || [ -n "${KEYCLOAK_ADMIN_PASSWORD:-}" ]; then
+  ADMIN_SOURCE="user ${KEYCLOAK_ADMIN_USER:-<unset>} (from the environment)"
+else
+  ADMIN_SOURCE="prompted when the script runs"
+fi
+
 cat <<EOF
 This configures OpenShell clients in Keycloak:
   Keycloak:      ${KC_URL}
   Realm:         ${REALM} (created if missing)
   Realm roles:   openshell-admin, openshell-user (created if missing)
-  Admin secret:  ${KEYCLOAK_NS}/keycloak-initial-admin
+  Admin:         ${ADMIN_SOURCE}
   API audience:  ${API_ID} (public, no login flow)
   Dashboard:     ${DASH_ID} (confidential, callback ${DASH_URL}/oauth2/callback)
   CLI:           ${CLI_ID} (public, PKCE)
@@ -102,15 +123,52 @@ for bundle in \
 done
 cat "$CACERT" >> "$CURL_CA"
 
-echo "Reading Keycloak admin credentials from ${KEYCLOAK_NS}/keycloak-initial-admin..."
-AU=$(oc -n "$KEYCLOAK_NS" get secret keycloak-initial-admin -o jsonpath='{.data.username}' | base64 -d)
-AP=$(oc -n "$KEYCLOAK_NS" get secret keycloak-initial-admin -o jsonpath='{.data.password}' | base64 -d)
+if [ -n "${KEYCLOAK_ADMIN_USER:-}" ] || [ -n "${KEYCLOAK_ADMIN_PASSWORD:-}" ]; then
+  : "${KEYCLOAK_ADMIN_USER:?set KEYCLOAK_ADMIN_USER together with KEYCLOAK_ADMIN_PASSWORD}"
+  : "${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD together with KEYCLOAK_ADMIN_USER}"
+  AU="$KEYCLOAK_ADMIN_USER"
+  AP="$KEYCLOAK_ADMIN_PASSWORD"
+else
+  if [ ! -t 0 ]; then
+    echo "error: no interactive terminal; set KEYCLOAK_ADMIN_USER and KEYCLOAK_ADMIN_PASSWORD." >&2
+    exit 1
+  fi
+  printf 'Keycloak master realm admin username: ' >&2
+  read -r AU || AU=""
+  printf 'Keycloak master realm admin password: ' >&2
+  IFS= read -rs AP || AP=""
+  printf '\n' >&2
+fi
+if [ -z "$AU" ] || [ -z "$AP" ]; then
+  echo "error: a master realm administrator username and password are required." >&2
+  exit 1
+fi
 echo "Requesting a Keycloak admin token from ${KC_URL}..."
-# Keep the admin password out of the process argument list.
-TOK=$(printf '%s' "$AP" | curl -fsS --cacert "$CURL_CA" -d client_id=admin-cli -d "username=$AU" \
-  --data-urlencode "password@-" -d grant_type=password \
-  "$KC_URL/realms/master/protocol/openid-connect/token" \
-  | python3 -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+# Keep the admin password out of the process argument list, and keep both the
+# credentials and the token response in memory only.
+response=$(printf '%s' "$AP" | curl -sS --cacert "$CURL_CA" -w '\n%{http_code}' \
+  -d client_id=admin-cli --data-urlencode "username=$AU" --data-urlencode "password@-" -d grant_type=password \
+  "$KC_URL/realms/master/protocol/openid-connect/token") || {
+  echo "error: cannot reach ${KC_URL}." >&2
+  exit 1
+}
+status="${response##*$'\n'}"
+body="${response%$'\n'*}"
+if [ "$status" != 200 ]; then
+  detail=$(printf '%s' "$body" | python3 -c 'import json,sys
+try:
+    response = json.load(sys.stdin)
+except Exception:
+    response = {}
+print(response.get("error_description") or response.get("error") or "unexpected response")' \
+    2>/dev/null) || detail="unexpected response"
+  echo "error: Keycloak rejected the admin token request for user \"${AU}\"" \
+    "(HTTP ${status}): ${detail}" >&2
+  echo "hint: use a master realm administrator that can log in; the operator" \
+    "bootstrap user is disabled or deleted after the guide's hardening step." >&2
+  exit 1
+fi
+TOK=$(printf '%s' "$body" | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
 # Keep the admin token out of the process argument list. WORK_DIR is created by
 # mktemp and the script sets umask 077, so the file is private.
 HDR_FILE="${WORK_DIR}/auth.hdr"

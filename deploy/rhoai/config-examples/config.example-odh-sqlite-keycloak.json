@@ -4,6 +4,9 @@
     "chart": "oci://ghcr.io/nvidia/openshell/helm-chart",
     "version": "0.1.7",
     "values_files": [],
+    "database": {
+      "mode": "sqlite"
+    },
     "images": {
       "gateway": {
         "registry": "quay.io",
@@ -39,14 +42,19 @@
     }
   },
   "oidc": {
-    "provider": "oidc",
-    "issuer": "https://identity.example.com/realms/customer",
+    "provider": "keycloak-oidc",
+    "issuer": "https://keycloak.apps.example.com/realms/openshell",
     "client_id": "openshell-dashboard-openshell-team",
     "client_secret_file": "dashboard-client-secret.txt",
+    "ca_file": "ingress-ca.crt",
     "audience": "openshell-api-openshell-team",
-    "roles_claim": "roles",
+    "roles_claim": "realm_access.roles",
     "admin_role": "openshell-admin",
     "user_role": "openshell-user",
-    "allowed_groups": []
+    "allowed_roles": [
+      "openshell-admin",
+      "openshell-user"
+    ],
+    "scope": "openid email profile"
   }
 }

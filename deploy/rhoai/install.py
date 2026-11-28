@@ -27,10 +27,16 @@ import yaml
 
 OWNER = "openshell.ai/installer"
 OWNER_VALUE = "odh-dashboard"
-GATEWAY_HOST = "openshell.ai/installer-gateway-host"
 INSTALL_STATE = "openshell-installer"
+# Material the charts create once and reuse on later runs. The PKI secrets are
+# reused by the certgen hook when all three exist; the key-encryption key is
+# reused by a `lookup` in the credential-storage template.
+PKI_SECRETS = ("openshell-server-tls", "openshell-client-tls", "openshell-jwt-keys")
+CREDENTIAL_KEK_SECRET = "openshell-credential-storage-key-encryption-key"
 OIDC_SECRET = "openshell-dashboard-oidc"
 OIDC_CA = "openshell-oidc-ca"
+DB_SECRET = "openshell-gateway-db"
+DB_URI_FILE = "gateway-db-uri.txt"
 MIN_DASHBOARD_USER_ROLE_CHART = (0, 1, 2)
 CLI_CLIENT_ID = "openshell-cli"
 CLI_INSTALL_URL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh"
@@ -235,6 +241,36 @@ def resolve_main_hosts(config, check, apps_domain, cluster_domain):
     return False
 
 
+def database_uri_from_file(path):
+    """Read and validate the PostgreSQL URI shared by --check and install."""
+    uri = Path(path).read_bytes().rstrip(b"\r\n")
+    require(uri, "Database URI file contains no URI")
+    try:
+        text = uri.decode("ascii")
+    except UnicodeDecodeError:
+        raise ValueError("Database URI must be ASCII") from None
+    # urlsplit() drops tab, CR, and LF before parsing, so an embedded separator
+    # would pass validation while the Secret keeps the raw multi-line bytes.
+    require(
+        not any(separator in text for separator in "\t\r\n"),
+        "Database URI must be a single line",
+    )
+    parsed = None
+    try:
+        parsed = urlsplit(text)
+        hostname = parsed.hostname
+    except ValueError:
+        hostname = None
+    require(
+        parsed is not None
+        and parsed.scheme in ("postgresql", "postgres")
+        and hostname
+        and not parsed.fragment,
+        "Database URI must be a postgresql:// or postgres:// URL with a host",
+    )
+    return uri
+
+
 def load_config(path, namespace=None):
     config = json.loads(path.read_text())
     if namespace is not None:
@@ -265,7 +301,10 @@ def load_config(path, namespace=None):
             )
     for name in ("gateway", "dashboard"):
         item = config[name]
-        fields(item, ("chart", "version"), ("host", "images", "values_files"))
+        optional = ["host", "images", "values_files"]
+        if name == "gateway":
+            optional.append("database")
+        fields(item, ("chart", "version"), tuple(optional))
         require(
             isinstance(item["chart"], str) and item["chart"].startswith("oci://"),
             f"{name}.chart must be an OCI chart reference",
@@ -324,6 +363,36 @@ def load_config(path, namespace=None):
                     f"{name}.images.{component}.digest must be sha256: followed by "
                     "64 lowercase hexadecimal characters",
                 )
+        if name == "gateway":
+            database = item.get("database")
+            if database is None:
+                database = {"mode": "postgresql"}
+            fields(database, (), ("mode", "uri_file"))
+            mode = database.get("mode", "postgresql")
+            require(
+                mode in ("sqlite", "postgresql"),
+                "gateway.database.mode must be sqlite or postgresql",
+            )
+            if mode == "sqlite":
+                require(
+                    "uri_file" not in database,
+                    "gateway.database.uri_file is only valid for postgresql",
+                )
+            else:
+                uri_file = database.get("uri_file", DB_URI_FILE)
+                require(
+                    isinstance(uri_file, str) and uri_file.strip(),
+                    "gateway.database.uri_file must be a nonempty path",
+                )
+                source = (path.parent / uri_file).resolve()
+                require(
+                    source.is_file() and source.stat().st_size > 0,
+                    "Missing or empty gateway.database.uri_file",
+                )
+                database_uri_from_file(source)
+                database["uri_file"] = str(source)
+            database["mode"] = mode
+            item["database"] = database
     oidc = config["oidc"]
     fields(
         oidc,
@@ -441,6 +510,41 @@ def warn_if_dashboard_user_role_missing(manifest, role, chart_version):
     )
 
 
+# Image references in rendered manifests: container `image:` fields and the
+# `*_image = "..."` settings of the gateway TOML ConfigMap.
+RENDERED_IMAGE = re.compile(
+    r"""^\s*(?:-\s+)?image:\s*["']?([^"'\s]+)|\b\w+_image\s*=\s*"([^"]+)\"""",
+    re.MULTILINE,
+)
+
+
+def unpinned_images(manifest):
+    """Return rendered image references that are not pinned by digest."""
+    images = {a or b for a, b in RENDERED_IMAGE.findall(manifest)}
+    return sorted(image for image in images if "@sha256:" not in image)
+
+
+def warn_if_images_unpinned(images):
+    if not images:
+        return
+    listed = "".join(f"\n  - {image}" for image in images)
+    print(
+        colorize(
+            f"Warning: {len(images)} rendered image(s) are not pinned by digest:"
+            f"{listed}\n"
+            "On a disconnected cluster the installation may fail with "
+            "ImagePullBackOff: an ImageDigestMirrorSet only redirects pulls by "
+            "digest, so tag-only images are pulled from their original registry. "
+            "Set images.<component>.digest in the configuration for each image "
+            "(see Disconnected clusters in deploy/rhoai/README.md).",
+            "33",
+            sys.stderr,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def chart_values(config):
     ns, oidc = config["namespace"], config["oidc"]
     require(
@@ -483,6 +587,9 @@ def chart_values(config):
         },
         "openshiftRoute": {"enabled": True, "host": config["gateway"]["host"]},
     }
+    if config["gateway"]["database"]["mode"] == "postgresql":
+        gateway["workload"] = {"kind": "deployment"}
+        gateway["server"]["externalDbSecret"] = DB_SECRET
     dashboard = {
         "fullnameOverride": "openshell-dashboard",
         "podSecurityContext": None,
@@ -542,23 +649,34 @@ def next_steps(config, context, config_dir):
     cli_client = cli_client_id(config)
     gateway_dir = f"${{XDG_CONFIG_HOME:-$HOME/.config}}/openshell/gateways/{ns}/mtls"
     gateway_url = f"https://{config['gateway']['host']}:443"
+
+    def heading(text):
+        return colorize(text, "1;36")
+
+    def command(*texts):
+        return [colorize(text, "32") for text in texts]
+
     lines = [
-        colorize("Next steps:", "1"),
+        heading("Next steps:"),
         "",
-        "1. Install the OpenShell CLI that matches this gateway release:",
-        f"   curl -LsSf {CLI_INSTALL_URL} \\",
-        f"     | OPENSHELL_VERSION=v{config['gateway']['version']} sh",
+        heading("1. Install the OpenShell CLI that matches this gateway release:"),
+        *command(
+            f"   curl -LsSf {CLI_INSTALL_URL} \\",
+            f"     | OPENSHELL_VERSION=v{config['gateway']['version']} sh",
+        ),
         "",
         "   Note: the upstream installer also deploys and starts a local",
         "   gateway on this workstation (a user service on Linux, a Homebrew",
         "   service on macOS). This is a limitation of the upstream installer;",
         "   this guide uses only the CLI. See the README for details.",
         "",
-        "2. Register the gateway with the OpenShell CLI:",
-        f'   mkdir -p "{gateway_dir}"',
-        f"   kubectl --context {shlex.quote(context)} -n {ns} get secret openshell-client-tls \\",
-        "     -o jsonpath='{.data.ca\\.crt}' | base64 -d \\",
-        f'     > "{gateway_dir}/ca.crt"',
+        heading("2. Register the gateway with the OpenShell CLI:"),
+        *command(
+            f'   mkdir -p "{gateway_dir}"',
+            f"   kubectl --context {shlex.quote(context)} -n {ns} get secret openshell-client-tls \\",
+            "     -o jsonpath='{.data.ca\\.crt}' | base64 -d \\",
+            f'     > "{gateway_dir}/ca.crt"',
+        ),
     ]
     if oidc.get("ca_file"):
         bundle = system_ca_bundle()
@@ -573,11 +691,15 @@ def next_steps(config, context, config_dir):
                 "   your platform's path below.",
             ]
         lines += [
-            f"   mkdir -p {shlex.quote(str(config_dir))}",
-            f"   cat {bundle or '<system-ca-bundle>'} \\",
-            f"     {shlex.quote(oidc['ca_file'])} \\",
-            f"     > {shlex.quote(str(bundle_file))}",
-            f"   export SSL_CERT_FILE={shlex.quote(str(bundle_file))}",
+            *command(
+                f"   mkdir -p {shlex.quote(str(config_dir))}",
+                f"   cat {bundle or '<system-ca-bundle>'} \\",
+                f"     {shlex.quote(oidc['ca_file'])} \\",
+                f"     > {shlex.quote(str(bundle_file))}.tmp",
+                f"   mv {shlex.quote(str(bundle_file))}.tmp \\",
+                f"     {shlex.quote(str(bundle_file))}",
+                f"   export SSL_CERT_FILE={shlex.quote(str(bundle_file))}",
+            ),
             "",
             "   Platform paths: "
             + ", ".join(f"{label} {path}" for label, path in SYSTEM_CA_BUNDLES)
@@ -585,12 +707,14 @@ def next_steps(config, context, config_dir):
         ]
     lines += [
         "",
-        "   openshell gateway add \\",
-        f"     --name {ns} \\",
-        f"     --oidc-issuer {shlex.quote(oidc['issuer'])} \\",
-        f"     --oidc-client-id {shlex.quote(cli_client)} \\",
-        f"     --oidc-audience {shlex.quote(oidc['audience'])} \\",
-        f'     "{gateway_url}"',
+        *command(
+            "   openshell gateway add \\",
+            f"     --name {ns} \\",
+            f"     --oidc-issuer {shlex.quote(oidc['issuer'])} \\",
+            f"     --oidc-client-id {shlex.quote(cli_client)} \\",
+            f"     --oidc-audience {shlex.quote(oidc['audience'])} \\",
+            f'     "{gateway_url}"',
+        ),
         "",
         f"   Use your provider's CLI client ID if it is not {cli_client}.",
         "",
@@ -599,25 +723,28 @@ def next_steps(config, context, config_dir):
         f"   ({oidc['user_role']}). The gateway rejects API calls from a",
         "   user with neither role.",
         "",
-        "3. Check the connection:",
-        "   openshell status",
+        heading("3. Check the connection:"),
+        *command("   openshell status"),
         "",
-        "4. Create a sandbox:",
-        "   openshell sandbox create",
+        heading("4. Create a sandbox:"),
+        *command("   openshell sandbox create"),
         "",
         "An administrator must add users to a workspace before they can work there.",
         "The CLI targets the default workspace; pass --workspace <name> or export",
         "OPENSHELL_WORKSPACE=<name> to use the workspace you were added to.",
-        "See deploy/rhoai/README.md#register-the-gateway-and-log-in for details.",
+        "See deploy/rhoai/README.md#after-installation-install-the-cli-and-create-a-sandbox for details.",
     ]
     return "\n".join(lines)
 
 
 class Installer:
-    def __init__(self, config, timeout, context=None, config_dir=None):
+    def __init__(
+        self, config, timeout, context=None, config_dir=None, adopt_existing=False
+    ):
         self.config = config
         self.timeout = timeout
         self.config_dir = Path(config_dir) if config_dir is not None else Path.cwd()
+        self.adopt_existing = adopt_existing
         self._context = context
         require(
             self._context is None
@@ -777,25 +904,44 @@ class Installer:
                 )
             )
         ]
-        require(
-            defaults,
-            "No default StorageClass; the gateway's SQLite database needs one "
-            "that provisions block storage",
-        )
-        classes = ", ".join(defaults)
-        print(
-            f"{colorize('Default StorageClass:', '1')} {classes}\n"
-            "  The gateway's SQLite database runs on a PersistentVolumeClaim, so the\n"
-            "  default StorageClass must provision block volumes. The installer cannot\n"
-            "  detect the volume type; verify the default class is block-backed (not NFS\n"
-            "  or a shared filesystem) before installing."
-        )
+        mode = self.config["gateway"]["database"]["mode"]
         custom = (
             self.config["gateway"]
             .get("values", {})
             .get("server", {})
             .get("workspaceStorageClass")
         )
+        if mode == "sqlite":
+            require(
+                defaults,
+                "No default StorageClass; the gateway's SQLite database needs one "
+                "that provisions block storage",
+            )
+            print(
+                f"{colorize('Default StorageClass:', '1')} {', '.join(defaults)}\n"
+                "  SQLite mode stores the gateway database on a PersistentVolumeClaim,\n"
+                "  so the default StorageClass must provision block volumes. The\n"
+                "  installer cannot detect the volume type; verify the default class is\n"
+                "  block-backed (not NFS or a shared filesystem) before installing."
+            )
+        else:
+            require(
+                defaults or custom,
+                "No default StorageClass and no server.workspaceStorageClass; "
+                "sandbox workspace volumes require one",
+            )
+            line = (
+                f"{colorize('Default StorageClass:', '1')} "
+                f"{', '.join(defaults) or 'none'}"
+            )
+            if custom:
+                print(
+                    f"{line}\n"
+                    "  Sandbox workspace volumes use the configured "
+                    f"server.workspaceStorageClass: {custom}"
+                )
+            else:
+                print(line)
         if custom:
             require(
                 any(item["metadata"]["name"] == custom for item in storage["items"]),
@@ -910,9 +1056,20 @@ class Installer:
                     + (f" in {self.ns}" if namespaced else " cluster-wide")
                 ) from None
 
+    def namespace_owned(self, namespace):
+        """Whether the installer can prove it owns this namespace.
+
+        A namespace editor cannot patch the Namespace object, so a marker on
+        it cannot be planted from inside the namespace. The ConfigMap label
+        alone can be, because any editor can create ConfigMaps.
+        """
+        metadata = (namespace or {}).get("metadata") or {}
+        return (metadata.get("labels") or {}).get(OWNER) == OWNER_VALUE
+
     def identity_state(self):
         return {
             "gateway-host": self.config["gateway"]["host"],
+            "database-mode": self.config["gateway"]["database"]["mode"],
             **{
                 f"oidc-{key.replace('_', '-')}": self.config["oidc"][key]
                 for key in ("issuer", "audience", "client_id")
@@ -921,10 +1078,28 @@ class Installer:
 
     def check_identity(self, state):
         desired = self.identity_state()
-        for key, value in (state or {}).get("data", {}).items():
-            if key in desired:
+        if state is not None:
+            data = state.get("data", {})
+            missing = sorted(key for key in desired if key not in data)
+            require(
+                not missing,
+                f"ConfigMap {INSTALL_STATE} does not record {', '.join(missing)}; "
+                "it was not written by this installer version. Reinstall into a "
+                "new namespace, or delete the gateway and its state before "
+                "installing again",
+            )
+            recorded = data["database-mode"]
+            require(
+                recorded == desired["database-mode"],
+                "Database backend differs from the installer state "
+                f"({recorded!r} recorded, {desired['database-mode']!r} "
+                "configured); set gateway.database.mode to the recorded "
+                "backend, or migrate the data explicitly before changing the "
+                "backend",
+            )
+            for key, value in desired.items():
                 require(
-                    value == desired[key],
+                    data[key] == value,
                     f"Installer identity {key} changed; explicit identity/certificate migration is required",
                 )
         states = json.loads(
@@ -951,7 +1126,7 @@ class Installer:
             if "oidc-issuer" not in data:
                 print(
                     colorize(
-                        f"Note: legacy installer state in {other['metadata']['namespace']} "
+                        f"Note: installer state in {other['metadata']['namespace']} "
                         "has no identity metadata; verify audience isolation manually.",
                         "33",
                     )
@@ -1007,43 +1182,102 @@ class Installer:
             not state or state["metadata"].get("labels", {}).get(OWNER) == OWNER_VALUE,
             f"ConfigMap {INSTALL_STATE} already exists outside this installer",
         )
-        # Preserve compatibility with installations made before state moved off
-        # the Namespace. Never modify administrator-owned Namespace metadata.
-        legacy_host = (
-            (namespace or {})
-            .get("metadata", {})
-            .get("annotations", {})
-            .get(GATEWAY_HOST)
-        )
-        original_host = (
-            state.get("data", {}).get("gateway-host") if state else legacy_host
-        )
         require(
-            not (state or legacy_host)
-            or original_host == self.config["gateway"]["host"],
+            not state
+            or state.get("data", {}).get("gateway-host")
+            == self.config["gateway"]["host"],
             "Gateway hostname differs from the original install; certificate migration is required",
         )
+        # The ConfigMap label is not proof of ownership: it is writable from
+        # inside the namespace. Collect every object the chart would otherwise
+        # reuse and make the administrator vouch for them when this installer
+        # cannot prove it created the namespace.
+        pre_existing = []
+        if namespace:
+            if state:
+                pre_existing.append(f"configmap/{INSTALL_STATE}")
+            for secret in (*PKI_SECRETS, CREDENTIAL_KEK_SECRET, OIDC_SECRET):
+                if self.get("secret", secret):
+                    pre_existing.append(f"secret/{secret}")
+        # The namespace marker alone is not enough: require the state record it
+        # should accompany, so a deleted state ConfigMap cannot leave orphaned
+        # key material that a rerun would silently reuse.
+        trusted = self.namespace_owned(namespace) and bool(state)
+        if pre_existing and not trusted:
+            require(
+                self.adopt_existing,
+                f"Namespace {self.ns} already contains installer state or "
+                f"gateway key material ({', '.join(pre_existing)}), and this "
+                "installer did not create the namespace, so it cannot tell a "
+                "previous installation of this gateway from objects created by "
+                "someone else. If you created them in an earlier installation, "
+                "re-run with --adopt-existing. Otherwise inspect them "
+                f"(kubectl -n {self.ns} get <kind> <name> -o yaml) and delete "
+                "them before installing: the gateway reuses existing TLS, "
+                "JWT, and credential-storage key material instead of "
+                "generating new keys.",
+            )
         self.check_identity(state)
         if namespace:
-            self.check_releases(managed=bool(state or legacy_host))
-            # The chart's bootstrap hook reuses existing TLS material. Do not
-            # accidentally use certificates belonging to another gateway.
-            if not (state or legacy_host):
-                for secret in (
-                    "openshell-server-tls",
-                    "openshell-client-tls",
-                    "openshell-jwt-keys",
-                ):
-                    require(
-                        not self.get("secret", secret),
-                        f"Existing gateway Secret {secret} requires explicit migration",
-                    )
+            self.check_releases(managed=bool(state))
         require(
-            state or legacy_host or self.config["oidc"].get("client_secret_file"),
+            state or self.config["oidc"].get("client_secret_file"),
             "oidc.client_secret_file is required for the first install",
         )
+        self.database(check_only=True, namespace_exists=bool(namespace))
         self.credentials(check_only=True, namespace_exists=bool(namespace))
         return namespace
+
+    def database_uri(self):
+        database = self.config["gateway"]["database"]
+        if database["mode"] != "postgresql":
+            return None
+        return database_uri_from_file(database["uri_file"])
+
+    def database(self, check_only=False, *, namespace_exists=True):
+        require(
+            namespace_exists or check_only,
+            "Create the namespace before the database Secret",
+        )
+        uri = self.database_uri()
+        if uri is None:
+            return
+        if check_only:
+            print(
+                f"{colorize('Database:', '1')} external PostgreSQL via Secret {DB_SECRET}"
+            )
+        if not namespace_exists:
+            return
+        existing = self.get("secret", DB_SECRET)
+        if existing is None:
+            if check_only:
+                print(f"  Secret {DB_SECRET} will be created during the install.")
+                return
+            self.create(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "type": "Opaque",
+                    "metadata": {
+                        "name": DB_SECRET,
+                        "namespace": self.ns,
+                        "labels": {OWNER: OWNER_VALUE},
+                    },
+                    "data": {"uri": base64.b64encode(uri).decode()},
+                }
+            )
+            return
+        data = existing.get("data", {})
+        require(
+            data.get("uri"),
+            f"Existing Secret {DB_SECRET} is missing the uri key",
+        )
+        require(
+            base64.b64decode(data["uri"]) == uri,
+            f"Database URI differs from Secret {DB_SECRET}; rotate the Secret "
+            "explicitly, restart the gateway workload so it reads the new URI, "
+            "then rerun the installer",
+        )
 
     def credentials(self, check_only=False, *, namespace_exists=True):
         require(
@@ -1151,21 +1385,7 @@ class Installer:
                     "data": self.identity_state(),
                 }
             )
-        else:
-            # Add identity metadata to legacy state only after preflight passed.
-            self.run(
-                [
-                    *self.kube,
-                    "-n",
-                    self.ns,
-                    "patch",
-                    "configmap",
-                    INSTALL_STATE,
-                    "--type=merge",
-                    "-p",
-                    json.dumps({"data": self.identity_state()}),
-                ]
-            )
+        self.database()
         self.credentials()
         for index, release in enumerate(("openshell", "openshell-dashboard")):
             print(
@@ -1246,6 +1466,12 @@ def main():
         help="Local source chart for --check only",
     )
     parser.add_argument(
+        "--adopt-existing",
+        action="store_true",
+        help="Adopt an existing installer state ConfigMap and gateway key "
+        "material in a namespace this installer did not create",
+    )
+    parser.add_argument(
         "--timeout", default="10m", help="Helm/controller wait timeout (default: 10m)"
     )
     args = parser.parse_args()
@@ -1266,7 +1492,11 @@ def main():
         require(shutil.which(tool), f"Required tool not found: {tool}")
     config = load_config(args.config.resolve(), args.namespace)
     installer = Installer(
-        config, args.timeout, args.context, args.config.resolve().parent
+        config,
+        args.timeout,
+        args.context,
+        args.config.resolve().parent,
+        adopt_existing=args.adopt_existing,
     )
     placeholders = resolve_main_hosts(
         config, args.check, args.apps_domain, installer.apps_domain
@@ -1287,7 +1517,7 @@ def main():
     step(1, total_steps, "Rendering the gateway and dashboard charts")
     with tempfile.TemporaryDirectory(prefix="openshell-install-") as temporary:
         root = Path(temporary)
-        charts, files = [], []
+        charts, files, unpinned = [], [], set()
         for index, (name, values, local) in enumerate(
             zip(
                 ("gateway", "dashboard"),
@@ -1343,6 +1573,7 @@ def main():
                 warn_if_dashboard_user_role_missing(
                     manifest, config["oidc"]["user_role"], config[name]["version"]
                 )
+            unpinned.update(unpinned_images(manifest))
             charts.append(chart)
             files.append(value_file)
         print(
@@ -1350,6 +1581,7 @@ def main():
             "This does not verify cluster or API compatibility.",
             flush=True,
         )
+        warn_if_images_unpinned(sorted(unpinned))
         if args.preflight:
             step(2, total_steps, "Running cluster preflight")
             installer.preflight()

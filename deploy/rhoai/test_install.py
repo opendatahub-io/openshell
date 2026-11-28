@@ -11,6 +11,7 @@ import copy
 import importlib.util
 import io
 import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -25,7 +26,9 @@ spec.loader.exec_module(installer)
 
 
 def configuration(with_hosts=True):
-    config_path = Path(__file__).with_name("config-examples") / "config.example.json"
+    config_path = (
+        Path(__file__).with_name("config-examples") / "config.example-sqlite.json"
+    )
     config = json.loads(config_path.read_text())
     if with_hosts:
         # Keep the existing suite deterministic; the examples omit these.
@@ -97,11 +100,6 @@ class FakeCluster(installer.Installer):
             return json.dumps({"items": self.nodes})
         if "--all-namespaces" in args:
             return json.dumps({"items": self.other_states})
-        if "patch" in args:
-            self.objects[("configmap", installer.INSTALL_STATE)]["data"].update(
-                json.loads(args[args.index("-p") + 1])["data"]
-            )
-            return ""
         if args[:2] == ["helm", "pull"]:
             destination = Path(args[args.index("--destination") + 1])
             (destination / "chart.tgz").write_bytes(b"fake")
@@ -163,6 +161,19 @@ class InstallTests(unittest.TestCase):
         secret.write_text("a-secret-that-must-not-appear-in-argv\n")
         self.config["oidc"]["client_secret_file"] = str(secret)
         return FakeCluster(self.load())
+
+    def database_config(self, mode="postgresql", uri=None):
+        if mode == "postgresql":
+            value = (
+                uri
+                if uri is not None
+                else "postgresql://openshell:secret@db.example.com:5432/openshell"
+            )
+            (self.root / "gateway-db-uri.txt").write_text(value + "\n")
+        self.config["gateway"]["database"] = {"mode": mode}
+        if mode == "postgresql":
+            self.config["gateway"]["database"]["uri_file"] = "gateway-db-uri.txt"
+        return self.config
 
     def test_rejects_unpinned_versions_and_unknown_keys(self):
         for version in (
@@ -329,6 +340,276 @@ class InstallTests(unittest.TestCase):
                 any(args[:2] == ["helm", "upgrade"] for args, _ in cluster.calls)
             )
 
+    def test_postgresql_is_the_default_and_renders_a_deployment(self):
+        (self.root / installer.DB_URI_FILE).write_text(
+            "postgresql://openshell:secret@db.example.com:5432/openshell\n"
+        )
+        self.config["gateway"].pop("database")
+        config = self.load()
+        self.assertEqual(config["gateway"]["database"]["mode"], "postgresql")
+        self.assertEqual(
+            config["gateway"]["database"]["uri_file"],
+            # load_config() resolves the path, which differs from the TMPDIR
+            # alias on macOS (/var/folders -> /private/var/folders).
+            str((self.root / installer.DB_URI_FILE).resolve()),
+        )
+        gateway, _ = installer.chart_values(config)
+        self.assertEqual(gateway["workload"], {"kind": "deployment"})
+        self.assertEqual(gateway["server"]["externalDbSecret"], installer.DB_SECRET)
+        self.assertNotIn("dbUrl", gateway["server"])
+        self.assertEqual(gateway["replicaCount"], 1)
+
+    def test_sqlite_mode_keeps_chart_defaults_and_needs_no_uri_file(self):
+        config = self.load()
+        self.assertEqual(config["gateway"]["database"], {"mode": "sqlite"})
+        gateway, _ = installer.chart_values(config)
+        self.assertNotIn("workload", gateway)
+        self.assertNotIn("externalDbSecret", gateway["server"])
+        cluster = self.cluster()
+        self.assertIsNone(cluster.database_uri())
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        self.assertNotIn(("secret", installer.DB_SECRET), cluster.objects)
+
+    def test_database_configuration_validation(self):
+        (self.root / installer.DB_URI_FILE).write_text(
+            "postgresql://openshell:secret@db.example.com:5432/openshell\n"
+        )
+        cases = (
+            ({"mode": "mysql"}, "must be sqlite or postgresql"),
+            (
+                {"mode": "sqlite", "uri_file": installer.DB_URI_FILE},
+                "only valid for postgresql",
+            ),
+            (
+                {
+                    "mode": "postgresql",
+                    "uri": "postgresql://openshell:secret@db.example.com/db",
+                },
+                "Unknown configuration fields",
+            ),
+            (
+                {"mode": "postgresql", "uri_file": "missing.txt"},
+                "Missing or empty",
+            ),
+            ({"mode": None}, "must be sqlite or postgresql"),
+        )
+        for database, message in cases:
+            with self.subTest(database=database):
+                self.config = configuration()
+                self.config["gateway"]["database"] = database
+                with self.assertRaisesRegex(ValueError, message):
+                    self.load()
+        # `database` is optional for gateway alone; keep it rejected elsewhere.
+        with self.subTest(database="dashboard"):
+            self.config = configuration()
+            self.config["dashboard"]["database"] = {"mode": "sqlite"}
+            with self.assertRaisesRegex(ValueError, "Unknown configuration fields"):
+                self.load()
+
+    def test_database_uri_validation(self):
+        accepted = (
+            "postgres://openshell:secret@db.example.com:5432/openshell",
+            "postgresql://openshell:secret@db.example.com/openshell?sslmode=require",
+        )
+        url_error = "must be a postgresql:// or postgres:// URL with a host"
+        rejected = {
+            "mysql://openshell:secret@db.example.com/openshell": url_error,
+            "": "contains no URI",
+            "\n": "contains no URI",
+            "postgresql://openshell:secret@db.example.com/openshell#fragment": url_error,
+            "postgresql://openshell:sécrét@db.example.com/openshell": "must be ASCII",
+            "postgresql:///openshell": url_error,
+            "postgresql://": url_error,
+            "postgresql://[::1/openshell": url_error,
+            "postgresql://openshell:secret@db.example.com/openshell\nsecond line": (
+                "must be a single line"
+            ),
+            "postgresql://openshell:secret@db.example.com/openshell\rsecond": (
+                "must be a single line"
+            ),
+            "postgresql://openshell:secret@db.example.com/openshell\tsecond": (
+                "must be a single line"
+            ),
+        }
+        for uri in accepted:
+            with self.subTest(uri=uri):
+                self.config = configuration()
+                self.database_config(uri=uri)
+                self.assertEqual(self.cluster().database_uri(), uri.encode())
+        # --check renders charts without calling preflight, so load_config must
+        # reject a bad URI before the install would.
+        for uri, message in rejected.items():
+            with self.subTest(uri=uri):
+                self.config = configuration()
+                self.database_config(uri=uri)
+                with self.assertRaisesRegex(ValueError, re.escape(message)):
+                    self.load()
+        # The file can change between load and install; the install path
+        # validates it again.
+        self.config = configuration()
+        self.database_config()
+        cluster = self.cluster()
+        uri_path = Path(cluster.config["gateway"]["database"]["uri_file"])
+        for uri, message in rejected.items():
+            with self.subTest(phase="install", uri=uri):
+                uri_path.write_text(uri)
+                with self.assertRaisesRegex(ValueError, re.escape(message)):
+                    cluster.database_uri()
+
+    def test_database_secret_is_stdin_only_and_rotation_is_explicit(self):
+        self.database_config()
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        secret = cluster.objects[("secret", installer.DB_SECRET)]
+        uri = "postgresql://openshell:secret@db.example.com:5432/openshell"
+        self.assertEqual(base64.b64decode(secret["data"]["uri"]), uri.encode())
+        self.assertEqual(
+            secret["metadata"]["labels"][installer.OWNER], installer.OWNER_VALUE
+        )
+        self.assertEqual(
+            cluster.objects[("configmap", installer.INSTALL_STATE)]["data"][
+                "database-mode"
+            ],
+            "postgresql",
+        )
+        for args, _payload in cluster.calls:
+            self.assertNotIn("openshell:secret", " ".join(args))
+            self.assertNotIn("db.example.com", " ".join(args))
+
+        cluster.calls.clear()
+        cluster.adopt_existing = True
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        self.assertFalse(
+            any("create" in args and "can-i" not in args for args, _ in cluster.calls)
+        )
+
+        Path(cluster.config["gateway"]["database"]["uri_file"]).write_text(
+            "postgresql://openshell:other@db.example.com:5432/openshell\n"
+        )
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "differs"):
+            cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        self.assertEqual(cluster.objects, before)
+
+    def test_existing_database_secret_without_uri_key_is_rejected(self):
+        self.database_config()
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        cluster.objects[("secret", installer.DB_SECRET)] = {"data": {}}
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "missing the uri key"):
+            cluster.preflight()
+        self.assertEqual(cluster.objects, before)
+
+    def test_postgresql_install_into_new_namespace_creates_the_secret(self):
+        self.database_config()
+        cluster = self.cluster()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        secret = cluster.objects[("secret", installer.DB_SECRET)]
+        self.assertEqual(
+            base64.b64decode(secret["data"]["uri"]),
+            b"postgresql://openshell:secret@db.example.com:5432/openshell",
+        )
+        self.assertEqual(
+            secret["metadata"]["labels"][installer.OWNER], installer.OWNER_VALUE
+        )
+        self.assertEqual(output.getvalue().count("Database:"), 1)
+
+    def test_postgresql_storage_requirements(self):
+        self.database_config()
+        cluster = self.cluster()
+        cluster.storage = []
+        with self.assertRaisesRegex(ValueError, "workspaceStorageClass"):
+            cluster.preflight()
+        cluster.config["gateway"]["values"] = {
+            "server": {"workspaceStorageClass": "nfs"}
+        }
+        cluster.storage = [{"metadata": {"name": "nfs"}}]
+        cluster.preflight()
+
+        self.config = configuration()
+        cluster = self.cluster()
+        cluster.config["gateway"]["values"] = {
+            "server": {"workspaceStorageClass": "nfs"}
+        }
+        cluster.storage = [{"metadata": {"name": "nfs"}}]
+        with self.assertRaisesRegex(ValueError, "SQLite"):
+            cluster.preflight()
+
+    def test_postgresql_preflight_reports_storage_class_without_explaining(self):
+        self.database_config()
+        cluster = self.cluster()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.cluster_checks(None)
+        self.assertIn("Default StorageClass: block\n", output.getvalue())
+        self.assertNotIn("workspace", output.getvalue().lower())
+
+        cluster.storage = [{"metadata": {"name": "custom"}}]
+        cluster.config["gateway"]["values"] = {
+            "server": {"workspaceStorageClass": "custom"}
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.cluster_checks(None)
+        self.assertIn("Default StorageClass: none\n", output.getvalue())
+        self.assertIn("server.workspaceStorageClass: custom", output.getvalue())
+
+    def test_database_state_blocks_switching(self):
+        cluster = self.cluster()
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+        self.database_config()
+        cluster.config = self.load()
+        with self.assertRaisesRegex(ValueError, "Database backend differs"):
+            cluster.preflight()
+
+    def test_incomplete_installer_state_is_rejected(self):
+        # State without the full identity (for example from a pre-release
+        # installer) must not pass as a match: a missing database-mode would
+        # otherwise let a rerun switch backends without the guard.
+        self.config["gateway"].pop("database")
+        (self.root / installer.DB_URI_FILE).write_text(
+            "postgresql://openshell:secret@db.example.com:5432/openshell\n"
+        )
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}}
+        }
+        cluster.objects[("configmap", installer.INSTALL_STATE)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
+            "data": {"gateway-host": cluster.config["gateway"]["host"]},
+        }
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "does not record database-mode"):
+            cluster.preflight()
+        self.assertEqual(cluster.objects, before)
+        for key in cluster.identity_state():
+            if key == "gateway-host":
+                continue  # checked earlier, as the hostname guard
+            data = cluster.identity_state()
+            del data[key]
+            cluster.objects[("configmap", installer.INSTALL_STATE)]["data"] = data
+            before = copy.deepcopy(cluster.objects)
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(ValueError, f"does not record {key}"),
+            ):
+                cluster.preflight()
+            self.assertEqual(cluster.objects, before)
+
+    def test_database_preflight_reports_without_creating_the_secret(self):
+        self.database_config()
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cluster.preflight()
+        self.assertIn("will be created", output.getvalue())
+        self.assertNotIn(("secret", installer.DB_SECRET), cluster.objects)
+
     def test_cross_namespace_identity_reuse_is_rejected(self):
         for field in ("oidc-audience", "oidc-client-id"):
             cluster = self.cluster()
@@ -377,7 +658,7 @@ class InstallTests(unittest.TestCase):
             any(args[:3] == ["helm", "get", "manifest"] for args, _ in cluster.calls)
         )
         cluster.objects[("secret", "openshell-server-tls")] = {"data": {}}
-        with self.assertRaisesRegex(ValueError, "explicit migration"):
+        with self.assertRaisesRegex(ValueError, "--adopt-existing"):
             cluster.preflight()
 
     def test_preflight_rejects_credential_drift_without_changing_state(self):
@@ -509,6 +790,8 @@ class InstallTests(unittest.TestCase):
         }
         cluster.objects[("namespace", cluster.ns)] = copy.deepcopy(namespace)
         cluster.install(["gateway.tgz", "dashboard.tgz"], ["g.json", "d.json"])
+        # The admin namespace carries no installer marker, so reruns adopt it.
+        cluster.adopt_existing = True
         cluster.install(["gateway.tgz", "dashboard.tgz"], ["g.json", "d.json"])
         self.assertEqual(cluster.objects[("namespace", cluster.ns)], namespace)
         self.assertEqual(
@@ -659,29 +942,131 @@ class InstallTests(unittest.TestCase):
         cluster.objects[("secret", "openshell-server-tls")] = {
             "data": {"tls.crt": "old"}
         }
-        with self.assertRaisesRegex(ValueError, "explicit migration"):
+        with self.assertRaisesRegex(ValueError, "--adopt-existing"):
             cluster.install([], [])
 
-    def test_legacy_install_migrates_without_modifying_namespace(self):
+    def test_forged_installer_state_in_preexisting_namespace_requires_adoption(self):
         cluster = self.cluster()
-        namespace = {
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        cluster.objects[("configmap", installer.INSTALL_STATE)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
+            "data": cluster.identity_state(),
+        }
+        reusable = (*installer.PKI_SECRETS, installer.CREDENTIAL_KEK_SECRET)
+        for name in reusable:
+            cluster.objects[("secret", name)] = {"data": {"planted": "MQ=="}}
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "--adopt-existing") as raised:
+            cluster.preflight()
+        self.assertIn(f"configmap/{installer.INSTALL_STATE}", str(raised.exception))
+        for name in reusable:
+            self.assertIn(f"secret/{name}", str(raised.exception))
+        self.assertEqual(cluster.objects, before)
+        # The explicit flag is the administrator's assertion of ownership.
+        cluster.adopt_existing = True
+        cluster.preflight()
+
+    def test_preexisting_dashboard_oidc_secret_alone_requires_adoption(self):
+        # A planted cookie secret would otherwise be reused by the dashboard.
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {"metadata": {}}
+        cluster.objects[("secret", installer.OIDC_SECRET)] = {
+            "data": {"planted": "MQ=="}
+        }
+        before = copy.deepcopy(cluster.objects)
+        with self.assertRaisesRegex(ValueError, "--adopt-existing") as raised:
+            cluster.preflight()
+        self.assertIn(f"secret/{installer.OIDC_SECRET}", str(raised.exception))
+        self.assertEqual(cluster.objects, before)
+
+    def test_namespace_owner_label_grants_ownership_without_adoption(self):
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}}
+        }
+        cluster.objects[("configmap", installer.INSTALL_STATE)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
+            "data": cluster.identity_state(),
+        }
+        cluster.preflight()
+
+    def test_namespace_annotation_does_not_grant_ownership(self):
+        # Only the owner label on the Namespace proves the installer created it.
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {
             "metadata": {
-                "labels": {installer.OWNER: installer.OWNER_VALUE},
                 "annotations": {
-                    installer.GATEWAY_HOST: cluster.config["gateway"]["host"]
-                },
+                    "openshell.ai/installer-gateway-host": cluster.config["gateway"][
+                        "host"
+                    ]
+                }
             }
         }
-        cluster.objects[("namespace", cluster.ns)] = copy.deepcopy(namespace)
-        cluster.releases = [{"name": "openshell", "chart": "helm-chart-0.1.3"}]
+        cluster.objects[("configmap", installer.INSTALL_STATE)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}},
+            "data": cluster.identity_state(),
+        }
+        with self.assertRaisesRegex(ValueError, "--adopt-existing"):
+            cluster.preflight()
+
+    def test_owned_namespace_without_state_requires_adoption(self):
+        # A deleted state ConfigMap must not let a rerun reuse orphaned certs.
+        cluster = self.cluster()
+        cluster.objects[("namespace", cluster.ns)] = {
+            "metadata": {"labels": {installer.OWNER: installer.OWNER_VALUE}}
+        }
+        cluster.objects[("secret", "openshell-server-tls")] = {"data": {"old": "MQ=="}}
+        with self.assertRaisesRegex(ValueError, "--adopt-existing"):
+            cluster.preflight()
+        cluster.adopt_existing = True
+        cluster.preflight()
+
+    def test_installer_created_namespace_carries_the_ownership_label(self):
+        cluster = self.cluster()
         cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
-        self.assertEqual(cluster.objects[("namespace", cluster.ns)], namespace)
+        namespace = cluster.objects[("namespace", cluster.ns)]
         self.assertEqual(
-            cluster.objects[("configmap", installer.INSTALL_STATE)]["data"][
-                "gateway-host"
-            ],
-            cluster.config["gateway"]["host"],
+            namespace["metadata"]["labels"][installer.OWNER], installer.OWNER_VALUE
         )
+        # The rerun finds reusable objects, which would require adoption in an
+        # unowned namespace; the label proves ownership, so no flag is needed.
+        self.assertIn(("configmap", installer.INSTALL_STATE), cluster.objects)
+        self.assertIn(("secret", installer.OIDC_SECRET), cluster.objects)
+        cluster.install(["g.tgz", "d.tgz"], ["g.json", "d.json"])
+
+    def test_adopt_existing_flag_is_forwarded_to_preflight(self):
+        path = self.root / "config.json"
+        path.write_text(json.dumps(self.config))
+        seen = []
+
+        def run(_instance, args, _payload=None):
+            if args[:2] == ["helm", "pull"]:
+                (Path(args[args.index("--destination") + 1]) / "chart.tgz").write_bytes(
+                    b"fake"
+                )
+            return ""
+
+        def preflight(instance):
+            seen.append(instance.adopt_existing)
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "install.py",
+                    "--config",
+                    str(path),
+                    "--preflight",
+                    "--adopt-existing",
+                ],
+            ),
+            patch.object(installer.shutil, "which", return_value="tool"),
+            patch.object(installer.Installer, "run", run),
+            patch.object(installer.Installer, "preflight", preflight),
+            redirect_stdout(io.StringIO()),
+        ):
+            installer.main()
+        self.assertEqual(seen, [True])
 
     def test_missing_prerequisite_stops_before_mutation(self):
         cluster = self.cluster()
@@ -738,6 +1123,7 @@ class InstallTests(unittest.TestCase):
                 cluster.objects[("secret", installer.OIDC_SECRET)] = copy.deepcopy(
                     existing
                 )
+                cluster.adopt_existing = True
                 path = Path(cluster.config["oidc"]["client_secret_file"])
                 if supplied is None:
                     cluster.config["oidc"].pop("client_secret_file")
@@ -906,8 +1292,11 @@ class InstallTests(unittest.TestCase):
             args = call.args[0]
             self.assertEqual(args[args.index("--namespace") + 1], "render-project")
 
-    def check_render(self, extra=()):
-        """Run --check with local source charts and return rendered value files."""
+    def check_render(self, extra=(), manifest=""):
+        """Run --check with local source charts and return rendered value files.
+
+        Each chart renders as ``manifest``; stderr is kept in self.check_errors.
+        """
         path = self.root / "config.json"
         path.write_text(json.dumps(self.config))
         for chart in ("gateway", "dashboard"):
@@ -921,7 +1310,7 @@ class InstallTests(unittest.TestCase):
             rendered.append(
                 json.loads(Path(args[args.index("--values") + 1]).read_text())
             )
-            return ""
+            return manifest
 
         argv = [
             "install.py",
@@ -934,7 +1323,7 @@ class InstallTests(unittest.TestCase):
             str(self.root / "dashboard"),
             *extra,
         ]
-        output = io.StringIO()
+        output, errors = io.StringIO(), io.StringIO()
         with (
             patch("sys.argv", argv),
             patch.object(installer.shutil, "which", return_value="helm"),
@@ -950,8 +1339,10 @@ class InstallTests(unittest.TestCase):
                 side_effect=AssertionError("--check accessed the cluster"),
             ),
             redirect_stdout(output),
+            redirect_stderr(errors),
         ):
             installer.main()
+        self.check_errors = errors.getvalue()
         return rendered, output.getvalue()
 
     def test_example_configs_omit_context_and_hosts(self):
@@ -966,16 +1357,30 @@ class InstallTests(unittest.TestCase):
     def test_pinned_example_configs_load(self):
         examples = Path(__file__).with_name("config-examples")
         for path in sorted(examples.glob("config.example-*.json")):
+            # The generic example keeps placeholders; only pinned examples load.
+            if "REPLACE_WITH" in path.read_text():
+                continue
             with self.subTest(path=path.name):
                 target = self.root / path.name
                 target.write_text(path.read_text())
                 (self.root / "dashboard-client-secret.txt").write_text("secret\n")
                 (self.root / "ingress-ca.crt").write_text("test CA\n")
+                (self.root / "gateway-db-uri.txt").write_text(
+                    "postgresql://openshell:secret@db.example.com:5432/openshell\n"
+                )
                 config = installer.load_config(target)
                 installer.resolve_hosts(config, "apps.example.com")
                 self.assertNotEqual(
                     config["gateway"]["host"], config["dashboard"]["host"]
                 )
+
+    def test_example_filenames_name_the_database_mode(self):
+        examples = Path(__file__).with_name("config-examples")
+        for path in sorted(examples.glob("config.example*.json")):
+            database = json.loads(path.read_text())["gateway"]["database"]
+            expected = "sqlite" if "sqlite" in path.name else "postgresql"
+            with self.subTest(path=path.name):
+                self.assertEqual(database["mode"], expected)
 
     def test_resolve_hosts_derives_namespace_qualified_hosts(self):
         self.config = configuration(with_hosts=False)
@@ -1064,9 +1469,12 @@ class InstallTests(unittest.TestCase):
         path.write_text(json.dumps(self.config))
         clusters = []
 
-        def factory(config, _timeout, context=None, _config_dir=None):
+        def factory(
+            config, _timeout, context=None, _config_dir=None, adopt_existing=False
+        ):
             cluster = FakeCluster(config)
             cluster._context = context
+            cluster.adopt_existing = adopt_existing
             clusters.append(cluster)
             return cluster
 
@@ -1288,6 +1696,63 @@ class InstallTests(unittest.TestCase):
         self.config = configuration(with_hosts=False)
         _, output = self.check_render(["--apps-domain", "apps.cluster.example.com"])
         self.assertNotIn("rendered hosts are derived from", output)
+
+    def test_unpinned_images_reads_container_and_gateway_config_images(self):
+        pinned = "registry.example.com/rhoai/gateway@sha256:" + "a" * 64
+        manifest = (
+            "kind: ConfigMap\n"
+            "data:\n"
+            "  gateway.toml: |\n"
+            f'    supervisor_image = "{pinned}"\n'
+            '    default_image = "quay.io/example/sandbox:v1"\n'
+            '    supervisor_image_pull_policy = "if_not_present"\n'
+            "---\n"
+            "kind: Deployment\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            f'        - image: "{pinned}"\n'
+            "          imagePullPolicy: IfNotPresent\n"
+            "        - name: proxy\n"
+            "          image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0\n"
+        )
+        self.assertEqual(
+            installer.unpinned_images(manifest),
+            [
+                "quay.io/example/sandbox:v1",
+                "quay.io/oauth2-proxy/oauth2-proxy:v7.6.0",
+            ],
+        )
+
+    def test_check_warns_about_images_without_digest(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - image: quay.io/opendatahub/odh-openshell-gateway:v0.1.7\n"
+        )
+        _, output = self.check_render(manifest=manifest)
+        self.assertIn("Both charts rendered successfully.", output)
+        self.assertIn("1 rendered image(s) are not pinned by digest", self.check_errors)
+        self.assertIn(
+            "- quay.io/opendatahub/odh-openshell-gateway:v0.1.7", self.check_errors
+        )
+        self.assertIn("disconnected cluster", self.check_errors)
+
+    def test_check_does_not_warn_when_every_image_has_a_digest(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - image: registry.example.com/gateway@sha256:" + "b" * 64 + "\n"
+        )
+        self.check_render(manifest=manifest)
+        self.assertNotIn("not pinned by digest", self.check_errors)
 
     def test_colorize_keeps_ansi_out_of_non_tty_output(self):
         class Tty(io.StringIO):

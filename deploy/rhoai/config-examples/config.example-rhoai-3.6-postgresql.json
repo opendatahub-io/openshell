@@ -4,25 +4,29 @@
     "chart": "oci://ghcr.io/nvidia/openshell/helm-chart",
     "version": "0.1.3",
     "values_files": [],
+    "database": {
+      "mode": "postgresql",
+      "uri_file": "gateway-db-uri.txt"
+    },
     "images": {
       "gateway": {
         "registry": "registry.redhat.io",
         "repository": "rhoai/odh-openshell-gateway-rhel9",
-        "digest": "sha256:e44fcae68918499143d4f2e6b19690d1209b5448e37d25258efdf6c928c1d35e"
+        "digest": "sha256:047f6737c921fc5f8c38140af9dd052d9c494c295eca52f91bd7f5c2cba0f079"
       },
       "supervisor": {
         "registry": "registry.redhat.io",
         "repository": "rhoai/odh-openshell-supervisor-rhel9",
-        "digest": "sha256:421aea28a9e233ad94a8223fbc2015a8f1f20022436f1855c5ac76c6277963d3"
+        "digest": "sha256:74730d0078db3eb39ba7b88e027100d49fa09018a8c048b85e07dcdde8cb579e"
       },
       "sandboxRuntime": {
         "registry": "registry.redhat.io",
         "repository": "rhoai/odh-openshell-sandbox-rhel9",
-        "digest": "sha256:d865fc8781cbdefca785def85fd75bdda6e2bc7ff8962670f80619e45b675292"
+        "digest": "sha256:f3edb7c938d7fdacc05ae40dd83656d6b737304aa3c29a55157bfad5719d8595"
       },
       "sandbox": {
         "repository": "registry.redhat.io/rhoai/odh-openshell-sandbox-rhel9",
-        "digest": "sha256:d865fc8781cbdefca785def85fd75bdda6e2bc7ff8962670f80619e45b675292"
+        "digest": "sha256:f3edb7c938d7fdacc05ae40dd83656d6b737304aa3c29a55157bfad5719d8595"
       }
     }
   },
@@ -34,7 +38,12 @@
       "dashboard": {
         "registry": "registry.redhat.io",
         "repository": "rhoai/odh-openshell-dashboard-rhel9",
-        "digest": "sha256:f4a254f6e03739af244758c22b05a3ef87061cf52ef51d4530e7375218317962"
+        "digest": "sha256:b1c4ae0e112ae974a7e61f62c7a5f6ed806585dec584e5289157d3c10ac12aa7"
+      },
+      "authProxy": {
+        "registry": "registry.access.redhat.com",
+        "repository": "hi/oauth2-proxy",
+        "digest": "sha256:fa4516e1c5bf6be0a7fc5291adc536e867951deee3449422a8bcfdef173c8edf"
       }
     }
   },
