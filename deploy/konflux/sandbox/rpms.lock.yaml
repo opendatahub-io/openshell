@@ -11,13 +11,13 @@ arches:
     name: glibc-devel
     evr: 2.34-290.el9_9
     sourcerpm: glibc-2.34-290.el9_9.src.rpm
-  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/aarch64/appstream/os/Packages/k/kernel-headers-5.14.0-741.24.1.el9_9.aarch64.rpm
+  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/aarch64/appstream/os/Packages/k/kernel-headers-5.14.0-741.28.1.el9_9.aarch64.rpm
     repoid: ubi-9-for-aarch64-appstream-rpms
-    size: 2737597
-    checksum: sha256:35f606314a37ee00302bc02a7cb82606c296d2e030853973d61b11f01e038e88
+    size: 2760629
+    checksum: sha256:66cb52398e0c4ec5df87f5fb8724329288017d9118c8b55770227fbf1948f832
     name: kernel-headers
-    evr: 5.14.0-741.24.1.el9_9
-    sourcerpm: kernel-5.14.0-741.24.1.el9_9.src.rpm
+    evr: 5.14.0-741.28.1.el9_9
+    sourcerpm: kernel-5.14.0-741.28.1.el9_9.src.rpm
   - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/aarch64/appstream/os/Packages/l/libxcrypt-devel-4.4.18-3.el9.aarch64.rpm
     repoid: ubi-9-for-aarch64-appstream-rpms
     size: 33051
@@ -176,13 +176,13 @@ arches:
     name: glibc-headers
     evr: 2.34-290.el9_9
     sourcerpm: glibc-2.34-290.el9_9.src.rpm
-  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/x86_64/appstream/os/Packages/k/kernel-headers-5.14.0-741.24.1.el9_9.x86_64.rpm
+  - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/x86_64/appstream/os/Packages/k/kernel-headers-5.14.0-741.28.1.el9_9.x86_64.rpm
     repoid: ubi-9-for-x86_64-appstream-rpms
-    size: 2776853
-    checksum: sha256:fa32ef8311cd60127da5f4b38f15b30d51f2f50c146124b9e1b6ab7028ea39d6
+    size: 2799893
+    checksum: sha256:14f9ab344324339a0ca4644d4c863ed69e4793b34480e66142f007784e3bbf3d
     name: kernel-headers
-    evr: 5.14.0-741.24.1.el9_9
-    sourcerpm: kernel-5.14.0-741.24.1.el9_9.src.rpm
+    evr: 5.14.0-741.28.1.el9_9
+    sourcerpm: kernel-5.14.0-741.28.1.el9_9.src.rpm
   - url: https://cdn-ubi.redhat.com/content/public/ubi/dist/ubi9/9/x86_64/appstream/os/Packages/l/libxcrypt-devel-4.4.18-3.el9.x86_64.rpm
     repoid: ubi-9-for-x86_64-appstream-rpms
     size: 33101
